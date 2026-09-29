@@ -400,5 +400,7 @@ The signed proposer accepts the existing Arkiv SDK over JSON-RPC at `/`; see
 [compatibility, limits and validation](docs/sdk-compatibility.md). New chains can
 use a [TOML genesis bundle with prefills](docs/examples/genesis-bundle/README.md).
 
-Browse the signed node’s [state tree exploration API](docs/state-tree-explorer-api.md)
+Browse the signed node’s [API reference](docs/node-api-reference.md)
 at `/docs` (Scalar), with an OpenAPI specification at `/openapi.json`.
+It covers every signed-node HTTP route, all 31 JSON-RPC methods, WebSocket
+subscriptions, and the separate private and metrics listeners.

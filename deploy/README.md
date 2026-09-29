@@ -1,9 +1,15 @@
 # API documentation hosting
 
-The signed node serves Scalar at `/docs` (also `/docs/`) and its tree exploration
+The signed node serves Scalar at `/docs` (also `/docs/`) and its node API
 OpenAPI specification at `/openapi.json`. Serve both paths through the existing
-node hostname; no additional DNS record is needed. The browser sends requests
-directly to `/signed/v1/state/explore` on the same origin.
+node hostname; no additional DNS record is needed. Public requests use the same
+origin by default. Select a node with the role required by the operation.
+
+The reference also describes WebSocket subscriptions, the separate metrics
+listener and bearer-authenticated private control/replication operations.
+Documentation does not publish those listeners. Keep the existing public proxy
+restrictions for `/signed/v1/control` and `/signed/v1/replication/` in place;
+private operations require the operator's separate listener and credentials.
 
 For an existing Arkiv v2 deployment, the two static assets can also be published
 without replacing or restarting a node:
@@ -39,3 +45,21 @@ Published at <https://full-node.rogue-one.eu/docs>, with the specification at
 - Nginx configuration validation passed. Deployment only installed static
   documentation assets and added exact routes to the full-node virtual host.
   Node and explorer containers were not restarted.
+
+### Expanded node reference
+
+The same URLs now cover 30 paths / 33 HTTP operations, all 31 HTTP JSON-RPC
+methods, and WebSocket subscription messages.
+
+- Three documentation coverage tests and all ten signed HTTP integration tests
+  passed with `--features arkiv-v2`.
+- OpenAPI structure and all 31 RPC request examples validated. Live checks
+  matched 25 native REST responses and 23 read-only JSON-RPC method results to
+  their schemas, including populated feeds, included transactions, account
+  proofs, nonempty equality/range results, and proof inspections.
+- Chromium exercised status, tree exploration, and JSON-RPC through Scalar on
+  the deployed origin. Desktop and mobile rendering passed without JavaScript
+  errors or mobile horizontal overflow.
+- Published HTML/specification bytes match the repository assets. Public
+  requests to control and replication routes still return 404. Deployment only
+  switched the static-asset release; no node or explorer restart was needed.

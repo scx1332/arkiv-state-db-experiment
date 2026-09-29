@@ -5,8 +5,9 @@
 Open `/docs` on the signed node public HTTP origin for the Scalar browser, or
 download `/openapi.json` for use in another OpenAPI client. No separate DNS entry
 or authentication is required. The browser sends requests directly to that same
-origin; no third-party request proxy is used. The reference covers this tree API,
-not the entire signed-node API.
+origin; no third-party request proxy is used. The reference covers all signed-node
+APIs, including this tree API. See
+[node API reference](node-api-reference.md) for role and listener selection.
 
 Select a request example, replace the illustrative height and namespace with
 values from your node, and use **Test Request** to execute it. The catalog example

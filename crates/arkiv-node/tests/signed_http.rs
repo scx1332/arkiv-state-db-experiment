@@ -1197,3 +1197,66 @@ async fn state_explorer_walks_pinned_real_nodes_and_nested_postings() {
     assert!(old["node"].is_null());
     assert_eq!(old["map"]["count"], "0");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn state_api_documentation_is_public_and_independent_of_storage_lock() {
+    let rt = Runtime::new(Node::Full(Box::new(host(true))), None, None, None).unwrap();
+    let public = serve(runtime::public_router(rt.clone())).await;
+    let client = reqwest::Client::new();
+    // Documentation remains available even while the node is doing storage work.
+    let locked = rt.node.lock().unwrap();
+    for path in ["/docs", "/docs/"] {
+        let response = client
+            .get(format!("{}{path}", public.url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert!(
+            response.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html")
+        );
+        let html = response.text().await.unwrap();
+        assert!(html.contains("@scalar/api-reference@1.72.2/"));
+        assert!(html.contains("url: '/openapi.json'"));
+        assert!(!html.contains("proxy.scalar.com"));
+    }
+    let response = client
+        .get(format!("{}/openapi.json", public.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    let spec: Value = response.json().await.unwrap();
+    drop(locked);
+    assert_eq!(spec["openapi"], "3.1.0");
+    assert_eq!(spec["servers"][0]["url"], "/");
+    assert_eq!(
+        spec["components"]["schemas"]["Path"]["maxItems"],
+        arkiv_db::engine::explore::MAX_TREE_PATH
+    );
+    let operation = &spec["paths"]["/signed/v1/state/explore"]["post"];
+    let example =
+        &operation["requestBody"]["content"]["application/json"]["examples"]["catalog"]["value"];
+    let response = post(&client, &public.url, "state/explore", example.clone()).await;
+    assert_eq!(response.status(), 200);
+    let result: Value = response.json().await.unwrap();
+    assert_eq!(result["snapshot"]["height"], example["height"]);
+    assert!(result["node"].is_null());
+    let error = post(
+        &client,
+        &public.url,
+        "state/explore",
+        json!({"height":"0", "map":"invalid"}),
+    )
+    .await;
+    assert_eq!(error.status(), 422);
+    assert_eq!(
+        error.json::<Value>().await.unwrap(),
+        operation["responses"]["422"]["content"]["application/json"]["examples"]["InvalidRequest"]
+            ["value"]
+    );
+}

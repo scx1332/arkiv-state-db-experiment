@@ -399,3 +399,6 @@ Native signed chains can opt into [GLM balances and fee burning](docs/glm-accoun
 The signed proposer accepts the existing Arkiv SDK over JSON-RPC at `/`; see
 [compatibility, limits and validation](docs/sdk-compatibility.md). New chains can
 use a [TOML genesis bundle with prefills](docs/examples/genesis-bundle/README.md).
+
+Browse the signed node’s [state tree exploration API](docs/state-tree-explorer-api.md)
+at `/docs` (Scalar), with an OpenAPI specification at `/openapi.json`.

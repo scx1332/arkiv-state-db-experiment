@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Interactive reference for the Arkiv state tree exploration API." />
+    <title>Arkiv State Tree API</title>
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; }
+      .docs-fallback { padding: 24px; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div class="docs-fallback">
+        <h1>Arkiv State Tree API</h1>
+        <p>Loading the interactive reference…</p>
+        <p>You can also <a href="/openapi.json">download the OpenAPI specification</a>.</p>
+        <noscript>Enable JavaScript to use the interactive API client.</noscript>
+      </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.72.2/dist/browser/standalone.js" crossorigin="anonymous"></script>
+    <script>
+      if (window.Scalar) {
+        Scalar.createApiReference('#app', {
+          url: '/openapi.json',
+          theme: 'purple',
+          layout: 'modern',
+          showDeveloperTools: 'never',
+          agent: { disabled: true },
+          mcp: { disabled: true },
+          telemetry: false,
+          persistAuth: false,
+          withDefaultFonts: false,
+          orderSchemaPropertiesBy: 'preserve',
+          defaultHttpClient: { targetKey: 'shell', clientKey: 'curl' },
+          onLoaded: () => document.querySelector('.docs-fallback')?.remove(),
+        });
+      } else {
+        document.querySelector('.docs-fallback p').textContent =
+          'The interactive reference could not load. Check your connection to cdn.jsdelivr.net or download the specification below.';
+      }
+    </script>
+  </body>
+</html>

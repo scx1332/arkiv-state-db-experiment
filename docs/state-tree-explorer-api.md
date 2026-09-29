@@ -1,5 +1,29 @@
 # State tree exploration API
 
+## Interactive API reference
+
+Open `/docs` on the signed node public HTTP origin for the Scalar browser, or
+download `/openapi.json` for use in another OpenAPI client. No separate DNS entry
+or authentication is required. The browser sends requests directly to that same
+origin; no third-party request proxy is used. The reference covers this tree API,
+not the entire signed-node API.
+
+Select a request example, replace the illustrative height and namespace with
+values from your node, and use **Test Request** to execute it. The catalog example
+at height `0` is a useful first request (normally an empty tree). To navigate
+populated trees, keep height fixed and copy nonempty `children[].path` values;
+for postings, copy a term leaf’s `decoded.termPath` to `termPath`.
+
+Scalar JavaScript is loaded from jsDelivr at pinned version `1.72.2`; the
+interactive UI requires access to that CDN. The specification and API stay on
+the node. The HTML contains a direct specification link if the script cannot
+load. No Rust dependency or frontend build step is needed. The embedded OpenAPI
+schemas and examples live beside the handler in
+`crates/arkiv-node/src/signed/state-openapi.json`; update them when the wire format
+changes. The signed API uses the Arkiv v2 layout (at most 328 path steps).
+
+## Endpoint
+
 `POST /signed/v1/state/explore` is an additive, read-only diagnostic API on a
 signed full node. It opens one actual node in a retained snapshot. It does not
 scan or materialize a whole tree, accept arbitrary object IDs, expose host-map

@@ -1,0 +1,835 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Arkiv State Tree Exploration API",
+    "version": "1.0.0",
+    "description": "Explore retained state on a signed full node. This reference covers the diagnostic tree endpoint, not the entire signed-node API.\n\nStart with catalog, discover a namespace, then open records, keys, rows or terms. Follow returned nonempty child paths; for a terms leaf, use its termPath to open postings. Keep height fixed throughout. The examples use illustrative heights, namespaces and paths; adapt them to your node.\n\nRequests are read-only and need no authentication. Despite the /signed prefix, requests do not need a signature: the node retains signed block certificates. Responses are exploratory, not light-client proofs. Host-map contents are not exposed. Request limit: 64 KiB; raw node RLP plus value limit: 384 KiB; response limit: 1 MiB. Four shared jobs and storage locking bound concurrent reads."
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "This node (same origin)"
+    }
+  ],
+  "tags": [
+    {
+      "name": "State trees",
+      "description": "Inspect one real trie node per request."
+    }
+  ],
+  "paths": {
+    "/signed/v1/state/explore": {
+      "post": {
+        "tags": [
+          "State trees"
+        ],
+        "operationId": "exploreStateTree",
+        "summary": "Explore a retained state tree node",
+        "description": "Select a map and root-relative path. Missing namespaces, invalid routes and walking beyond a leaf fail explicitly. This endpoint runs only on full nodes (including producers); light nodes return UnsupportedNodeRole.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExploreRequest"
+              },
+              "examples": {
+                "catalog": {
+                  "summary": "Start at the catalog root",
+                  "value": {
+                    "height": "0",
+                    "map": "catalog",
+                    "path": []
+                  },
+                  "description": "Genesis normally has an empty catalog. Replace height with a retained block height containing your data."
+                },
+                "rows": {
+                  "summary": "Open a namespace row tree",
+                  "value": {
+                    "height": "2",
+                    "map": "rows",
+                    "namespace": "1",
+                    "path": []
+                  },
+                  "description": "Use a namespace discovered in a catalog leaf and a retained height."
+                },
+                "terms": {
+                  "summary": "Open a namespace term index",
+                  "value": {
+                    "height": "2",
+                    "map": "terms",
+                    "namespace": "1",
+                    "path": []
+                  }
+                },
+                "child": {
+                  "summary": "Follow a returned child path",
+                  "value": {
+                    "height": "2",
+                    "map": "terms",
+                    "namespace": "1",
+                    "path": [
+                      0
+                    ]
+                  },
+                  "description": "Illustrative path only: replace [0] with a nonempty children[].path from your response."
+                },
+                "postings": {
+                  "summary": "Open postings for a term leaf",
+                  "value": {
+                    "height": "2",
+                    "map": "postings",
+                    "namespace": "1",
+                    "termPath": [
+                      0
+                    ],
+                    "path": []
+                  },
+                  "description": "Replace termPath with decoded.termPath from an actual terms leaf at the same height. Paths are data-dependent."
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One node from the selected retained tree, or node:null for an empty map.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExploreResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid input, unsupported role, unknown height/path, integrity failure, or response capacity limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "InvalidRequest": {
+                    "summary": "InvalidRequest",
+                    "value": {
+                      "error": "InvalidRequest"
+                    }
+                  },
+                  "UnsupportedNodeRole": {
+                    "summary": "UnsupportedNodeRole",
+                    "value": {
+                      "error": "UnsupportedNodeRole"
+                    }
+                  },
+                  "TreePathNotFound": {
+                    "summary": "TreePathNotFound",
+                    "value": {
+                      "error": "TreePathNotFound"
+                    }
+                  },
+                  "InvalidProof": {
+                    "summary": "InvalidProof",
+                    "value": {
+                      "error": "InvalidProof"
+                    }
+                  },
+                  "ResponseTooLarge": {
+                    "summary": "ResponseTooLarge",
+                    "value": {
+                      "error": "ResponseTooLarge"
+                    }
+                  },
+                  "CapacityReached": {
+                    "summary": "CapacityReached",
+                    "value": {
+                      "error": "CapacityReached"
+                    }
+                  },
+                  "BlockNotSynced": {
+                    "summary": "BlockNotSynced",
+                    "value": {
+                      "error": "BlockNotSynced"
+                    }
+                  },
+                  "StorageCorrupt": {
+                    "summary": "StorageCorrupt",
+                    "value": {
+                      "error": "StorageCorrupt"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "All four read jobs are occupied or the node storage lock is busy. Retry later.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "ServerBusy": {
+                    "summary": "ServerBusy",
+                    "value": {
+                      "error": "ServerBusy"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Storage or retained history unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "StorageUnavailable": {
+                    "summary": "StorageUnavailable",
+                    "value": {
+                      "error": "StorageUnavailable"
+                    }
+                  },
+                  "HistoryUnavailable": {
+                    "summary": "HistoryUnavailable",
+                    "value": {
+                      "error": "HistoryUnavailable"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Decimal": {
+        "type": "string",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "description": "Unsigned 64-bit integer encoded as canonical decimal text (maximum 18446744073709551615)."
+      },
+      "Bytes": {
+        "type": "string",
+        "pattern": "^0x([0-9a-f]{2})*$",
+        "description": "Hexadecimal bytes, including the 0x prefix."
+      },
+      "Hash": {
+        "type": "string",
+        "pattern": "^0x[0-9a-f]{64}$"
+      },
+      "Path": {
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16
+        },
+        "default": [],
+        "description": "Root-relative child slots: branch 0\u201315; extension child 16. Copy children[].path from the preceding response. Smaller per-map key-width bounds also apply.",
+        "maxItems": 328
+      },
+      "ExploreRequest": {
+        "type": "object",
+        "properties": {
+          "height": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "map": {
+            "type": "string",
+            "enum": [
+              "catalog",
+              "records",
+              "keys",
+              "rows",
+              "terms",
+              "postings"
+            ],
+            "default": "catalog"
+          },
+          "namespace": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "path": {
+            "$ref": "#/components/schemas/Path"
+          },
+          "termPath": {
+            "$ref": "#/components/schemas/Path",
+            "description": "For postings, the path of a reachable term leaf in the namespace terms tree. Omit or use [] for other maps. An empty path is valid for postings only when the terms root is a leaf."
+          }
+        },
+        "required": [
+          "height"
+        ],
+        "additionalProperties": false,
+        "description": "Pin every request to a retained height. Catalog requires namespace omitted or null; every other map requires a nonzero namespace ordinal. Unknown fields are rejected."
+      },
+      "Identity": {
+        "type": "object",
+        "properties": {
+          "sourceId": {
+            "type": "string",
+            "description": "Source UUID."
+          },
+          "runId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "genesisHash": {
+            "$ref": "#/components/schemas/Bytes"
+          },
+          "chainId": {
+            "$ref": "#/components/schemas/Decimal"
+          }
+        },
+        "required": [
+          "sourceId",
+          "runId",
+          "genesisHash",
+          "chainId"
+        ],
+        "additionalProperties": false
+      },
+      "Snapshot": {
+        "type": "object",
+        "properties": {
+          "height": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "hash": {
+            "$ref": "#/components/schemas/Hash"
+          },
+          "stateRoot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Hash"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "height",
+          "hash",
+          "stateRoot"
+        ],
+        "additionalProperties": false
+      },
+      "MapRoot": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "records",
+              "keys",
+              "rows",
+              "terms"
+            ]
+          },
+          "root": {
+            "$ref": "#/components/schemas/Hash"
+          },
+          "count": {
+            "$ref": "#/components/schemas/Decimal"
+          }
+        },
+        "required": [
+          "kind",
+          "root",
+          "count"
+        ],
+        "additionalProperties": false
+      },
+      "NamespaceLeaf": {
+        "type": "object",
+        "properties": {
+          "namespace": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/Bytes"
+          },
+          "maps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MapRoot"
+            }
+          }
+        },
+        "required": [
+          "namespace",
+          "name",
+          "owner",
+          "maps"
+        ],
+        "additionalProperties": false
+      },
+      "TypedValue": {
+        "type": [
+          "string",
+          "boolean"
+        ],
+        "description": "Booleans are JSON booleans. Numbers and decimals are text; byte, address and key values are 0x-prefixed hexadecimal; strings are plain text."
+      },
+      "ValueType": {
+        "type": "string",
+        "enum": [
+          "bool",
+          "i64",
+          "u64",
+          "str",
+          "bytes",
+          "i32",
+          "u256",
+          "dec",
+          "bytes32",
+          "addr",
+          "key"
+        ]
+      },
+      "TermLeaf": {
+        "type": "object",
+        "properties": {
+          "attribute": {
+            "type": "string"
+          },
+          "valueType": {
+            "$ref": "#/components/schemas/ValueType"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TypedValue"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "existence": {
+            "type": "boolean"
+          },
+          "postingRoot": {
+            "$ref": "#/components/schemas/Hash"
+          },
+          "postingCount": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "termPath": {
+            "$ref": "#/components/schemas/Path"
+          }
+        },
+        "required": [
+          "attribute",
+          "valueType",
+          "value",
+          "existence",
+          "postingRoot",
+          "postingCount",
+          "termPath"
+        ],
+        "additionalProperties": false
+      },
+      "RecordIdLeaf": {
+        "type": "object",
+        "properties": {
+          "recordId": {
+            "$ref": "#/components/schemas/Decimal"
+          }
+        },
+        "required": [
+          "recordId"
+        ],
+        "additionalProperties": false
+      },
+      "Cell": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "attribute",
+              "field"
+            ]
+          },
+          "valueType": {
+            "$ref": "#/components/schemas/ValueType"
+          },
+          "value": {
+            "$ref": "#/components/schemas/TypedValue"
+          },
+          "valueTruncated": {
+            "type": "boolean"
+          },
+          "byteLength": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "valueType",
+          "value",
+          "valueTruncated",
+          "byteLength"
+        ],
+        "additionalProperties": false,
+        "description": "Strings preview at most 256 characters; bytes at most 32 bytes. byteLength is the original byte length for strings/bytes, otherwise null. Complete values remain in raw node bytes."
+      },
+      "RowLeaf": {
+        "type": "object",
+        "properties": {
+          "recordId": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "recordKey": {
+            "$ref": "#/components/schemas/Bytes"
+          },
+          "cellCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cells": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Cell"
+            }
+          }
+        },
+        "required": [
+          "recordId",
+          "recordKey",
+          "cellCount",
+          "cells"
+        ],
+        "additionalProperties": false
+      },
+      "Child": {
+        "type": "object",
+        "properties": {
+          "slot": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 16
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "empty",
+              "inline",
+              "hash"
+            ]
+          },
+          "hash": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Hash"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rlp": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Bytes"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "path": {
+            "$ref": "#/components/schemas/Path"
+          }
+        },
+        "required": [
+          "slot",
+          "kind",
+          "hash",
+          "rlp",
+          "path"
+        ],
+        "additionalProperties": false,
+        "description": "Only follow nonempty children. Inline children include their embedded RLP; hash references have no inline RLP."
+      },
+      "TreeNode": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "$ref": "#/components/schemas/Path"
+          },
+          "prefix": {
+            "type": "string",
+            "pattern": "^[0-9a-f]*$"
+          },
+          "hash": {
+            "$ref": "#/components/schemas/Hash"
+          },
+          "rlp": {
+            "$ref": "#/components/schemas/Bytes"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "leaf",
+              "extension",
+              "branch"
+            ]
+          },
+          "compressedPath": {
+            "type": "string",
+            "pattern": "^[0-9a-f]*$"
+          },
+          "key": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Bytes"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "valueBytes": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Bytes"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "decoded": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NamespaceLeaf"
+              },
+              {
+                "$ref": "#/components/schemas/TermLeaf"
+              },
+              {
+                "$ref": "#/components/schemas/RecordIdLeaf"
+              },
+              {
+                "$ref": "#/components/schemas/RowLeaf"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "children": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Child"
+            }
+          }
+        },
+        "required": [
+          "path",
+          "prefix",
+          "hash",
+          "rlp",
+          "kind",
+          "compressedPath",
+          "key",
+          "valueBytes",
+          "decoded",
+          "children"
+        ],
+        "additionalProperties": false,
+        "description": "One actual trie node. Prefix and compressedPath are hexadecimal nibbles without 0x. Raw records and non-leaf nodes have decoded:null."
+      },
+      "ExploreResponse": {
+        "type": "object",
+        "properties": {
+          "apiVersion": {
+            "type": "integer",
+            "const": 1
+          },
+          "identity": {
+            "$ref": "#/components/schemas/Identity"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/Snapshot"
+          },
+          "certificateBytes": {
+            "$ref": "#/components/schemas/Bytes"
+          },
+          "verification": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "exploratory"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "full-node"
+                ]
+              }
+            },
+            "required": [
+              "status",
+              "source"
+            ],
+            "additionalProperties": false
+          },
+          "stateComposition": {
+            "type": "object",
+            "properties": {
+              "domain": {
+                "type": "string",
+                "enum": [
+                  "arkiv/state/v1"
+                ]
+              },
+              "encodedHeader": {
+                "$ref": "#/components/schemas/Bytes"
+              },
+              "stateRoot": {
+                "$ref": "#/components/schemas/Hash"
+              },
+              "catalogRoot": {
+                "$ref": "#/components/schemas/Hash"
+              },
+              "catalogCount": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "hostRoot": {
+                "$ref": "#/components/schemas/Hash"
+              },
+              "hostCount": {
+                "$ref": "#/components/schemas/Decimal"
+              }
+            },
+            "required": [
+              "domain",
+              "encodedHeader",
+              "stateRoot",
+              "catalogRoot",
+              "catalogCount",
+              "hostRoot",
+              "hostCount"
+            ],
+            "additionalProperties": false
+          },
+          "map": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "catalog",
+                  "records",
+                  "keys",
+                  "rows",
+                  "terms",
+                  "postings"
+                ]
+              },
+              "namespace": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "root": {
+                "$ref": "#/components/schemas/Hash"
+              },
+              "count": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "termPath": {
+                "$ref": "#/components/schemas/Path"
+              }
+            },
+            "required": [
+              "kind",
+              "namespace",
+              "root",
+              "count",
+              "termPath"
+            ],
+            "additionalProperties": false
+          },
+          "node": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TreeNode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "apiVersion",
+          "identity",
+          "snapshot",
+          "certificateBytes",
+          "verification",
+          "stateComposition",
+          "map",
+          "node"
+        ],
+        "additionalProperties": false,
+        "description": "node:null denotes an empty map. Integrity is checked by the full node; this response is not an independently verified browser proof."
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Machine-readable error code."
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}

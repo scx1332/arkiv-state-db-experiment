@@ -3,6 +3,8 @@
 mod range_api;
 #[path = "state_api.rs"]
 mod state_api;
+#[path = "state_docs.rs"]
+mod state_docs;
 use super::{
     Error, Result,
     host::Host,
@@ -623,6 +625,9 @@ async fn private(
 }
 pub fn public_router(rt: Shared) -> Router {
     Router::new()
+        .route("/docs", get(state_docs::html))
+        .route("/docs/", get(state_docs::html))
+        .route("/openapi.json", get(state_docs::openapi))
         .route(
             "/",
             axum::routing::post(super::rpc::http).get(super::rpc_ws::upgrade),

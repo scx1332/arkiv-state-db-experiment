@@ -1,0 +1,42 @@
+# Small-chain authoring: no hashes, byte lengths or pricing arrays to maintain.
+# `arkiv-proposer genesis lock` generates those for the bounded protocol-4 builder.
+schema = "arkiv-genesis-bundle-v1"
+protocol = "arkiv-launch-prefill-v1"
+name = "Small catalog"
+profile = { preset = "arkiv-entity-v2/glm-v2@1" }
+
+[chain]
+id = "9002"
+run_id = "0x00000000000000000000000000000001"
+start_time = "2027-01-01T00:00:00Z"
+block_period_ms = "5000"
+proposer = "@catalog"
+
+[allocations]
+expected_initial_supply_wei = "10000000000000000000000"
+
+[[allocations.entry]]
+label = "catalog"
+address = "0x2222222222222222222222222222222222222222"
+balance_wei = "10000000000000000000000" # 10,000 GLM
+
+[prefill]
+builder = "arkiv-prefill-v1"
+namespace = "entities"
+rent_policy = "sponsored-rent-v1"
+sponsor = "@catalog"
+
+[prefill.limits]
+max_entities = "100"
+max_canonical_bytes = "1048576"
+max_storage_units = "1048576"
+
+[[prefill.entity]]
+creator = "@catalog"
+create_nonce = "0"
+salt = "10"
+expires_at_height = "86400"
+flags = 0
+content_type = "text/plain"
+payload_text = "Welcome to Arkiv."
+attributes.title = { str = "Welcome" }

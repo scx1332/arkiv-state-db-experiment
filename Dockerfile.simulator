@@ -1,0 +1,19 @@
+FROM rust:1.90-bookworm AS build
+WORKDIR /work
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY vendor ./vendor
+ARG SIMULATOR_FEATURES=
+RUN cargo build --locked --release -p arkiv-node --bin arkiv-simulator --features "$SIMULATOR_FEATURES"
+
+FROM debian:bookworm-slim
+# curl serves container health checks against the public status endpoint.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --uid 10001 --create-home simulator \
+    && mkdir /data && chown simulator:simulator /data
+COPY --from=build /work/target/release/arkiv-simulator /usr/local/bin/arkiv-simulator
+USER simulator
+WORKDIR /data
+EXPOSE 9400
+ENTRYPOINT ["arkiv-simulator"]

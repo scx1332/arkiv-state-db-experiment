@@ -1,0 +1,15 @@
+[package]
+name = "arkiv-db-trie"
+description = "Persistent Merkle Patricia map with lazily loaded stored nodes, point proofs and a strict proof verifier"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+alloy-trie.workspace = true
+
+[lints]
+workspace = true

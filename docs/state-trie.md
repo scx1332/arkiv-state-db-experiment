@@ -1,0 +1,480 @@
+# State trie: the persistent Merkle Patricia map
+
+## Status and scope
+
+Node step N3a of the [node and storage plan](node-storage-plan.md) is
+implemented as the standalone crate `crates/arkiv-db-trie`: a persistent
+Merkle Patricia map (`MerkleMap`) with in-memory and stored nodes, lazy
+fallible loading, a staging walk for atomic commits, point-proof
+generation and a strict proof verifier (`walk`), plus the order-preserving
+key encoders the engine's maps will use. It depends only on the vendored
+`alloy-trie`, `alloy-primitives` and `alloy-rlp`; it has no dependency on
+`arkiv-db` or on the N2 storage contract, and it defines its own loader and
+error types for the engine to map onto its own.
+
+Node step N3b built the engine on it: every engine map is a `MerkleMap`
+with the key encodings below, and every engine state has a state root (see
+[Engine integration](#engine-integration-node-step-n3b)). N3c now persists
+the engine with bounded preflight/staging and stored-root publication; the
+demo composes the point proofs needed for complete Eq pages. Broader
+point-read APIs remain N3d (see
+[remaining work](#durable-integration-and-remaining-work)). Every statement about the crate is
+backed by the tests listed in [Evidence](#evidence); the engine integration
+section cites its own tests.
+
+## Node encoding
+
+A node encodes exactly as `alloy_trie::nodes` encodes it (the Ethereum MPT
+encoding):
+
+| Node | Encoding |
+| --- | --- |
+| Leaf | RLP list `[hex_prefix(path, leaf), value]` |
+| Extension | RLP list `[hex_prefix(path, extension), child reference]` |
+| Branch | RLP list of 16 child references (`0x80` for an empty slot) and an empty value `0x80` |
+
+A child reference is the child's own encoding when that is shorter than 32
+bytes (an *inline* child) and `0xa0 ‖ keccak256(encoding)` otherwise. The
+hex-prefix path encoding is the yellow paper's (appendix C): flag nibble
+`0`/`1` for an extension, `2`/`3` for a leaf, the odd flag carrying the
+first nibble. A node's object id is `keccak256(encoding)`, the same 32
+bytes its parent embeds, so the store is content-addressed.
+
+The crate uses its own node types rather than `alloy_trie`'s `LeafNode` and
+`ExtensionNode`, because those hold paths in `nybbles::Nibbles`, which is
+capped at 64 nibbles (32-byte keys), while engine maps need 33- and 88-byte
+keys. Its paths are unpacked nibbles of any length; the byte layout is the
+same format continued to longer paths. Evidence: `node.rs` unit tests
+compare every encoding with alloy's encoders byte for byte wherever alloy
+can represent the node, and `alloy_node_decoder_panics_on_paths_beyond_32_bytes`
+shows `alloy_trie::nodes::TrieNode::decode` panicking on a 35-byte path,
+which is also why the crate decodes nodes itself.
+
+Decoding is strict and total: it never panics, accepts only canonical RLP
+and hex-prefix encodings (so `encode(decode(bytes)) == bytes` for every
+accepted input, checked on 20,000 mutated inputs), and rejects shapes a
+canonical map never contains: branch values, branches with fewer than two
+children, empty extension paths, extensions without a branch child, empty
+leaf values, and inline children of 32 bytes or more.
+
+## Canonical shape and the root
+
+Every map has exactly one shape for its key/value set: branches have at
+least two children and no value; extensions precede only branches and have
+nonempty paths; each leaf holds the rest of its key. Inserts split a leaf or
+an extension at the first differing nibble (keeping the old extension's
+child link as it was, unloaded); removals collapse a branch left with one
+child into its parent's path, merging leaf and extension paths, which may
+require loading that remaining sibling from the store. The root hash is
+`keccak256(root encoding)` (the root is always referenced by hash, even
+when its encoding is shorter than 32 bytes) and `EMPTY_ROOT_HASH` for the
+empty map.
+
+The root therefore depends only on the key/value set. Evidence: after
+random insert/replace/remove histories (key lengths 1, 2, 8, 21, 32, 33 and
+88 bytes, dense and sparse key alphabets) the root equals
+`alloy_trie::HashBuilder` over the sorted leaves (keys ≤ 32 bytes) or the
+independent reference construction in `tests/support` (any length, itself
+checked against `HashBuilder` up to 32 bytes); permuted insertion orders with
+decoy inserts, removals and overwritten values give one root.
+
+Root hashing never reads the store: a stored link's hash is its id, and only
+nodes built in memory are encoded and hashed (once; the reference is cached
+in the node). `MerkleMap::root_hash` is therefore infallible.
+
+## Keys and their encodings
+
+`TrieKey` fixes a key type's encoded length `LEN` (at least one byte,
+checked at compile time) and its encoding; the map orders entries by the
+unsigned bytewise order of the encodings, so iteration is in encoded order.
+Every key has `2·LEN` nibbles. `u64` (big-endian) and `[u8; N]` implement it.
+
+`arkiv_db_trie::order` provides the fixed-width, order-preserving building
+blocks for composite keys:
+
+- `encode_padded(bytes, max_len)` writes `bytes ‖ 0x00 × (max_len − len) ‖
+  len`, `max_len + 1` bytes. Order is preserved: the first differing padded
+  byte decides exactly as the bytewise comparison of the strings does (a
+  string that ends first shows `0x00` where the longer one continues, and a
+  proper prefix is smaller); if all padded bytes agree, one string is the
+  other plus trailing zero bytes and the length byte orders them. Decoding
+  rejects a length above `max_len` and nonzero padding, so the encoding is
+  unique.
+- Fixed-width fields (bytes, big-endian integers) compare as their values,
+  and concatenated fixed-width fields compare as tuples, because each field
+  starts at the same offset in every key.
+- `KeyWriter` and `KeyReader` compose them.
+
+Evidence (`tests/encoding.rs`): random strings biased toward empty strings,
+trailing zeros, prefixes of other strings and maximum lengths (for maximum
+lengths 0, 1, 2, 3, 20 and 64) order exactly as Rust's slice ordering, and the
+88-byte composite `(name ≤ 20, tag, presence, value ≤ 64)` orders exactly as
+the Rust tuple ordering, with existence (`presence = 0`) before an empty
+value, and a map keyed by it iterates in tuple order.
+
+The engine key encodings (implemented in node step N3b, in
+`crates/arkiv-db/src/layout.rs`) and the resulting bounds (see
+[Depth bound](#depth-bound) and
+[Nodes an update creates](#nodes-an-update-creates)):
+
+| Map | Key encoding | Bytes | Nodes on a path (≤ 2·L + 1) | New nodes per insert (≤ 2·L + 2) |
+| --- | --- | --- | --- | --- |
+| catalog | `NamespaceId` big-endian | 8 | 17 | 18 |
+| host | raw `[u8; 32]` | 32 | 65 | 66 |
+| records (raw) | `key ‖ 0x00 pad to 20 ‖ len` | 21 | 43 | 44 |
+| keys | RecordKey v2 `len ‖ bytes ‖ pad` | 33 | 67 | 68 |
+| rows, postings | `RecordId` big-endian | 8 | 17 | 18 |
+| terms | `name ‖ pad to 20 ‖ name_len ‖ tag ‖ presence ‖ value ‖ pad to 64 ‖ value_len` | 88 | 177 | 178 |
+
+## Depth bound
+
+A key of `L` bytes has `2L` nibbles. Every branch on its path consumes one
+nibble, every extension at least one and is followed by a branch, and the
+path ends at one leaf (possibly with an empty path) or earlier, so a path
+has at most `2L + 1` nodes. A lookup, an insert or a proof visits at most
+that many; a removal visits at most one more (the collapse sibling). The
+bound is reached: the crafted set of `2L + 1` keys that are zero except for
+one nibble each (`deep_keys` in `tests/map.rs`) forces a branch at every
+nibble of the zero key, whose lookup visits exactly `2L + 1` nodes and
+whose deepest neighbor's removal visits exactly `2L + 2`, for
+L = 1, 8, 21, 32, 33 and 88. Random histories assert the bound on every
+operation.
+
+### Nodes an update creates
+
+The nodes an update creates are the ones the next root computation
+encodes (and, at 32 bytes or more, hashes) and the next staging walk may
+emit, so they, not the visits, bound the rehashing work of one entry
+write. They can exceed the path bound by one:
+
+- An insert of a new key creates the new key's whole path: the rebuilt
+  nodes above the point where it leaves the existing trie, a new branch
+  there (with an extension above it when the keys share more nibbles) and
+  its leaf, at most `2L + 1` nodes. When it leaves the trie inside a leaf,
+  or inside an extension more than one nibble before its end, it also
+  re-creates that node below the new branch with a shorter path. At most
+  `2L + 2`.
+- A replacement of an existing key's value rebuilds its path: at most
+  `2L + 1`.
+- A removal rebuilds the at most `2L` nodes above the removed leaf. A
+  branch left with one child becomes one node (the child with the nibble
+  prepended, or an extension over it), which an extension above absorbs;
+  both replace nodes on the path rather than add to them. At most `2L`.
+
+Evidence (`update_creation_bounds_are_reached` in `tests/store.rs`, for
+L = 1, 8, 21, 33 and 88, with 40-byte values so every node is an object of
+its own): with the deep-path key set committed except the key that parts
+at the last nibble, inserting that key stages exactly `2L + 2` objects,
+which are exactly the objects of the new trie that the old one lacks
+according to the reference construction; removing it again stages exactly
+`2L`. Random histories on reopened maps stage no more than `2L + 2`
+objects per update in total. A per-entry-write bound for the engine's
+metering (`RootUpdate`) has to use `2L + 2`, not the path bound `2L + 1`,
+when it counts rehashed nodes; node step N3b measures the engine against it
+(see [Engine integration](#engine-integration-node-step-n3b)).
+
+## Links, handles, loading and errors
+
+```text
+Link<V>    = Empty | Mem(Arc<NodeBox<V>>) | Stored(ObjectId)
+NodeBox<V> = { node, rlp: OnceLock<RlpNode>, from_store: bool }
+MerkleMap<K, V> = { root: Link<V>, len: u64 }         // O(1) clone
+```
+
+A handle is a root link plus the entry count; the count is kept in the
+handle and must be committed by whoever stores the root
+(`MerkleMap::from_root(root, len)` accepts `(EMPTY_ROOT_HASH, 0)` as the
+empty map and rejects every other pairing of the empty root or a zero
+length). Updates copy one key path and share everything else, so older
+handles stay valid. The object space is not part of the handle: the host
+chooses the loader (and so the space) for each operation.
+
+Handles and nodes hold no store, loader, context or cache reference. Every
+operation that can reach a stored link takes a loader by reference:
+
+```rust
+pub trait NodeLoader<V: TrieValue> {
+    type Error: From<TrieError>;
+    fn read(&self, id: &ObjectId) -> Result<Option<Vec<u8>>, Self::Error>;
+    fn load(&self, id: &ObjectId) -> Result<Arc<NodeBox<V>>, Self::Error>; // default: read + decode_stored
+}
+```
+
+`NodeBox::decode_stored(id, bytes)` checks `keccak256(bytes) == id`,
+decodes strictly, turns inline children into `Mem` nodes and marks every
+node it produces `from_store`. Shapes that hash correctly but are not
+canonical are errors, not answers: inside one object they are
+`TrieError::Malformed`; across objects (a stored non-root node shorter than
+32 bytes, an extension whose stored child is not a branch, a leaf at the
+wrong depth for the key length) they are `TrieError::Inconsistent`.
+A host with its own storage error type implements `read` with that type and
+gets it back unchanged from every operation (trie failures arrive through
+`From<TrieError>`: `Missing` maps to "object missing", `EmptyValue` to a
+caller error, everything else to "corrupt"). A host with a bounded decoded-node cache keyed by (database id,
+space, map kind, object id) overrides `load`; decoded nodes own nothing that
+points back at the cache, so the cache never creates reference cycles and
+can be dropped at any time. The map kind belongs in the key because the
+decoded node type depends on the value type.
+
+Reading a missing, corrupt or unreadable object is an error from `get`,
+`insert`, `remove`, iteration (the error is yielded, then the iterator
+ends) and proof generation; it is never reported as an absent key.
+
+### Visit counting
+
+Every operation reports a `Probe { nodes, loads }`. `nodes` follows the
+trie visit semantics of the engine's `PhysicalTrace` (node step N3b): every
+node an operation examines counts once, whether it was in memory, served by
+a cache or loaded, inline children included; a lookup and an insert count
+the key's path, a removal also the collapse sibling, an iterator its seek
+path and every node it steps into. Nodes an update creates are not visits.
+`loads` counts stored links followed through the loader and is physical
+instrumentation. Evidence: a map reopened from the store reports the same
+`nodes` as the in-memory original for each of 300 lookups per key length
+and for a full iteration, while `loads` differ, and a caching loader leaves
+both unchanged on a warm read while making no store read.
+
+## Values and nested maps
+
+`TrieValue` values encode canonically and never to the empty string:
+`MerkleMap::insert` rejects a value whose encoding is empty with
+`TrieError::EmptyValue` before it visits or reads anything (it asks
+`TrieValue::encodes_empty`, which by default encodes the value once; a
+type whose encoding can never be empty answers `false` without encoding,
+which keeps inserting a value that holds nested maps from hashing them),
+and the decoder rejects stored empty values. The
+crate's own `Vec<u8>` value can be empty, so this is a caller error, not
+a panic; the map still panics if an encoding it hashes is empty, which
+only a nondeterministic `encode` can cause. A value may hold nested maps (a
+posting map in a term entry): it encodes the nested root and length, which
+is the hashing hook, and implements `stage_nested` to stage the nested map's
+new nodes, which is the staging hook.
+
+## Staging and commits
+
+`MerkleMap::stage(sink)` walks from the root and records `(id, encoding)`
+for every node built in memory that must be an object: the root, whatever
+its size, and every other node of 32 bytes or more. Inline nodes are never
+recorded (they are part of their parent's bytes). The walk stops at stored
+links and at `from_store` nodes. Its invariant: a `from_store` node's bytes
+are committed in the map's space, as an object or inside an ancestor's
+object, and updates never place a loaded node into a new version except as
+the unchanged inline child of a rebuilt node or through its original stored
+link. For each leaf of a new node the walk calls `TrieValue::stage_nested`
+(same space); `stage_with` hands the values to a closure instead, for nested
+maps in another space. The host gives each space its own sink, and a sink
+keeps each id once. Staging hashes whatever is not hashed yet and reads
+nothing.
+
+The walk does **not** stop at a new node whose id the sink already holds.
+Maps with different value types share a space (the planned raw, keys,
+rows, postings and terms maps of a namespace all do), and a leaf of one
+can be byte-identical to a leaf of another whose value names a nested map:
+the same bytes are a plain value in one map and a posting root and length
+in the other. An equal id therefore does not mean that the nested maps
+below were staged, and skipping the subtree could commit a leaf whose
+nested map is missing. So the walk visits every new node reachable from
+the root and every new leaf value, whatever the sink has seen; the sink
+deduplicates only what it keeps. Its work is the number of new nodes
+reachable from the root, which the updates since the last commit created.
+
+After the staged objects are committed, `to_stored()` gives a handle whose
+root is a `Stored` link, so the in-memory nodes can be dropped and later
+staging starts empty.
+
+Evidence (`tests/store.rs`): the staged ids of a map equal the set of
+objects the independent reference construction derives (root plus nodes of
+at least 32 bytes), each once; after updates on a map reopened from its root,
+the staged ids are a subset of the new trie's objects and include every one
+the store lacks, at most `2L + 2` per update; a removal whose remaining
+sibling is a branch reuses its stored link (one object staged); nested
+posting maps are staged through the hook, identical posting maps once, and
+through `stage_with` into a second sink; a plain map and a terms map whose
+single leaves are byte-identical, staged into one sink in either order,
+stage the posting map and read back in full
+(`a_shared_sink_stages_nested_maps_whatever_was_staged_first`, which fails
+if the walk skips known ids); everything reopens and reads lazily; the old
+root stays readable.
+
+## Proofs
+
+A proof for key `k` in one map is the root node followed by every
+hash-referenced node on `k`'s path, in path order. Inline nodes travel inside
+their parent. The same form proves inclusion (the path ends at `k`'s leaf)
+and absence (it ends at a leaf or extension diverging from `k`, or at a
+branch whose slot for `k` is empty). The empty map's proof is empty.
+`MerkleMap::proof` yields the nodes lazily, one per `next`, so a host can
+charge each node before it is produced and stop without further work
+(node step N3d plans to charge `{ProofNode 1, ProofByte len}` per node).
+
+### The strict verifier
+
+`walk(root, key, nodes) -> Result<Option<Vec<u8>>, ProofError>` returns the
+value the proof establishes; it never takes a claimed value. It enforces:
+
+1. empty map ⇔ `root == EMPTY_ROOT_HASH` and no nodes (nodes with the empty
+   root are rejected, although `keccak256(0x80)` is the empty root);
+2. `keccak256(nodes[0]) == root`, whatever the node's length;
+3. every later node is at least 32 bytes and hashes to the 33-byte reference
+   the walk reached along the key's nibbles; inline children are decoded in
+   place;
+4. the terminal is a leaf whose path equals the remaining key (inclusion), a
+   leaf or extension diverging from it, or an empty branch slot (absence);
+   nothing may follow it (`TrailingNodes`);
+5. a hash reference reached with key nibbles left and no next node is
+   `Incomplete`, never absence;
+6. every node decodes strictly; an extension's child must be a branch; a
+   leaf's path must be exactly as long as the remaining key (fixed-length
+   keys); a branch needs a nibble left.
+
+Missing, extra, duplicated, reordered and separately supplied inline nodes
+therefore all fail. The walk is iterative, allocates in proportion to its
+input and never panics.
+
+`key` must be the encoding of a key of the map, exactly its `LEN` bytes. A
+proof does not carry the key length, so `walk` cannot check it, and a
+verifier composing proofs (node step N3d) must encode the key itself, with
+the map's `TrieKey`, before calling `walk`. A key of another length is
+never proven included under the root of a fixed-length map, because a
+leaf's path matches only a key of the map's length; depending on the
+trie's shape, `walk` reports it as absent (it meets an empty branch slot or
+a diverging extension) or as `InvalidNode` (it meets a leaf at the wrong
+depth for it, or runs out of nibbles), and neither result then says
+anything about the proof. Evidence:
+`keys_of_the_wrong_length_are_never_proven_included` in `tests/proofs.rs`
+pins both outcomes on a hand-derived trie and checks, on random maps, that
+present keys cut short or extended give `InvalidNode` and absent ones give
+absence or `InvalidNode`.
+
+### Why `alloy_trie::proof::verify_proof` is not the verifier
+
+`verify_proof(root, key, expected, proof)` compares a caller-claimed value
+with what it read at the end of the proof, and treats "the proof ended
+before the key's path did" as a value of `None`. The tests run alloy's own
+verifier to show three forgeries it accepts, each rejected by `walk`:
+
+| Forgery | alloy `verify_proof` | `walk` |
+| --- | --- | --- |
+| An inclusion proof truncated after any node, claimed as absence | `Ok(())` for every cut of 40 proofs | `Incomplete` |
+| A node `F` appended after the leaf whose stored value is `0xa0 ‖ keccak256(F)` (or `F` itself, if under 32 bytes), with `F` a leaf carrying a forged value | `Ok(())` for the forged value | `TrailingNodes` |
+| A proof cut after the last branch, claiming the leaf's hash reference as the value | `Ok(())` | `Incomplete` |
+
+It also rejects honest proofs whose root node is shorter than 32 bytes
+(single-entry maps), and cannot take keys longer than 32 bytes. It is used
+only as a cross-check on honest proofs whose root node is at least 32 bytes
+and whose keys are at most 32 bytes, where it agrees with `walk`.
+
+## Evidence
+
+Run `cargo test -p arkiv-db-trie --offline` (all tests below also run in
+`cargo test --workspace --offline`). Oracles are independent of the crate:
+`BTreeMap` models, `alloy_trie::HashBuilder`/`ProofRetainer` (keys ≤ 32
+bytes; retained nodes under 32 bytes other than the root are dropped
+because they are inline), and the reference construction in
+`tests/support/mod.rs`, written from the yellow paper with its own RLP and
+hex-prefix code and cross-checked against `HashBuilder`. Visit counts are
+hand-derived literals from the crafted key sets.
+
+| File | Establishes |
+| --- | --- |
+| `src/node.rs` (unit) | Byte equality with alloy's leaf, extension and branch encoders; long paths; strict decoding round trips; hash check on load; `from_store` inline children; rejection of noncanonical forms; 20,000 mutated inputs never panic and only canonical bytes decode; alloy's decoder panics on a 35-byte path |
+| `src/nibbles.rs`, `src/order.rs` (unit) | Hex-prefix vectors and rejections; padded-field vectors; writer/reader round trip |
+| `tests/map.rs` | Random histories against `BTreeMap` and the root oracles for key lengths 1–88; history independence; retained versions unchanged; depth bound reached exactly (`2L + 1`, removal `2L + 2`); empty and single-entry maps; handle validation; empty values rejected by `insert` before any visit or read |
+| `tests/proofs.rs` | Proofs equal `ProofRetainer` (≤ 32 bytes) and the reference (33, 88 bytes); `walk` gives the model's answer; alloy cross-check where valid; the three alloy forgeries; randomized mutations (bit flips, truncations, reordering, duplication, extra and inline nodes, wrong roots, other keys and versions) are rejected or give the honest answer; self-consistent adversarial tries and garbage never panic; old proofs verify against old roots; lazy, counted generation; keys of the wrong length never proven included |
+| `tests/store.rs` | Staging equals the reference object set; reopened maps read lazily with residency-independent visit counts; lazy updates load only touched paths; restaging is complete, minimal and bounded; the per-update creation bounds (`2L + 2` for an insert, `2L` for a removal) reached exactly; history readable; missing and corrupt objects and host loader errors surface as errors; caching loader; nested maps through the hook and `stage_with`, also when another value type staged a byte-identical leaf into the same sink first; hash-valid noncanonical tries rejected by the map and by `walk` |
+| `tests/encoding.rs` | Order preservation and uniqueness of the padded and composite encodings |
+
+## Engine integration (node step N3b)
+
+The engine (`crates/arkiv-db`) keeps every map in a `MerkleMap`: the
+catalog, the host map, and per namespace the raw records, key bindings,
+rows and terms, with a posting map nested in every term leaf. The key
+encodings are the table above; leaf values are canonical-codec bytes (raw
+and host values `u32 len ‖ bytes`, key bindings a `u64` record id, rows
+`RecordKey ‖ cells sorted by name`, postings `01`, term leaves `posting root
+‖ posting len`, catalog leaves `descriptor ‖ next_record ‖` four `root ‖
+len` handles). The state root is `digest("arkiv/state/v1",
+encode(StateHeader { format 1, catalog root and length, next_namespace,
+pricing, host root and length }))`. The layouts are specified in
+`docs/architecture.md`; `layout.rs` unit tests show the raw and term key
+orders equal the orders the engine used before (bytewise, and
+`(name, type, existence first, value bytes)`).
+
+Every map operation takes a loader naming the map's object space and kind:
+the crate's `MemoryOnly` loader for a memory engine, or an
+`arkiv_db_storage::versioned::ObjectReader` for a state reopened from its
+committed objects (the hidden `Engine::from_state` test aid, until node
+step N3c supplies the store context and cache). Storage errors reach the
+engine's `try_` forms unchanged and poison a branch.
+
+Evidence in `crates/arkiv-db/tests`:
+
+- `roots.rs`: over a seeded 40-block history, every map root and the state
+  root equal an independent construction over leaves built by hand from a
+  model: the reference construction of this crate's `tests/support`
+  (included by path), cross-checked with `HashBuilder` for every map whose
+  keys have at most 32 bytes, and a hand-encoded `StateHeader` digested
+  with keccak256. Identical content reached by different histories has one
+  root; old snapshots keep their roots; every logical field (owner,
+  pricing, record allocator, host entry, cell value, raw value) changes the
+  root.
+- `storage_faults.rs`: a state staged into an object store and reopened
+  reads nothing at open, loads nodes on demand and answers every read with
+  the memory engine's values, receipts and node visits (visits do not
+  depend on what was loaded or cached); failed, missing and corrupt nodes
+  are storage errors, never absent records or rejections.
+- `rehash.rs`: per map, the nodes a block builds that carry a hash (every
+  new map root and every new node of 32 bytes or more; computing the state
+  root hashes each once, plus one state-header digest), against the
+  `RootUpdate`-charged entry writes times `2L + 2`, and the distinct objects
+  the block stages, which a commit writes. The two differ when writes of
+  one block build identical nodes, such as the one-entry posting maps of a
+  new record's terms: each is hashed, but stored once. Measured on
+  2026-09-24 (`cargo test -p arkiv-db --offline --test rehash --
+  --nocapture`):
+
+  | Block | Hashed nodes | Staged objects | Allowed by the entry writes |
+  | --- | --- | --- | --- |
+  | 200 record creations in two namespaces | 710 | 650 | 256,036 |
+  | 20 mixed blocks of 2–30 operations | 28–206 | 27–199 | 562–13,190 |
+  | One key inserted on a crafted 67-node key path | 66 key-map (71 in all) | 66 key-map (71 in all) | 68 key-map (104 in all) |
+  | One key removed there, collapsing the deepest branch | 65 key-map | 65 key-map | 68 |
+  | One record added to a crafted 175-node term path | 176 term (188 in all) | 176 term (188 in all) | 356 term (496 in all) |
+
+  The crafted fixtures reach the bounds as closely as valid data allows: 66
+  record keys branch at every nibble a 33-byte key encoding can branch on
+  (the length's low nibble cannot: 0x21–0x2f exceed 32), so the spine's
+  path is 67 = `2·33 + 1` nodes and one more key rehashes 66 of them (its
+  new leaf is inline). 214 terms branch at 172 of the 176 nibbles of the
+  88-byte term encoding; only the name length (equal padded names are
+  equal names, since names never contain 0x00) and the tag's and presence
+  byte's high nibbles cannot differ while the bytes before them agree. The
+  value length can: a `Str` value may end in zero bytes, so values that
+  agree on all 64 padded bytes can still differ in length. A valid term
+  path therefore has at most 175 nodes (172 branches, two extensions and
+  a leaf), not 177. Adding a record to the spine term rewrites its leaf
+  (175 path nodes) and its existence term's leaf (one more). These are
+  logical counts; hashing time was not measured.
+
+## Durable integration and remaining work
+
+- **N3c is implemented.** `DurableEngine` supplies a gated store context,
+  bounded encoded cache, manifests, durable head and lazy historical
+  snapshots over redb. `preflight_with` checks new node/value bounds before
+  encoding/hashing; `try_stage_with` stops on work/sink failures and visits
+  nested maps synchronously. Physical batch deduplication does not skip
+  nested maps of another type. Weak-reference tests establish dirty-node
+  release and that stored handles retain no decoded trees after reads.
+  `Engine::from_state` and unbounded staging helpers remain test aids.
+- **Broader N3d APIs remain open.** The implemented demo composes catalog,
+  term, row and key proofs with StateHeader binding for bounded complete Eq
+  pages; protocol-2 headers carry roots. General point-read/proof APIs and
+  other complete query profiles are separate work.
+- [Engine storage measurements](engine-storage-v1-report.md) now cover
+  10,000 publications, lazy opens, cache sizes, isolation and incremental
+  writes. Paths are stored unpacked (one byte per nibble) for simplicity;
+  nodes are not size-optimized. The engine's tests take about 2.5 times as
+  long on the trie as they did on the AVL tree in debug builds and about 1.9
+  times in release builds (see `docs/testing.md`).
+- The reference oracle for keys over 32 bytes lives in the crate's tests;
+  the engine's tests include it by path.

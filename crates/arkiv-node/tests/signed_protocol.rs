@@ -1,0 +1,509 @@
+//! Signed-profile security checks with real independent keys and explicit preimages.
+#![cfg(feature = "arkiv-v2")]
+use alloy_primitives::{Keccak256, Signature, U256};
+use arkiv_db::{
+    B256, CellName, Decode, Encode, NamespaceName, OwnerId, Value, decode_exact, encode,
+};
+use arkiv_node::{
+    BlockOutcomes, Expiry, TxEnvelope, TxOp,
+    arkiv::ArkivOperation,
+    signed::{
+        crypto::{Signer, recover},
+        protocol::*,
+    },
+};
+
+fn signer(n: u8) -> Signer {
+    let mut key = [0; 32];
+    key[31] = n;
+    Signer::from_bytes(key).unwrap()
+}
+fn genesis() -> SignedGenesis {
+    let mut native = arkiv_node::demo::workload::genesis(7, 1_000);
+    native.admins.clear();
+    native.params.max_admin_per_block = 0;
+    native.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;
+    native.params.max_block_input_bytes = INPUT_CAP;
+    SignedGenesis::new(native, [0x42; 16], *signer(1).address().as_bytes(), 250).unwrap()
+}
+fn envelope(who: &Signer) -> TxEnvelope {
+    TxEnvelope {
+        chain_id: 7,
+        actor: who.address(),
+        request_id: [0x11; 32],
+        tx_budget: 100_000,
+        ops: vec![TxOp::CreateNamespace {
+            name: NamespaceName::new("entities").unwrap(),
+        }],
+    }
+}
+fn signed() -> SignedTx {
+    SignedTx::sign(&genesis(), 0, envelope(&signer(1)), &signer(1)).unwrap()
+}
+
+#[test]
+fn signed_genesis_bounds_native_state_and_reserves_complete_outcomes() {
+    let mut g = genesis();
+    g.limits.max_body_bytes = g.limits.max_input_bytes + OUTCOME_RESERVE - 1;
+    assert!(g.validate().is_err());
+    let mut g = genesis();
+    g.genesis.params.expiry_per_block = 17;
+    assert!(g.validate().is_err());
+    let mut g = genesis();
+    g.genesis.limits.max_value_len = 128 * 1024 + 1;
+    assert!(g.validate().is_err());
+    let mut g = genesis();
+    g.genesis.limits.max_cells = 33;
+    assert!(g.validate().is_err());
+}
+fn independent_digest(domain: &str, bytes: &[u8]) -> B256 {
+    let mut h = Keccak256::new();
+    h.update([domain.len() as u8]);
+    h.update(domain);
+    h.update(bytes);
+    h.finalize()
+}
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+fn unhex<const N: usize>(s: &str) -> [u8; N] {
+    assert_eq!(s.len(), N * 2);
+    let mut out = [0; N];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap();
+    }
+    out
+}
+
+#[test]
+fn preimages_are_explicit_and_golden() {
+    let g = genesis();
+    let tx = signed();
+    // These bytes are built independently of the new types' encoders.
+    let mut genesis_bytes = 1u32.to_be_bytes().to_vec();
+    genesis_bytes.extend(encode(&g.genesis));
+    genesis_bytes.extend([0x42; 16]);
+    genesis_bytes.extend(g.proposer);
+    genesis_bytes.extend(250u64.to_be_bytes());
+    for cap in [TX_CAP, INPUT_CAP, BODY_CAP] {
+        genesis_bytes.extend(cap.to_be_bytes());
+    }
+    assert_eq!(encode(&g), genesis_bytes);
+    assert_eq!(
+        g.header().inputs_digest,
+        independent_digest("arkiv/signed-genesis/v1", &genesis_bytes)
+    );
+    assert_ne!(g.hash(), g.genesis.hash());
+    assert_eq!(
+        hex(signer(1).address().as_bytes()),
+        "7e5f4552091a69125d5dfcb7b8c2659029395bdf"
+    );
+    let mut intent = 1u32.to_be_bytes().to_vec();
+    intent.extend(g.hash());
+    intent.extend(0u64.to_be_bytes());
+    intent.extend(7u64.to_be_bytes());
+    intent.extend(signer(1).address().as_bytes());
+    intent.extend([0x11; 32]);
+    intent.extend(100_000u64.to_be_bytes());
+    intent.extend(1u32.to_be_bytes());
+    intent.push(1);
+    intent.extend(8u32.to_be_bytes());
+    intent.extend(b"entities");
+    assert_eq!(
+        tx.intent_digest(),
+        independent_digest("arkiv/signed-tx-intent/v1", &intent)
+    );
+    let mut tx_bytes = intent;
+    tx_bytes.extend(tx.signature);
+    assert_eq!(encode(&tx), tx_bytes);
+    assert_eq!(
+        tx.hash(),
+        independent_digest("arkiv/signed-tx/v1", &tx_bytes)
+    );
+    let inputs = SignedInputs {
+        txs: vec![tx.clone()],
+    };
+    let mut input_bytes = 1u32.to_be_bytes().to_vec();
+    input_bytes.extend(1u32.to_be_bytes());
+    input_bytes.extend(tx_bytes);
+    assert_eq!(encode(&inputs), input_bytes);
+    assert_eq!(
+        inputs.digest(),
+        independent_digest("arkiv/signed-inputs/v1", &input_bytes)
+    );
+    let header = SignedHeader::sign(&g, g.header(), &signer(1)).unwrap();
+    let mut header_intent = 1u32.to_be_bytes().to_vec();
+    header_intent.extend(g.hash());
+    header_intent.extend(g.header().hash());
+    assert_eq!(
+        header.intent_digest(),
+        independent_digest("arkiv/signed-header/v1", &header_intent)
+    );
+    assert_eq!(
+        recover(tx.intent_digest(), &tx.signature).unwrap(),
+        signer(1).address()
+    );
+    assert_ne!(tx.intent_digest(), tx.hash());
+    assert_eq!(signed(), tx); // deterministic RFC6979
+    // Explicit byte-layout vectors pinned across dependency changes.
+    assert_eq!(
+        hex(g.hash().as_slice()),
+        "185a3e9912c23e21895991b9ccc6af4a4bd63f3fde6a65277f2f4dac1868ce95"
+    );
+    assert_eq!(
+        hex(tx.intent_digest().as_slice()),
+        "83df18ec539ef1f8325d336a2598680cb159600e8d6d6865d200d42fd2e8f67f"
+    );
+    assert_eq!(
+        hex(tx.hash().as_slice()),
+        "fd37df8e63d20679105aed7fa44823710a04c027fa87540a205d029c9d9f92e3"
+    );
+    assert_eq!(
+        hex(inputs.digest().as_slice()),
+        "d40cda5f4f8e132bba206b3eaac9dc0a0c5c739f3b41aa9b6a0ebfb80ebf5b2a"
+    );
+    assert_eq!(
+        hex(header.intent_digest().as_slice()),
+        "71127aab82e1c8acadff8febe6eb76bab650ef744dc017e5755164a527b248c2"
+    );
+    assert_eq!(
+        hex(&tx.signature),
+        "f91524cba1760297f1f8ab6dcc1744887d70c0593ca63cde01f6885a9214663823d94178a50756f1126db5172d71a68621c488e43ff17dc113919cab52fb4eeb00"
+    );
+    assert_eq!(
+        hex(&header.signature),
+        "9ae6db89513625054bacd7164e5a7cfeed762ee899dbc922b147513124874e8226d34535c45994eeadc31fc3f03a2450c938cbc46af1d82510b5276ac207482f01"
+    );
+}
+
+fn roundtrip<T: Encode + Decode + std::fmt::Debug + PartialEq>(value: T) {
+    let bytes = encode(&value);
+    assert_eq!(decode_exact::<T>(&bytes).unwrap(), value);
+    for length in 0..bytes.len() {
+        assert!(
+            decode_exact::<T>(&bytes[..length]).is_err(),
+            "truncation {length}"
+        );
+    }
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(decode_exact::<T>(&trailing).is_err());
+    for version in [0u32, 2, u32::MAX] {
+        let mut changed = bytes.clone();
+        changed[..4].copy_from_slice(&version.to_be_bytes());
+        assert!(decode_exact::<T>(&changed).is_err());
+    }
+}
+#[test]
+fn exact_decoding_versions_truncations_and_hostile_counts() {
+    let g = genesis();
+    let header = SignedHeader::sign(&g, g.header(), &signer(1)).unwrap();
+    roundtrip(g.clone());
+    roundtrip(signed());
+    roundtrip(SignedInputs {
+        txs: vec![signed()],
+    });
+    roundtrip(header.clone());
+    roundtrip(SignedBlock {
+        header,
+        inputs: SignedInputs::default(),
+        outcomes: BlockOutcomes::default(),
+    });
+    for count in [17u32, 1_000, u32::MAX] {
+        let mut bytes = 1u32.to_be_bytes().to_vec();
+        bytes.extend(count.to_be_bytes());
+        assert!(decode_exact::<SignedInputs>(&bytes).is_err());
+    }
+    let mut ops = encode(&signed());
+    ops[112..116].copy_from_slice(&u32::MAX.to_be_bytes());
+    assert!(SignedTx::from_bytes(&ops).is_err());
+    assert!(decode_exact::<SignedTx>(&encode(&signed().tx)).is_err());
+    assert!(decode_exact::<SignedGenesis>(&encode(&g.genesis)).is_err());
+    assert!(SignedTx::from_bytes(&vec![0; TX_CAP as usize + 1]).is_err());
+    assert!(SignedBlock::from_bytes(&vec![0; BODY_CAP as usize + 1]).is_err());
+}
+
+#[test]
+fn strict_parity_scalars_and_high_s_are_checked_before_recovery() {
+    let tx = signed();
+    for parity in [2, 3, 27, 28, 35, 36, 255] {
+        let mut bytes = tx.signature;
+        bytes[64] = parity;
+        assert!(recover(tx.intent_digest(), &bytes).is_err());
+    }
+    let order = U256::from_be_bytes(unhex::<32>(
+        "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+    ));
+    for scalar in [U256::ZERO, order, U256::MAX] {
+        for offset in [0, 32] {
+            let mut bytes = tx.signature;
+            bytes[offset..offset + 32].copy_from_slice(&scalar.to_be_bytes::<32>());
+            assert!(recover(tx.intent_digest(), &bytes).is_err());
+        }
+    }
+    let mut high = tx.signature;
+    high[32..64]
+        .copy_from_slice(&(order - U256::from_be_slice(&tx.signature[32..64])).to_be_bytes::<32>());
+    high[64] ^= 1;
+    // The malleated form really is recoverable by Alloy's normalizing API.
+    let alloy = Signature::from_raw_array(&high).unwrap();
+    assert_eq!(
+        alloy
+            .recover_address_from_prehash(&tx.intent_digest())
+            .unwrap()
+            .as_slice(),
+        tx.tx.actor.as_bytes()
+    );
+    assert!(recover(tx.intent_digest(), &high).is_err());
+    let mut altered = tx.clone();
+    altered.signature = high;
+    assert!(decode_exact::<SignedTx>(&encode(&altered)).is_err());
+    for length in [0, 1, 64, 66, 70] {
+        let mut bytes = encode(&tx);
+        bytes.truncate(bytes.len() - 65);
+        bytes.extend(vec![1; length]);
+        assert!(SignedTx::from_bytes(&bytes).is_err());
+    }
+    assert!(Signer::from_bytes([0; 32]).is_err());
+    assert!(Signer::from_bytes([255; 32]).is_err());
+}
+
+#[test]
+fn known_external_recovery_vector() {
+    // Public Alloy secp256k1 recovery fixture, converted to canonical low-S.
+    let original = unhex::<65>(
+        "48b55bfa915ac795c431978d8a6a992b628d557da5ff759b307d495a36649353efffd310ac743f371de3b9f7f9cb56c0b28ad43601b4ab949f53faa07bd2c8041b",
+    );
+    let canonical = Signature::from_raw_array(&original)
+        .unwrap()
+        .normalized_s()
+        .as_rsy();
+    let hash = B256::from(unhex::<32>(
+        "5eb4f5a33c621f32a8622d5f943b6b102994dfe4e5aebbefe69bb1b2aa0fc93e",
+    ));
+    assert_eq!(
+        recover(hash, &canonical).unwrap(),
+        OwnerId::new(unhex("0f65fe9276bc9a24ae7083ae28e2660ef72df99e"))
+    );
+}
+
+#[test]
+fn every_authority_field_and_operation_is_signed() {
+    let g = genesis();
+    let who = signer(1);
+    let mut env = envelope(&who);
+    env.ops = vec![
+        TxOp::Arkiv {
+            namespace: arkiv_node::arkiv::entity_namespace(),
+            operation: ArkivOperation::Create {
+                salt: 91,
+                flags: 1,
+                expiry: Expiry::PERMANENT,
+                attributes: vec![
+                    (CellName::new("group").unwrap(), Value::U64(2)),
+                    (
+                        CellName::new("$payload").unwrap(),
+                        Value::bytes(b"signed payload"),
+                    ),
+                ],
+            },
+        },
+        TxOp::Arkiv {
+            namespace: arkiv_node::arkiv::entity_namespace(),
+            operation: ArkivOperation::Delete {
+                key: arkiv_db::RecordKey::new(&[7; 32]).unwrap(),
+            },
+        },
+    ];
+    let tx = SignedTx::sign(&g, 4, env, &who).unwrap();
+    let mut variants = Vec::new();
+    let mut v = tx.clone();
+    v.genesis_hash = B256::ZERO;
+    variants.push(v);
+    let mut v = tx.clone();
+    v.tx.chain_id += 1;
+    variants.push(v);
+    let mut v = tx.clone();
+    v.tx.actor = signer(2).address();
+    variants.push(v);
+    let mut v = tx.clone();
+    v.nonce += 1;
+    variants.push(v);
+    let mut v = tx.clone();
+    v.tx.request_id[0] ^= 1;
+    variants.push(v);
+    let mut v = tx.clone();
+    v.tx.tx_budget += 1;
+    variants.push(v);
+    let mut v = tx.clone();
+    v.tx.ops.reverse();
+    variants.push(v);
+    let mut v = tx.clone();
+    if let TxOp::Arkiv { namespace, .. } = &mut v.tx.ops[0] {
+        *namespace = arkiv_db::NamespaceId::from_ordinal(2).unwrap();
+    }
+    variants.push(v);
+    let mut v = tx.clone();
+    if let TxOp::Arkiv {
+        operation: ArkivOperation::Create { salt, .. },
+        ..
+    } = &mut v.tx.ops[0]
+    {
+        *salt += 1;
+    }
+    variants.push(v);
+    let mut v = tx.clone();
+    if let TxOp::Arkiv {
+        operation: ArkivOperation::Create { flags, .. },
+        ..
+    } = &mut v.tx.ops[0]
+    {
+        *flags = 2;
+    }
+    variants.push(v);
+    let mut v = tx.clone();
+    if let TxOp::Arkiv {
+        operation: ArkivOperation::Create { attributes, .. },
+        ..
+    } = &mut v.tx.ops[0]
+    {
+        attributes[0].1 = Value::U64(3);
+    }
+    variants.push(v);
+    let mut v = tx.clone();
+    if let TxOp::Arkiv {
+        operation: ArkivOperation::Create { attributes, .. },
+        ..
+    } = &mut v.tx.ops[0]
+    {
+        attributes[1].1 = Value::bytes(b"altered payload");
+    }
+    variants.push(v);
+    let mut v = tx.clone();
+    if let TxOp::Arkiv {
+        operation: ArkivOperation::Delete { key },
+        ..
+    } = &mut v.tx.ops[1]
+    {
+        *key = arkiv_db::RecordKey::new(&[8; 32]).unwrap();
+    }
+    variants.push(v);
+    for v in variants {
+        assert!(v.validate(&g).is_err());
+    }
+    let mut other = g.clone();
+    other.run_id[0] ^= 1;
+    assert!(tx.validate(&other).is_err());
+    let mut substituted = tx.clone();
+    substituted.signature = signed().signature;
+    assert!(substituted.validate(&g).is_err());
+    assert!(SignedTx::sign(&g, u64::MAX, envelope(&who), &who).is_err());
+    assert!(SignedTx::sign(&g, u64::MAX - 1, envelope(&who), &who).is_ok());
+}
+
+#[test]
+fn bootstrap_and_unsigned_admin_rules_fail_closed() {
+    let g = genesis();
+    SignedInputs {
+        txs: vec![signed()],
+    }
+    .validate(&g, 1)
+    .unwrap();
+    assert!(SignedInputs::default().validate(&g, 1).is_err());
+    let who = signer(1);
+    let mut env = envelope(&who);
+    env.ops = vec![TxOp::CreateNamespace {
+        name: NamespaceName::new("wrong").unwrap(),
+    }];
+    let changed = SignedTx::sign(&g, 0, env.clone(), &who).unwrap();
+    assert!(
+        SignedInputs {
+            txs: vec![changed.clone()]
+        }
+        .validate(&g, 1)
+        .is_err()
+    );
+    SignedInputs { txs: vec![changed] }.validate(&g, 2).unwrap();
+    let other = signer(2);
+    let mut env = envelope(&other);
+    env.request_id[0] = 3;
+    assert!(
+        SignedInputs {
+            txs: vec![SignedTx::sign(&g, 0, env, &other).unwrap()]
+        }
+        .validate(&g, 1)
+        .is_err()
+    );
+    assert!(
+        SignedInputs {
+            txs: vec![signed(), signed()]
+        }
+        .validate(&g, 2)
+        .is_err()
+    );
+    let mut bad = g.clone();
+    bad.genesis.admins.push(who.address());
+    assert!(bad.validate().is_err());
+    let mut bad = g.clone();
+    bad.genesis.params.max_admin_per_block = 1;
+    assert!(bad.validate().is_err());
+    let mut bad = g.clone();
+    bad.genesis.protocol_version = 1;
+    assert!(bad.validate().is_err());
+    let mut bad = g.clone();
+    bad.block_period_ms = 0;
+    assert!(bad.validate().is_err());
+    let mut bad = g.clone();
+    bad.genesis.timestamp_ms = u64::MAX;
+    assert!(bad.validate().is_err());
+    assert!(g.timestamp(u64::MAX).is_err());
+}
+
+#[test]
+fn header_certificates_authenticate_all_native_fields_and_genesis() {
+    let g = genesis();
+    let who = signer(1);
+    let cert = SignedHeader::sign(&g, g.header(), &who).unwrap();
+    cert.authenticate(&g).unwrap();
+    assert!(SignedHeader::sign(&g, g.header(), &signer(2)).is_err());
+    let mut changes = Vec::new();
+    let mut h = cert.clone();
+    h.genesis_hash = B256::ZERO;
+    changes.push(h);
+    let mut h = cert.clone();
+    h.header.chain_id += 1;
+    changes.push(h);
+    let mut h = cert.clone();
+    h.header.height += 1;
+    changes.push(h);
+    let mut h = cert.clone();
+    h.header.parent_hash = B256::repeat_byte(1);
+    changes.push(h);
+    let mut h = cert.clone();
+    h.header.timestamp_ms += 1;
+    changes.push(h);
+    let mut h = cert.clone();
+    h.header.inputs_digest = B256::ZERO;
+    changes.push(h);
+    let mut h = cert.clone();
+    h.header.outcomes_digest = B256::ZERO;
+    changes.push(h);
+    let mut h = cert.clone();
+    h.header.state_root = Some(B256::ZERO);
+    changes.push(h);
+    let mut h = cert.clone();
+    h.header.state_root = None;
+    changes.push(h);
+    for h in changes {
+        assert!(h.authenticate(&g).is_err());
+    }
+    let body = SignedBlock {
+        header: cert,
+        inputs: SignedInputs::default(),
+        outcomes: BlockOutcomes::default(),
+    };
+    body.authenticate(&g).unwrap();
+    let mut altered = body;
+    altered.inputs.txs.push(signed());
+    assert!(altered.authenticate(&g).is_err());
+}

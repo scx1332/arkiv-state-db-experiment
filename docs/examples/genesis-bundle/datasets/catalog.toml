@@ -1,0 +1,28 @@
+schema = "arkiv-entities-toml-v1"
+
+[[entity]]
+label = "welcome"
+creator = "0x2222222222222222222222222222222222222222"
+create_nonce = "0"
+salt = "10"
+expires_at_height = "86400"
+flags = 0
+content_type = "text/plain"
+payload = { path = "payloads/welcome.txt", bytes = 80, sha256 = "27725c361036237fa9234e8a8a96827a869cc43a64e82532e2fba175db743340" }
+attributes.title = { str = "Welcome" }
+attributes.catalog_id = { u64 = "1" }
+attributes.price = { dec = "12.50" }
+attributes.active = { bool = true }
+
+[[entity]]
+label = "status"
+creator = "0x2222222222222222222222222222222222222222"
+create_nonce = "1"
+salt = "11"
+expires_at_height = "86401"
+flags = 2 # permissionless expiry extension, ordinary mutable payload
+content_type = "text/plain"
+payload = { path = "payloads/status.txt", bytes = 37, sha256 = "b2ef11fa174866eaa5ae50b304a06be7994b90ebb1703d0c5b366d5589d6ec7a" }
+attributes.title = { str = "Status" }
+attributes.catalog_id = { u64 = "1" }
+attributes.active = { bool = true }

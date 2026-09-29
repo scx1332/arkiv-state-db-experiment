@@ -1,0 +1,19 @@
+[package]
+name = "arkiv-db-redb"
+description = "redb adapter for the Arkiv DB versioned storage contract, with instrumented and crash-simulating backends"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+arkiv-db-storage.workspace = true
+redb.workspace = true
+
+[dev-dependencies]
+arkiv-db.workspace = true
+arkiv-db-memory.workspace = true
+
+[lints]
+workspace = true

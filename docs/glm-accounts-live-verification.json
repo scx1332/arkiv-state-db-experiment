@@ -1,0 +1,214 @@
+{
+  "date": "2026-09-25",
+  "implementationCommit": "6666c349a9018b54c040fc019e587987cf855529",
+  "identity": {
+    "chainId": "9005",
+    "genesisHash": "0xdae22c6ac0f5a2b4ddfc0384d52ab20cf8de87e1171604053a98d56adb68a347",
+    "runId": "72632ab82db5e2a99746d18ea029eff2",
+    "sourceId": "00000000-0000-4000-8000-000000000001"
+  },
+  "gas": {
+    "accountProofProfile": "glm-account-v1",
+    "blockGasLimit": "100000000",
+    "feePolicy": "burn",
+    "feesDebited": true,
+    "gasPriceWei": "1000000000",
+    "permanentEntitiesSupported": false,
+    "profile": "glm-v2",
+    "referenceGasPriceWei": "1000000000",
+    "refunds": false,
+    "rentGasPerStorageUnitPeriod": "8",
+    "rentPeriodBlocks": "17280",
+    "scheduleId": 1196182785,
+    "scope": "live-state logical occupancy; archive history excluded",
+    "storageRefunds": false,
+    "token": "GLM",
+    "tokenDecimals": 18,
+    "transactionIntrinsicGas": "21000",
+    "unusedGasRefunds": true,
+    "userGasLimit": "90000000"
+  },
+  "initialAllocationsGlm": {
+    "proposer": "1000",
+    "funding": "10"
+  },
+  "unfundedAdmission": {
+    "httpStatus": 422,
+    "body": {
+      "error": "InsufficientBalance"
+    }
+  },
+  "overReservedAdmission": {
+    "httpStatus": 422,
+    "body": {
+      "error": "InsufficientBalance"
+    }
+  },
+  "receipts": {
+    "create": {
+      "actor": "0xc34071bc2ddcd3f12180610ed64ebc3e063a96d6",
+      "durability": "durable",
+      "executionStatus": "committed",
+      "feeChargedWei": "56713000000000",
+      "gasPriceWei": "1000000000",
+      "gasUsed": "56713",
+      "height": "2",
+      "index": 0,
+      "nonce": "0",
+      "requestId": "0x455cf238d051030810c8d82688021f0498d74776b3cb5cfe517854b9a234a1f9",
+      "status": "included",
+      "transactionHash": "0x6c23a1be9c0766bb741dad37fdf6554c1dd65d9b33c25b7b9e09c6d98e2c9173"
+    },
+    "transfer": {
+      "actor": "0xc34071bc2ddcd3f12180610ed64ebc3e063a96d6",
+      "durability": "durable",
+      "executionStatus": "committed",
+      "feeChargedWei": "30000000000000",
+      "gasPriceWei": "1000000000",
+      "gasUsed": "30000",
+      "height": "3",
+      "index": 0,
+      "nonce": "1",
+      "requestId": "0xd15a68438066aa4880342dfa0f59ef7a689f2c9962d789282dc444981e2ed8a3",
+      "status": "included",
+      "transactionHash": "0xbc3bdcd16638958e867b8b50fc495d5c00f14c8d47966d4011158437cda9a5a8"
+    },
+    "outOfGas": {
+      "actor": "0x320c2ded5fd43bb4c90eb474422c824c0c14a937",
+      "durability": "durable",
+      "executionStatus": "failed",
+      "feeChargedWei": "21000000000000",
+      "gasPriceWei": "1000000000",
+      "gasUsed": "21000",
+      "height": "4",
+      "index": 0,
+      "nonce": "0",
+      "requestId": "0x3d34c3d026cb7e8895bd422c3cffeef2e9802e73b34471575afc07d0269bc6e8",
+      "status": "included",
+      "transactionHash": "0x11e8e77a91900219893ff06335068093c78dc344d520ca0695a072cf76b9eac2"
+    },
+    "fundPool": {
+      "actor": "0xc34071bc2ddcd3f12180610ed64ebc3e063a96d6",
+      "durability": "durable",
+      "executionStatus": "committed",
+      "feeChargedWei": "30000000000000",
+      "gasPriceWei": "1000000000",
+      "gasUsed": "30000",
+      "height": "5",
+      "index": 0,
+      "nonce": "2",
+      "requestId": "0x54689466f590e19ae246bd27040775f653edba83e057c9742ae3d699030f0e43",
+      "status": "included",
+      "transactionHash": "0x80ce76d42c120a119c0c6f5080a7bffa8397b7f9774187c86327f15d3e99c53a"
+    },
+    "fillGap": {
+      "actor": "0x517aaf7c6038057fa1fdb9da44ea7312f624e7da",
+      "durability": "durable",
+      "executionStatus": "committed",
+      "feeChargedWei": "56713000000000",
+      "gasPriceWei": "1000000000",
+      "gasUsed": "56713",
+      "height": "6",
+      "index": 0,
+      "nonce": "0",
+      "requestId": "0x2e91a237ca1cc2a218b7385ffc661247ff4e2f16e8505274f4954e033327eff3",
+      "status": "included",
+      "transactionHash": "0xad2b96f8fa51771a1fe395f1ad3ecff32b03f74fde4cdbed61d301774b180eb1"
+    }
+  },
+  "futureReceipt": {
+    "actor": "0x517aaf7c6038057fa1fdb9da44ea7312f624e7da",
+    "durability": "durable",
+    "executionStatus": "committed",
+    "feeChargedWei": "56713000000000",
+    "gasPriceWei": "1000000000",
+    "gasUsed": "56713",
+    "height": "6",
+    "index": 1,
+    "nonce": "1",
+    "requestId": "0x50b41133843362d60a79cdf8c193ca8a32cf9f2eaf90407d70c50812f7c5c7ed",
+    "status": "included",
+    "transactionHash": "0xe053cc50321764df268219b3fba1b51b25927075ac3e6a0bc77654b50f2a8a1d"
+  },
+  "proofHeight": "6",
+  "accountProofs": {
+    "funding": {
+      "actor": "0xc34071bc2ddcd3f12180610ed64ebc3e063a96d6",
+      "balanceWei": "7998383287000000000",
+      "blockHash": "0x93446b07c93c30b18fd680d3022fb77dbe13ca5250f0d38cd641687c4a501535",
+      "burnedWei": "292339000000000",
+      "gasPriceWei": "1000000000",
+      "height": "6",
+      "initialSupplyWei": "1010000000000000000000",
+      "nextNonce": "3",
+      "totalSupplyWei": "1009999707661000000000",
+      "verificationStatus": {
+        "profile": "glm-account-v1",
+        "status": "verified"
+      }
+    },
+    "recipient": {
+      "actor": "0x320c2ded5fd43bb4c90eb474422c824c0c14a937",
+      "balanceWei": "1999979000000000000",
+      "blockHash": "0x93446b07c93c30b18fd680d3022fb77dbe13ca5250f0d38cd641687c4a501535",
+      "burnedWei": "292339000000000",
+      "gasPriceWei": "1000000000",
+      "height": "6",
+      "initialSupplyWei": "1010000000000000000000",
+      "nextNonce": "1",
+      "totalSupplyWei": "1009999707661000000000",
+      "verificationStatus": {
+        "profile": "glm-account-v1",
+        "status": "verified"
+      }
+    },
+    "unfunded": {
+      "actor": "0x3479196280fb9ed14e214fef28fb30559e20f112",
+      "balanceWei": "0",
+      "blockHash": "0x93446b07c93c30b18fd680d3022fb77dbe13ca5250f0d38cd641687c4a501535",
+      "burnedWei": "292339000000000",
+      "gasPriceWei": "1000000000",
+      "height": "6",
+      "initialSupplyWei": "1010000000000000000000",
+      "nextNonce": "0",
+      "totalSupplyWei": "1009999707661000000000",
+      "verificationStatus": {
+        "profile": "glm-account-v1",
+        "status": "verified"
+      }
+    },
+    "reservation": {
+      "actor": "0x517aaf7c6038057fa1fdb9da44ea7312f624e7da",
+      "balanceWei": "1386574000000000",
+      "blockHash": "0x93446b07c93c30b18fd680d3022fb77dbe13ca5250f0d38cd641687c4a501535",
+      "burnedWei": "292339000000000",
+      "gasPriceWei": "1000000000",
+      "height": "6",
+      "initialSupplyWei": "1010000000000000000000",
+      "nextNonce": "2",
+      "totalSupplyWei": "1009999707661000000000",
+      "verificationStatus": {
+        "profile": "glm-account-v1",
+        "status": "verified"
+      }
+    }
+  },
+  "supply": {
+    "actor": "0x3ce9fd397a98418e6fa6717b1dd8c34814251349",
+    "balanceWei": "999999958800000000000",
+    "blockHash": "0x93446b07c93c30b18fd680d3022fb77dbe13ca5250f0d38cd641687c4a501535",
+    "burnedWei": "292339000000000",
+    "gasPriceWei": "1000000000",
+    "height": "6",
+    "initialSupplyWei": "1010000000000000000000",
+    "nextNonce": "1",
+    "pendingReservedWei": "0",
+    "totalSupplyWei": "1009999707661000000000"
+  },
+  "restartPassed": true,
+  "finalHead": {
+    "hash": "0xca33617f765300c7eb70dbc84d212bbeb202015d5d71a1ae25c8f66f84818008",
+    "height": "10",
+    "stateRoot": "0xe6e1fdc69f7652ec2a01c61a8519797efb94ee58868f365968f5461d395bc6ff"
+  }
+}

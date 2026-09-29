@@ -1,0 +1,46 @@
+[package]
+name = "arkiv-node"
+description = "The append-only Arkiv pseudo node: block format, deterministic block execution, request identity, selection and replay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+arkiv-v2 = ["arkiv-db/arkiv-v2"]
+
+[dependencies]
+alloy-primitives = { workspace = true, features = ["k256"] }
+alloy-rlp.workspace = true
+alloy-sol-types = "=1.7.3"
+k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa", "std"] }
+arkiv-db.workspace = true
+arkiv-db-trie.workspace = true
+arkiv-db-storage.workspace = true
+arkiv-db-redb.workspace = true
+ed25519-dalek = "=2.2.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "=0.8.23"
+sha2 = "0.10"
+base64 = "0.22"
+rustix = { version = "1", features = ["fs"] }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+getrandom = "0.3"
+
+[dev-dependencies]
+arkiv-db-memory.workspace = true
+# Independent Keccak-256 for the golden digests of `tests/block_format.rs`.
+alloy-primitives.workspace = true
+alloy-trie.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "arkiv-proposer"
+path = "src/bin/arkiv-proposer.rs"
+required-features = ["arkiv-v2"]

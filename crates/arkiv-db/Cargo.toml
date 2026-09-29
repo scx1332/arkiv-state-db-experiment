@@ -1,0 +1,24 @@
+[package]
+name = "arkiv-db"
+description = "Raw byte KV facade, the metered block engine with namespaces, typed records, indexes and queries, and the canonical codec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+arkiv-v2 = []
+
+[dependencies]
+alloy-primitives.workspace = true
+arkiv-db-memory.workspace = true
+arkiv-db-storage.workspace = true
+arkiv-db-trie.workspace = true
+
+[dev-dependencies]
+# Independent root oracle (`HashBuilder`) for the engine's state roots.
+alloy-trie.workspace = true
+
+[lints]
+workspace = true

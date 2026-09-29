@@ -1,0 +1,41 @@
+# Bounded protocol-4 authoring example; synthetic identities, no deployment.
+schema = "arkiv-genesis-bundle-v1"
+protocol = "arkiv-launch-prefill-v1"
+name = "Catalog experiment"
+
+[chain]
+id = "9002"
+run_id = "0x00000000000000000000000000000001"
+start_time = "2027-01-01T00:00:00Z"
+block_period_ms = "5000"
+proposer = "0x1111111111111111111111111111111111111111"
+
+[profile]
+path = "profiles/fixed-glm-v2.toml"
+bytes = 947
+sha256 = "98d827bbdea09ac4fcedd884ee0c5dffea379d4b6e9ae942269c6decaf52a64a"
+
+[allocations]
+path = "allocations.toml"
+bytes = 416
+sha256 = "623a3c3c51ffa759b7c9ff0f74c2c03926f74ed78533fd09ec3068f8ad383093"
+expected_initial_supply_wei = "10000000000000000000000"
+
+[prefill]
+builder = "arkiv-prefill-v1"
+namespace = "entities"
+rent_policy = "sponsored-rent-v1"
+sponsor = "0x2222222222222222222222222222222222222222"
+# All expiries are explicit in the source. No implicit staggering is permitted.
+
+[prefill.limits]
+max_entities = "100"
+max_canonical_bytes = "1048576"
+max_storage_units = "1048576"
+
+[[prefill.dataset]]
+id = "catalog"
+format = "arkiv-entities-toml-v1"
+path = "datasets/catalog.toml"
+bytes = 984
+sha256 = "070a8bc36ce6d0abeb99767478db37fd39120df348038ecddc0d3b25be7f30b6"

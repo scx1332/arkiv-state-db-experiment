@@ -1,0 +1,62 @@
+[
+  {
+    "canonicalKeyAndCellsBytes": 595,
+    "example": "small",
+    "executionGas": 59818,
+    "lifetimeBlocks": 17280,
+    "logicalStorageUnits": 2160,
+    "payloadBytes": 256,
+    "referenceGlm": "0.000077098",
+    "rentGas": 17280,
+    "totalGas": 77098,
+    "userAttributes": 2
+  },
+  {
+    "canonicalKeyAndCellsBytes": 1401,
+    "example": "standard-week",
+    "executionGas": 67882,
+    "lifetimeBlocks": 120960,
+    "logicalStorageUnits": 3214,
+    "payloadBytes": 1024,
+    "referenceGlm": "0.000247866",
+    "rentGas": 179984,
+    "totalGas": 247866,
+    "userAttributes": 4
+  },
+  {
+    "canonicalKeyAndCellsBytes": 1401,
+    "example": "standard-month",
+    "executionGas": 67882,
+    "lifetimeBlocks": 518400,
+    "logicalStorageUnits": 3214,
+    "payloadBytes": 1024,
+    "referenceGlm": "0.000839242",
+    "rentGas": 771360,
+    "totalGas": 839242,
+    "userAttributes": 4
+  },
+  {
+    "canonicalKeyAndCellsBytes": 16761,
+    "example": "document-week",
+    "executionGas": 160042,
+    "lifetimeBlocks": 120960,
+    "logicalStorageUnits": 18574,
+    "payloadBytes": 16384,
+    "referenceGlm": "0.001200186",
+    "rentGas": 1040144,
+    "totalGas": 1200186,
+    "userAttributes": 4
+  },
+  {
+    "canonicalKeyAndCellsBytes": 131449,
+    "example": "maximum-payload-month",
+    "executionGas": 848170,
+    "lifetimeBlocks": 518400,
+    "logicalStorageUnits": 133262,
+    "payloadBytes": 131072,
+    "referenceGlm": "0.03283105",
+    "rentGas": 31982880,
+    "totalGas": 32831050,
+    "userAttributes": 4
+  }
+]

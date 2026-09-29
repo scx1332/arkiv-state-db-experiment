@@ -1,0 +1,10 @@
+[package]
+name = "arkiv-db-storage"
+description = "Ordered byte-key storage contract for Arkiv DB"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

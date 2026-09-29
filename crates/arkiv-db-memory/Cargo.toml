@@ -1,0 +1,13 @@
+[package]
+name = "arkiv-db-memory"
+description = "Standard-library-only in-memory KV backend for Arkiv DB"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+arkiv-db-storage.workspace = true
+
+[lints]
+workspace = true

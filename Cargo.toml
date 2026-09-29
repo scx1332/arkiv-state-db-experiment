@@ -1,0 +1,49 @@
+[workspace]
+members = [
+    "crates/arkiv-db",
+    "crates/arkiv-db-memory",
+    "crates/arkiv-db-redb",
+    "crates/arkiv-db-storage",
+    "crates/arkiv-db-trie",
+    "crates/arkiv-node",
+    "vendor/reth-trie",
+    "vendor/alloy-trie",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[workspace.dependencies]
+arkiv-db = { path = "crates/arkiv-db" }
+arkiv-db-memory = { path = "crates/arkiv-db-memory" }
+arkiv-db-redb = { path = "crates/arkiv-db-redb" }
+arkiv-db-storage = { path = "crates/arkiv-db-storage" }
+arkiv-db-trie = { path = "crates/arkiv-db-trie" }
+reth-trie = { path = "vendor/reth-trie" }
+alloy-trie = { path = "vendor/alloy-trie", default-features = false, features = ["std"] }
+alloy-primitives = { version = "1.0", default-features = false, features = ["std", "map-foldhash"] }
+alloy-rlp = { version = "0.3.9", default-features = false, features = ["std"] }
+# Exact pin: redb is the storage candidate under evaluation (docs/redb-experiment.md).
+redb = { version = "=4.3.0", default-features = false, features = ["std"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# Hashing and the redb pager dominate the storage crash tests, which reopen
+# and verify hundreds of images; optimize them in test builds. Semantics are
+# unchanged.
+[profile.dev.package.alloy-primitives]
+opt-level = 3
+
+[profile.dev.package.sha3]
+opt-level = 3
+
+[profile.dev.package.keccak]
+opt-level = 3
+
+[profile.dev.package.redb]
+opt-level = 3

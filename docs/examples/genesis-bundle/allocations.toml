@@ -1,0 +1,12 @@
+schema = "arkiv-genesis-allocations-v1"
+
+# Synthetic public addresses. These files contain no signing keys.
+[[allocation]]
+label = "producer"
+address = "0x1111111111111111111111111111111111111111"
+balance_wei = "1000000000000000000000" # 1,000 GLM
+
+[[allocation]]
+label = "catalog-sponsor"
+address = "0x2222222222222222222222222222222222222222"
+balance_wei = "9000000000000000000000" # 9,000 GLM before genesis rent

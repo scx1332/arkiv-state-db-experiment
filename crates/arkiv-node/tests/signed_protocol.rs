@@ -50,7 +50,7 @@ fn signed_genesis_bounds_native_state_and_reserves_complete_outcomes() {
     g.genesis.params.expiry_per_block = 17;
     assert!(g.validate().is_err());
     let mut g = genesis();
-    g.genesis.limits.max_value_len = 128 * 1024 + 1;
+    g.genesis.limits.max_bytes_len = 128 * 1024 + 1;
     assert!(g.validate().is_err());
     let mut g = genesis();
     g.genesis.limits.max_cells = 33;
@@ -148,31 +148,31 @@ fn preimages_are_explicit_and_golden() {
     // Explicit byte-layout vectors pinned across dependency changes.
     assert_eq!(
         hex(g.hash().as_slice()),
-        "185a3e9912c23e21895991b9ccc6af4a4bd63f3fde6a65277f2f4dac1868ce95"
+        "c955298852db3ecec01cd496e451c506284b2706c8c6839a8a6aedb52843e969"
     );
     assert_eq!(
         hex(tx.intent_digest().as_slice()),
-        "83df18ec539ef1f8325d336a2598680cb159600e8d6d6865d200d42fd2e8f67f"
+        "7196d0c858ec08a2e090f3d4a53ec95d222254857a7699c193cba2fa6f152b00"
     );
     assert_eq!(
         hex(tx.hash().as_slice()),
-        "fd37df8e63d20679105aed7fa44823710a04c027fa87540a205d029c9d9f92e3"
+        "fee11eae14d0696d4a0f464d3f1f899d9b7664aeb8aaea5901f74602997ae973"
     );
     assert_eq!(
         hex(inputs.digest().as_slice()),
-        "d40cda5f4f8e132bba206b3eaac9dc0a0c5c739f3b41aa9b6a0ebfb80ebf5b2a"
+        "a22678509ba6b7df6edf2b5a63a723c8bf879547080c06e031e716ccc54d736c"
     );
     assert_eq!(
         hex(header.intent_digest().as_slice()),
-        "71127aab82e1c8acadff8febe6eb76bab650ef744dc017e5755164a527b248c2"
+        "050fed67a4df76985dcfacb3e8245e84517196da7d79d750a6b1b9ec8d0c9f27"
     );
     assert_eq!(
         hex(&tx.signature),
-        "f91524cba1760297f1f8ab6dcc1744887d70c0593ca63cde01f6885a9214663823d94178a50756f1126db5172d71a68621c488e43ff17dc113919cab52fb4eeb00"
+        "6726cb7f997f73d332cabf2073be73fc17d84139ea95927d1deb1334d6dcc957204030e954591d1ac83e5fa13435d2f23f77186e3648e792364ee74babdfd7db01"
     );
     assert_eq!(
         hex(&header.signature),
-        "9ae6db89513625054bacd7164e5a7cfeed762ee899dbc922b147513124874e8226d34535c45994eeadc31fc3f03a2450c938cbc46af1d82510b5276ac207482f01"
+        "c08db6102542a22c2f6ce4b76a79840edd2ab7e89a0aa93c7555baa22ba327bf5c07aeb923280bf2ae6a6947ae39cbbfd7a2c1d99e0be02eb824d46e1cf3892901"
     );
 }
 

@@ -427,6 +427,11 @@ fn check_value_type(key: &AnnotKey, value: &AnnotVal, position: usize) -> Result
 }
 
 /// The operator × type matrix: only the numeric types are ordered.
+///
+/// This is the reference Arkiv query grammar's rule, kept as is: the parser
+/// is pinned to that grammar (docs/query-language-classification.md) and
+/// also serves the SDK's `arkiv_query`. The engine itself orders every
+/// indexed type; its native range API is not limited by this matrix.
 fn check_operator(operator: &Token, value: &AnnotVal, position: usize) -> Result<(), ParseError> {
     let ordered = matches!(
         value.attr_type(),

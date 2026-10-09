@@ -41,7 +41,7 @@ fn inspect(host: &Host, light: &mut Light, r: &VerifiedRequest) -> serde_json::V
     let (q, p) = light.request(r).unwrap();
     let proof = host.proof(&q).unwrap();
     let value = light.inspect(r, &q, p.as_ref(), &proof).unwrap();
-    assert_eq!(value["inspection"]["version"], 2);
+    assert_eq!(value["inspection"]["version"], arkiv_db::LAYOUT_VERSION);
     assert_eq!(value["inspection"]["proofProfile"], "eq-page-v2");
     let mut changed = proof.clone();
     let last = changed.len() - 1;

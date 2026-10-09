@@ -1,5 +1,6 @@
-//! Index-only complete numeric range proofs. This profile has no pagination:
-//! every matching term, its entire posting set and every matching row must fit.
+//! Index-only complete range proofs over any ordered (indexable) type, in
+//! term-byte order. This profile has no pagination: every matching term, its
+//! entire posting set and every matching row must fit.
 
 use std::{collections::BTreeMap, ops::Bound};
 
@@ -30,10 +31,26 @@ impl RangeQuery {
         digest("arkiv/range-query/v1", &encode(self))
     }
 
-    /// Require at least one numeric bound, with the same type at both ends.
-    /// Reversed bounds and equal excluded bounds describe an empty interval.
+    /// Require at least one bound of an ordered type (every indexable type),
+    /// with the same type at both ends, and `Str` bounds no longer than the
+    /// hard [`Value::MAX_INDEXED_LEN`]. Reversed bounds and equal excluded
+    /// bounds describe an empty interval.
     pub fn validate(&self) -> Result<(), ProofError> {
         self.tag().map(|_| ())
+    }
+
+    /// [`Self::validate`] plus the engine's configured indexed-string
+    /// limit, as for an equality value.
+    fn validate_limits(&self, limits: Limits) -> Result<(), ProofError> {
+        self.validate()?;
+        if [&self.lower, &self.upper]
+            .into_iter()
+            .filter_map(bound_value)
+            .any(|value| matches!(value, Value::Str(_)) && value.encoded_len() > limits.indexed_value_len())
+        {
+            return Err(ProofError::InvalidRequest);
+        }
+        Ok(())
     }
 
     fn tag(&self) -> Result<TypeTag, ProofError> {
@@ -46,7 +63,7 @@ impl RangeQuery {
         if [&self.lower, &self.upper]
             .into_iter()
             .filter_map(bound_value)
-            .any(|value| value.tag() != first.tag())
+            .any(|value| value.tag() != first.tag() || value.encoded_len() > Value::MAX_INDEXED_LEN)
         {
             return Err(ProofError::InvalidRequest);
         }
@@ -63,9 +80,10 @@ impl RangeQuery {
             Bound::Unbounded => start,
             Bound::Included(value) => TrieKey::encode(&TermKey::value(&self.attribute, value)),
             Bound::Excluded(value) => {
+                // The fixed-width successor key. The last byte is the term
+                // length (at most MAX_INDEXED_LEN < 255), so it never
+                // carries into the value, type or name.
                 let mut key = TrieKey::encode(&TermKey::value(&self.attribute, value));
-                // Numeric term lengths are <255, so this cannot carry into the
-                // type/name prefix, even at the numeric maximum.
                 *key.last_mut().ok_or(ProofError::InvalidRequest)? += 1;
                 key
             }
@@ -74,8 +92,18 @@ impl RangeQuery {
             Bound::Unbounded => end,
             Bound::Included(value) => TrieKey::encode(&TermKey::value(&self.attribute, value)),
             Bound::Excluded(value) => {
+                // The fixed-width predecessor key. Only the empty `Str` has
+                // a zero length byte; its predecessor borrows through the
+                // zero padding into the presence byte, lands below the
+                // run's first value key, and the interval is empty.
                 let mut key = TrieKey::encode(&TermKey::value(&self.attribute, value));
-                *key.last_mut().ok_or(ProofError::InvalidRequest)? -= 1;
+                for byte in key.iter_mut().rev() {
+                    let (next, borrow) = byte.overflowing_sub(1);
+                    *byte = next;
+                    if !borrow {
+                        break;
+                    }
+                }
                 key
             }
         };
@@ -101,7 +129,7 @@ fn get_bound(d: &mut Decoder<'_>) -> Result<Bound<Value>, DecodeError> {
     match tag {
         0 => Ok(Bound::Unbounded),
         1 | 2 => {
-            let value = bounded_value(d, 32)?;
+            let value = bounded_value(d, Value::MAX_INDEXED_LEN)?;
             Ok(if tag == 1 {
                 Bound::Included(value)
             } else {
@@ -422,7 +450,7 @@ fn verify_range_inner(
     limits: Limits,
     mut inspection: Option<&mut RangeInspectionCollector>,
 ) -> Result<VerifiedRange, ProofError> {
-    request.query.validate()?;
+    request.query.validate_limits(limits)?;
     if bytes.len() > caps.max_proof_bytes {
         return Err(ProofError::ProofLimitExceeded);
     }
@@ -614,6 +642,7 @@ pub(crate) fn generate_range(
     caps: RangeProofLimits,
     budget: Budget,
 ) -> Result<GeneratedProof, ProofError> {
+    request.query.validate_limits(limits)?;
     let (lower, upper) = request.query.interval()?;
     if header.root() != request.snapshot.state_root {
         return Err(ProofError::InvalidRequest);
@@ -779,7 +808,7 @@ pub(crate) fn generate_range(
                 || row
                     .cells
                     .iter()
-                    .any(|(_, cell)| cell.value.encoded_len() > limits.max_value_len.max(32))
+                    .any(|(_, cell)| cell.value.encoded_len() > limits.max_payload_len().max(32))
             {
                 return Err(ProofError::ProofLimitExceeded);
             }

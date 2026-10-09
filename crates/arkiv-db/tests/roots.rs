@@ -77,10 +77,10 @@ impl V {
     fn tag(&self) -> u8 {
         match self {
             V::Bool(_) => 1,
-            V::I64(_) => 2,
-            V::U64(_) => 3,
-            V::Str(_) => 4,
-            V::Bytes(_) => 5,
+            V::Str(_) => 2,
+            V::Bytes(_) => 3,
+            V::U64(_) => 13,
+            V::I64(_) => 17,
         }
     }
 
@@ -175,16 +175,14 @@ fn padded(bytes: &[u8], width: usize) -> Vec<u8> {
     out
 }
 
-/// A cell value in the codec: tag, then Bool one byte, integers eight
-/// big-endian bytes, text and bytes length-prefixed.
+/// A cell value in the codec: tag, then text and bytes length-prefixed,
+/// every other type its term bytes.
 fn value_bytes(value: &V) -> Vec<u8> {
     let mut out = vec![value.tag()];
     match value {
-        V::Bool(flag) => out.push(u8::from(*flag)),
-        V::I64(number) => out.extend(number.to_be_bytes()),
-        V::U64(number) => out.extend(number.to_be_bytes()),
         V::Str(text) => out.extend(prefixed(text.as_bytes())),
         V::Bytes(bytes) => out.extend(prefixed(bytes)),
+        fixed => out.extend(term_bytes(fixed)),
     }
     out
 }
@@ -201,12 +199,12 @@ fn term_bytes(value: &V) -> Vec<u8> {
     }
 }
 
-/// `name ‖ pad to 20 ‖ name_len ‖ tag ‖ presence ‖ value ‖ pad to 64 ‖
-/// value_len`: 88 bytes.
+/// `name ‖ pad to 32 ‖ name_len ‖ tag ‖ presence ‖ value ‖ pad to 128 ‖
+/// value_len`: 164 bytes.
 fn term_key(name: &str, tag: u8, value: Option<&[u8]>) -> Vec<u8> {
     let mut key = padded(
         name.as_bytes(),
-        if cfg!(feature = "arkiv-v2") { 32 } else { 20 },
+        32,
     );
     key.push(tag);
     match value {
@@ -214,18 +212,18 @@ fn term_key(name: &str, tag: u8, value: Option<&[u8]>) -> Vec<u8> {
             key.push(0);
             key.extend(padded(
                 &[],
-                if cfg!(feature = "arkiv-v2") { 128 } else { 64 },
+                128,
             ));
         }
         Some(bytes) => {
             key.push(1);
             key.extend(padded(
                 bytes,
-                if cfg!(feature = "arkiv-v2") { 128 } else { 64 },
+                128,
             ));
         }
     }
-    assert_eq!(key.len(), if cfg!(feature = "arkiv-v2") { 164 } else { 88 });
+    assert_eq!(key.len(), 164);
     key
 }
 
@@ -353,7 +351,7 @@ fn model_roots(model: &Model) -> Roots {
     let host = (root(&host), host.len() as u64);
     // StateHeader: format 1 ‖ catalog root ‖ catalog len ‖ next namespace
     // ‖ pricing (id ‖ 31 ‖ 31 weights) ‖ host root ‖ host len.
-    let mut header = (if cfg!(feature = "arkiv-v2") { 2u32 } else { 1 })
+    let mut header = 1u32
         .to_be_bytes()
         .to_vec();
     header.extend(handle(catalog.0, catalog.1 as usize));

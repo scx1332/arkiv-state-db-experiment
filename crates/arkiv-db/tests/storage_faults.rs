@@ -137,6 +137,15 @@ impl ObjectReader for TestStore {
         }
         Ok(self.objects.lock().unwrap().get(&(space, *id)).cloned())
     }
+
+    fn read_object_bounded(
+        &self,
+        space: SpaceId,
+        id: &ObjectId,
+        _max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        self.read_object(space, id)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -791,10 +800,10 @@ fn rows_whose_attributes_cannot_be_indexed_are_corrupt() {
     let roots = honest.try_namespace_roots(ns(1)).unwrap().unwrap();
     assert_eq!(roots.terms, (EMPTY_ROOT_HASH, 0));
 
-    let bytes_value = [&[5u8, 0, 0, 0, 1][..], b"b"].concat();
+    let bytes_value = [&[3u8, 0, 0, 0, 1][..], b"b"].concat();
     let length = Value::MAX_INDEXED_LEN + 1;
     let long_str = [
-        &[4u8][..],
+        &[2u8][..],
         &(length as u32).to_be_bytes(),
         &vec![b'x'; length],
     ]

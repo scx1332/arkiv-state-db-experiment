@@ -21,8 +21,10 @@ pub fn capabilities() -> Value {
     if cfg!(feature = "arkiv-v2") {
         json!({
             "genericScalarTypes":generic_scalar_types(),
-            "profile":"arkiv-entity-v2", "layoutVersion":2, "codecVersion":2,
-            "attributeNameBytes":32, "indexedStringBytes":128, "payloadBytes":131072,
+            "profile":"arkiv-entity-v2", "layoutVersion":arkiv_db::LAYOUT_VERSION,
+            "codecVersion":arkiv_db::CODEC_VERSION,
+            "attributeNameBytes":arkiv_db::CellName::MAX_LEN,
+            "indexedStringBytes":arkiv_db::Value::MAX_INDEXED_LEN, "payloadBytes":131072,
             "scalarTypes":["bool","i32","u64","u256","dec","bytes32","str","addr","key"],
             "systemEquality":["$key","$creator","$owner","$createdAt","$updatedAt","$expiresAt","$contentType"],
             "systemProjection":["$key","$creator","$owner","$createdAt","$updatedAt","$expiresAt","$contentType","$payload","$creationFlags"],
@@ -33,8 +35,10 @@ pub fn capabilities() -> Value {
             "proofTrust":"configured-unsigned-header-source"
         })
     } else {
-        json!({"profile":"generic-v1","layoutVersion":1,"codecVersion":1,
-            "attributeNameBytes":20,"indexedStringBytes":64,
+        json!({"profile":"generic-v1","layoutVersion":arkiv_db::LAYOUT_VERSION,
+            "codecVersion":arkiv_db::CODEC_VERSION,
+            "attributeNameBytes":arkiv_db::CellName::MAX_LEN,
+            "indexedStringBytes":arkiv_db::Value::MAX_INDEXED_LEN,
             "scalarTypes":generic_scalar_types(),
             "queryLanguage":"single-typed-equality","signatures":false,
             "sdkRpcCompatible":false,"productionStateRoots":false})

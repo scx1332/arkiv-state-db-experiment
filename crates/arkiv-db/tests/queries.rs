@@ -1518,7 +1518,8 @@ fn deleted_records_disappear_and_a_rollback_brings_them_back() {
 /// Small limits so every fault is a few literals away.
 const SMALL: Limits = Limits {
     max_cells: 3,
-    max_value_len: 4,
+    max_str_len: 4,
+    max_bytes_len: 4,
     max_page: 5,
     max_groups: 2,
     max_literals: 2,
@@ -1681,26 +1682,19 @@ fn query_faults_are_reported_in_the_validation_order_before_any_charge() {
             ),
             QueryFault::MixedBounds,
         ),
-        (
-            Term::range(n(), Bound::Included(s("a")), Bound::Unbounded),
-            QueryFault::NotOrdered,
-        ),
-        (
-            Term::range(
-                n(),
-                Bound::Included(Value::Bool(false)),
-                Bound::Excluded(Value::Bool(true)),
-            ),
-            QueryFault::NotOrdered,
-        ),
-        // Range bounds are never ValueTooLarge or NotIndexable.
+        // Every indexable type is ordered; only Bytes bounds are not. A Str
+        // bound obeys the indexed-string limit like an equality value.
         (
             Term::range(
                 n(),
                 Bound::Included(s("abcdefgh")),
                 Bound::Included(s("abcdefgh")),
             ),
-            QueryFault::NotOrdered,
+            QueryFault::ValueTooLarge,
+        ),
+        (
+            Term::range(n(), Bound::Unbounded, Bound::Excluded(s("äbcd"))),
+            QueryFault::ValueTooLarge,
         ),
         (
             Term::range(
@@ -1739,6 +1733,13 @@ fn query_faults_are_reported_in_the_validation_order_before_any_charge() {
             Bound::Excluded(Value::U64(0)),
             Bound::Excluded(Value::U64(0)),
         ),
+        Term::range(n(), Bound::Included(s("a")), Bound::Excluded(s("abcd"))),
+        Term::range(
+            n(),
+            Bound::Included(Value::Bool(false)),
+            Bound::Excluded(Value::Bool(true)),
+        ),
+        Term::range(n(), Bound::Unbounded, Bound::Included(Value::Addr([1; 20]))),
     ] {
         assert!(query(&Query::term(term), &wide_ok, 5).is_ok());
     }

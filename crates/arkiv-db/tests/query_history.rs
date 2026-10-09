@@ -86,10 +86,12 @@ const PAGE: usize = 5;
 const LIMITS: Limits = Limits {
     namespace_cap: DEFAULT_NAMESPACE_CAP,
     max_cells: 6,
-    max_value_len: 16,
+    max_str_len: 16,
+    max_bytes_len: 16,
     max_page: PAGE,
     max_groups: 8,
     max_literals: 8,
+    ..Limits::DEFAULT
 };
 
 const ALICE: OwnerId = OwnerId::new([0xa1; 20]);
@@ -554,8 +556,8 @@ fn cells_fault(cells: &[(CellName, Cell)]) -> Option<ArgumentFault> {
             return Some(ArgumentFault::DuplicateCell);
         }
         let long = match &cell.value {
-            Value::Str(text) => text.len() > LIMITS.max_value_len,
-            Value::Bytes(bytes) => bytes.len() > LIMITS.max_value_len,
+            Value::Str(text) => text.len() > LIMITS.max_str_len,
+            Value::Bytes(bytes) => bytes.len() > LIMITS.max_bytes_len,
             _ => false,
         };
         if long {
@@ -2387,7 +2389,7 @@ fn delete(namespace: NamespaceId, bytes: &[u8]) -> WriteOp {
 
 /// An operation that fails admission, chosen by `which`.
 fn fault_op(namespace: NamespaceId, bytes: &[u8], which: usize) -> (Path, WriteOp) {
-    let long = "x".repeat(LIMITS.max_value_len + 1);
+    let long = "x".repeat(LIMITS.max_str_len + 1);
     let kind = name(KIND);
     let all_names = [KIND, PRICE, QTY, FLAG, TAG, NOTE, GHOST].map(name);
     let op = match which {

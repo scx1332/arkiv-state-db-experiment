@@ -12,7 +12,7 @@
 //! version 4 for these proof APIs (model-3 write/read rules are unchanged).
 //! See `docs/eq-proof-charges.md` for charges and conservative reservations.
 
-use std::{fmt, sync::Arc};
+use std::fmt;
 
 mod range;
 pub(crate) use range::generate_range;
@@ -27,7 +27,7 @@ use arkiv_db_trie::{MemoryOnly, MerkleMap, Probe, TrieKey, TrieValue, walk};
 use crate::{
     B256, Budget, Cell, CellKind, CellName, Decode, DecodeError, Decoder, Encode, Encoder, Limits,
     NamespaceId, OperationClass as Op, Outcome, Receipt, ReceiptKind, RecordId, RecordKey,
-    Rejection, Row, StateHeader, Value, digest, encode,
+    Rejection, Row, StateHeader, TypeTag, Value, digest, encode,
     layout::{Catalog, Member, NamespaceState, Posting, PostingMap, StoredRecord, TermKey},
     meter::Meter,
     nodes::{Loader, Nodes},
@@ -316,23 +316,16 @@ fn version(d: &mut Decoder<'_>, kind: &'static str) -> Result<(), DecodeError> {
     Ok(())
 }
 fn bounded_value(d: &mut Decoder<'_>, max: usize) -> Result<Value, DecodeError> {
-    // Check length before copying any string/bytes. Tags are codec-v1 tags.
-    match d.u8()? {
-        tag @ (4 | 5) => {
-            let bytes = d.bytes()?;
-            if bytes.len() > max {
-                return Err(invalid_codec("value exceeds local limit"));
-            }
-            if tag == 4 {
-                let text = std::str::from_utf8(bytes).map_err(|_| DecodeError::InvalidUtf8)?;
-                Ok(Value::Str(Arc::from(text)))
-            } else {
-                Ok(Value::Bytes(Arc::from(bytes)))
-            }
+    let tag = d.u8()?;
+    let tag = TypeTag::from_id(tag).ok_or(DecodeError::UnknownTag { kind: "Value", tag })?;
+    // Check a variable length before copying any string/bytes.
+    if tag.width().is_none() {
+        let mut peek = d.clone();
+        if usize::try_from(peek.u32()?).map_or(true, |len| len > max) {
+            return Err(invalid_codec("value exceeds local limit"));
         }
-        tag => crate::codec::decode_fixed_scalar(tag, d)
-            .unwrap_or(Err(DecodeError::UnknownTag { kind: "Value", tag })),
     }
+    crate::codec::decode_payload(tag, d)
 }
 fn validate_request(
     request: &EqRequest,
@@ -394,7 +387,7 @@ fn row_node_bound(limits: Limits) -> Result<usize, ProofError> {
         .min(64)
         .checked_mul(
             limits
-                .max_value_len
+                .max_payload_len()
                 .max(32)
                 .checked_add(CellName::MAX_LEN + 12)
                 .ok_or(ProofError::ProofLimitExceeded)?,
@@ -540,7 +533,7 @@ fn decode_row(
     for _ in 0..n {
         let name: CellName = d.get()?;
         let kind: CellKind = d.get()?;
-        let value = bounded_value(&mut d, limits.max_value_len)?;
+        let value = bounded_value(&mut d, limits.max_payload_len())?;
         if cells.last().is_some_and(|(previous, _)| previous >= &name) {
             return Err(ProofError::InvalidProof);
         }
@@ -960,21 +953,12 @@ pub(crate) fn generate(
         for id in selected {
             // The configured maximum is an allocation guard, not the size of
             // this row. Large payload limits must not reject tiny witnesses.
-            if cfg!(feature = "arkiv-v2") {
-                if row_bound > caps.max_allocated_bytes {
-                    return Err(ProofError::ProofLimitExceeded);
-                }
-                serving
-                    .meter
-                    .check_capacity(&[(Op::RecordProbe, 1), (Op::ResultRow, 1)])?;
-            } else {
-                serving.append_capacity(row_bound)?;
-                serving.meter.check_capacity(&[
-                    (Op::ReadByte, row_bound as u64),
-                    (Op::RecordProbe, 1),
-                    (Op::ResultRow, 1),
-                ])?;
+            if row_bound > caps.max_allocated_bytes {
+                return Err(ProofError::ProofLimitExceeded);
             }
+            serving
+                .meter
+                .check_capacity(&[(Op::RecordProbe, 1), (Op::ResultRow, 1)])?;
             serving.meter.charge(Op::RecordProbe, 1)?;
             let row: StoredRecord = namespace
                 .typed
@@ -986,7 +970,7 @@ pub(crate) fn generate(
                 || row
                     .cells
                     .iter()
-                    .any(|(_, cell)| cell.value.encoded_len() > limits.max_value_len.max(32))
+                    .any(|(_, cell)| cell.value.encoded_len() > limits.max_payload_len().max(32))
             {
                 return Err(ProofError::ProofLimitExceeded);
             }
@@ -1001,19 +985,15 @@ pub(crate) fn generate(
                 .charge_group(&[(Op::ResultRow, 1), (Op::ReadByte, read_bytes as u64)])?;
             serving.append(8)?;
             e.put(id);
-            let actual_row_bound = if cfg!(feature = "arkiv-v2") {
-                // Canonical row: key length + key + cell count; each cell has
-                // name length/name, kind, tag, and at most four length bytes.
-                // A present id's proof terminates at exactly this row. Other
-                // path nodes are branches/extensions, bounded by 1024 bytes.
-                read_bytes
-                    .checked_add(128)
-                    .and_then(|n| n.checked_add(row.cells.len().checked_mul(10)?))
-                    .ok_or(ProofError::ProofLimitExceeded)?
-                    .max(META_NODE_BYTES)
-            } else {
-                row_bound
-            };
+            // Canonical row: key length + key + cell count; each cell has
+            // name length/name, kind, tag, and at most four length bytes.
+            // A present id's proof terminates at exactly this row. Other
+            // path nodes are branches/extensions, bounded by 1024 bytes.
+            let actual_row_bound = read_bytes
+                .checked_add(128)
+                .and_then(|n| n.checked_add(row.cells.len().checked_mul(10)?))
+                .ok_or(ProofError::ProofLimitExceeded)?
+                .max(META_NODE_BYTES);
             let row_path =
                 serving.path(&namespace.typed.rows, id, &loaders.rows, actual_row_bound)?;
             write_path(&mut e, &row_path);

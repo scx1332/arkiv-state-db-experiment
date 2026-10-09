@@ -152,10 +152,7 @@ fn accepted<T: Encode + Decode + Debug>(bytes: &[u8]) -> bool {
 
 #[test]
 fn integers_are_fixed_width_big_endian() {
-    assert_eq!(
-        arkiv_db::CODEC_VERSION,
-        if cfg!(feature = "arkiv-v2") { 2 } else { 1 }
-    );
+    assert_eq!(arkiv_db::CODEC_VERSION, 1);
     golden(&7u8, &[0x07]);
     golden(&0x0102_0304u32, &[1, 2, 3, 4]);
     golden(&258u64, &[0, 0, 0, 0, 0, 0, 1, 2]);
@@ -397,14 +394,44 @@ fn record_keys_are_a_length_byte_and_1_to_32_bytes() {
 // Types, values and cells.
 // ---------------------------------------------------------------------------
 
+/// Type ids are golem-db's cell type ids (`Key`, engine-only, is 64), and
+/// a value is `type id ‖ payload`: `Str`/`Bytes` length-prefixed, every
+/// other type its term bytes (golem's stored form: sign bit flipped for
+/// signed types, IEEE total-order form for floats).
 #[test]
 fn type_tags_and_values() {
-    golden(&TypeTag::Bool, &[1]);
-    golden(&TypeTag::I64, &[2]);
-    golden(&TypeTag::U64, &[3]);
-    golden(&TypeTag::Str, &[4]);
-    golden(&TypeTag::Bytes, &[5]);
-    for tag in [0, 26, 0xff] {
+    let tags = [
+        (TypeTag::Bool, 1),
+        (TypeTag::Str, 2),
+        (TypeTag::Bytes, 3),
+        (TypeTag::Addr, 4),
+        (TypeTag::Bytes4, 8),
+        (TypeTag::Bytes8, 9),
+        (TypeTag::Bytes16, 10),
+        (TypeTag::Bytes32, 11),
+        (TypeTag::U32, 12),
+        (TypeTag::U64, 13),
+        (TypeTag::U128, 14),
+        (TypeTag::U256, 15),
+        (TypeTag::I32, 16),
+        (TypeTag::I64, 17),
+        (TypeTag::I128, 18),
+        (TypeTag::I256, 19),
+        (TypeTag::Dec32, 20),
+        (TypeTag::Dec64, 21),
+        (TypeTag::Dec128, 22),
+        (TypeTag::Dec, 23),
+        (TypeTag::F32, 24),
+        (TypeTag::F64, 25),
+        (TypeTag::Date32, 28),
+        (TypeTag::Timestamp64, 29),
+        (TypeTag::Key, 64),
+    ];
+    for (tag, id) in tags {
+        golden(&tag, &[id]);
+        assert_eq!(tag.id(), id);
+    }
+    for tag in [0, 5, 6, 7, 26, 27, 30, 63, 65, 0xff] {
         rejects::<TypeTag>(
             &[tag],
             DecodeError::UnknownTag {
@@ -416,112 +443,85 @@ fn type_tags_and_values() {
 
     golden(&Value::Bool(false), &[1, 0]);
     golden(&Value::Bool(true), &[1, 1]);
-    // Two's complement, not the sign-flipped term form.
+    golden(&Value::str("hé"), &[2, 0, 0, 0, 3, b'h', 0xc3, 0xa9]);
+    golden(&Value::str(""), &[2, 0, 0, 0, 0]);
+    golden(&Value::bytes(&[0x00, 0xff]), &[3, 0, 0, 0, 2, 0x00, 0xff]);
+    golden(&Value::bytes(&[]), &[3, 0, 0, 0, 0]);
+    golden(&Value::Addr([7; 20]), &cat(&[&[4], &[7; 20]]));
+    golden(&Value::Bytes4([1, 2, 3, 4]), &[8, 1, 2, 3, 4]);
+    golden(&Value::Bytes8([7; 8]), &cat(&[&[9], &[7; 8]]));
+    golden(&Value::Bytes16([9; 16]), &cat(&[&[10], &[9; 16]]));
+    golden(&Value::Bytes32([5; 32]), &cat(&[&[11], &[5; 32]]));
+    golden(&Value::U32(258), &[12, 0, 0, 1, 2]);
+    golden(&Value::U64(258), &[13, 0, 0, 0, 0, 0, 0, 1, 2]);
+    golden(&Value::U64(u64::MAX), &cat(&[&[13], &[0xff; 8]]));
+    golden(&Value::U128(258), &cat(&[&[14], &[0; 14], &[1, 2]]));
+    golden(&Value::U256([3; 32]), &cat(&[&[15], &[3; 32]]));
+    golden(&Value::I32(-2), &[16, 0x7f, 0xff, 0xff, 0xfe]);
     golden(
         &Value::I64(-2),
-        &[2, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe],
+        &[17, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe],
     );
-    golden(&Value::I64(i64::MIN), &[2, 0x80, 0, 0, 0, 0, 0, 0, 0]);
-    golden(&Value::I64(1), &[2, 0, 0, 0, 0, 0, 0, 0, 1]);
-    golden(&Value::U64(258), &[3, 0, 0, 0, 0, 0, 0, 1, 2]);
-    golden(&Value::U64(u64::MAX), &cat(&[&[3], &[0xff; 8]]));
-    golden(&Value::str("hé"), &[4, 0, 0, 0, 3, b'h', 0xc3, 0xa9]);
-    golden(&Value::str(""), &[4, 0, 0, 0, 0]);
-    golden(&Value::bytes(&[0x00, 0xff]), &[5, 0, 0, 0, 2, 0x00, 0xff]);
-    golden(&Value::bytes(&[]), &[5, 0, 0, 0, 0]);
-
-    rejects::<Value>(&[1, 2], DecodeError::InvalidBool(2));
-    rejects::<Value>(&[4, 0, 0, 0, 1, 0xff], DecodeError::InvalidUtf8);
-    for tag in [0, 26, 0x80] {
-        rejects::<Value>(&[tag, 0], DecodeError::UnknownTag { kind: "Value", tag });
-    }
-}
-
-/// Type ids 6–25 and their storage encodings: natural fixed width,
-/// big-endian, signed types in plain two's complement, floats as IEEE bits.
-/// Both profiles admit every id. Additive: ids 1–5 above are unchanged.
-#[test]
-fn extended_type_ids_and_values() {
-    let tags = [
-        (TypeTag::I32, 6),
-        (TypeTag::U256, 7),
-        (TypeTag::Dec, 8),
-        (TypeTag::Bytes32, 9),
-        (TypeTag::Addr, 10),
-        (TypeTag::Key, 11),
-        (TypeTag::Bytes4, 12),
-        (TypeTag::Bytes8, 13),
-        (TypeTag::Bytes16, 14),
-        (TypeTag::U32, 15),
-        (TypeTag::U128, 16),
-        (TypeTag::I128, 17),
-        (TypeTag::I256, 18),
-        (TypeTag::Dec32, 19),
-        (TypeTag::Dec64, 20),
-        (TypeTag::Dec128, 21),
-        (TypeTag::F32, 22),
-        (TypeTag::F64, 23),
-        (TypeTag::Date32, 24),
-        (TypeTag::Timestamp64, 25),
-    ];
-    for (tag, id) in tags {
-        golden(&tag, &[id]);
-        assert_eq!(tag.id(), id);
-    }
-
-    golden(&Value::I32(-2), &[6, 0xff, 0xff, 0xff, 0xfe]);
-    golden(&Value::Bytes4([1, 2, 3, 4]), &[12, 1, 2, 3, 4]);
-    golden(&Value::Bytes8([7; 8]), &cat(&[&[13], &[7; 8]]));
-    golden(&Value::Bytes16([9; 16]), &cat(&[&[14], &[9; 16]]));
-    golden(&Value::U32(258), &[15, 0, 0, 1, 2]);
-    golden(&Value::U128(258), &cat(&[&[16], &[0; 14], &[1, 2]]));
-    golden(&Value::I128(-2), &cat(&[&[17], &[0xff; 15], &[0xfe]]));
-    golden(&Value::I128(i128::MIN), &cat(&[&[17, 0x80], &[0; 15]]));
+    golden(&Value::I64(i64::MIN), &[17, 0, 0, 0, 0, 0, 0, 0, 0]);
+    golden(&Value::I64(1), &[17, 0x80, 0, 0, 0, 0, 0, 0, 1]);
+    golden(&Value::I128(-2), &cat(&[&[18, 0x7f], &[0xff; 14], &[0xfe]]));
+    golden(&Value::I128(i128::MIN), &cat(&[&[18], &[0; 16]]));
     let mut minus_two = [0xff; 32];
     minus_two[31] = 0xfe;
-    golden(&Value::I256(minus_two), &cat(&[&[18], &minus_two]));
+    golden(
+        &Value::I256(minus_two),
+        &cat(&[&[19, 0x7f], &[0xff; 30], &[0xfe]]),
+    );
     // dec32 12.3450 is 123450 units of 10^-4.
-    golden(&Value::Dec32(123_450), &[19, 0, 1, 0xe2, 0x3a]);
-    golden(&Value::Dec32(-1), &[19, 0xff, 0xff, 0xff, 0xff]);
+    golden(&Value::Dec32(123_450), &[20, 0x80, 1, 0xe2, 0x3a]);
+    golden(&Value::Dec32(-1), &[20, 0x7f, 0xff, 0xff, 0xff]);
     golden(
         &Value::Dec64(-1_500_000),
-        &[20, 0xff, 0xff, 0xff, 0xff, 0xff, 0xe9, 0x1c, 0xa0],
+        &[21, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xe9, 0x1c, 0xa0],
     );
-    golden(&Value::Dec128(1), &cat(&[&[21], &[0; 15], &[1]]));
-    golden(&Value::f32(1.0).unwrap(), &[22, 0x3f, 0x80, 0, 0]);
-    golden(&Value::f32(-2.0).unwrap(), &[22, 0xc0, 0, 0, 0]);
-    golden(&Value::f32(f32::INFINITY).unwrap(), &[22, 0x7f, 0x80, 0, 0]);
-    golden(&Value::f64(0.0).unwrap(), &[23, 0, 0, 0, 0, 0, 0, 0, 0]);
+    golden(&Value::Dec128(1), &cat(&[&[22, 0x80], &[0; 14], &[1]]));
+    golden(&Value::Dec([0; 32]), &cat(&[&[23, 0x80], &[0; 31]]));
+    golden(&Value::f32(1.0).unwrap(), &[24, 0xbf, 0x80, 0, 0]);
+    golden(&Value::f32(-2.0).unwrap(), &[24, 0x3f, 0xff, 0xff, 0xff]);
+    golden(&Value::f32(f32::INFINITY).unwrap(), &[24, 0xff, 0x80, 0, 0]);
+    golden(&Value::f64(0.0).unwrap(), &[25, 0x80, 0, 0, 0, 0, 0, 0, 0]);
     golden(
         &Value::f64(-1.5).unwrap(),
-        &[23, 0xbf, 0xf8, 0, 0, 0, 0, 0, 0],
+        &[25, 0x40, 0x07, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
     );
-    golden(&Value::Date32(-1), &[24, 0xff, 0xff, 0xff, 0xff]);
-    golden(&Value::Date32(19_000), &[24, 0, 0, 0x4a, 0x38]);
+    golden(&Value::Date32(-1), &[28, 0x7f, 0xff, 0xff, 0xff]);
+    golden(&Value::Date32(19_000), &[28, 0x80, 0, 0x4a, 0x38]);
     golden(
         &Value::Timestamp64(1_000_000),
-        &[25, 0, 0, 0, 0, 0, 0x0f, 0x42, 0x40],
+        &[29, 0x80, 0, 0, 0, 0, 0x0f, 0x42, 0x40],
     );
+    golden(&Value::Key([6; 32]), &cat(&[&[64], &[6; 32]]));
 
-    // Negative zero normalizes on construction; its bits and NaN never decode.
-    assert_eq!(Value::f64(-0.0), Value::f64(0.0));
-    assert_eq!(Value::f32(f32::NAN), None);
     let invalid = DecodeError::Invalid {
         kind: "Value",
-        reason: "float is NaN or negative zero",
+        reason: "not a canonical value of its type",
     };
-    rejects::<Value>(&[22, 0x80, 0, 0, 0], invalid);
-    rejects::<Value>(&[22, 0x7f, 0xc0, 0, 0], invalid);
-    rejects::<Value>(&[23, 0x80, 0, 0, 0, 0, 0, 0, 0], invalid);
-    rejects::<Value>(&[23, 0x7f, 0xf8, 0, 0, 0, 0, 0, 1], invalid);
+    rejects::<Value>(&[1, 2], invalid);
+    rejects::<Value>(&[2, 0, 0, 0, 1, 0xff], DecodeError::InvalidUtf8);
+    for tag in [0, 5, 26, 30, 0x80] {
+        rejects::<Value>(&[tag, 0], DecodeError::UnknownTag { kind: "Value", tag });
+    }
+    // Negative zero normalizes on construction; its form and NaN never decode.
+    assert_eq!(Value::f64(-0.0), Value::f64(0.0));
+    assert_eq!(Value::f32(f32::NAN), None);
+    rejects::<Value>(&[24, 0x7f, 0xff, 0xff, 0xff], invalid);
+    rejects::<Value>(&[24, 0xff, 0xc0, 0, 0], invalid);
+    rejects::<Value>(&cat(&[&[25, 0x7f], &[0xff; 7]]), invalid);
+    rejects::<Value>(&[25, 0xff, 0xf8, 0, 0, 0, 0, 0, 1], invalid);
     // Fixed widths are exact.
     for (tag, width) in [
-        (12u8, 4usize),
-        (15, 4),
-        (16, 16),
-        (18, 32),
-        (22, 4),
-        (25, 8),
+        (8u8, 4usize),
+        (12, 4),
+        (14, 16),
+        (19, 32),
+        (24, 4),
+        (29, 8),
+        (64, 32),
     ] {
         let mut short = vec![tag];
         short.extend(vec![0; width - 1]);
@@ -544,12 +544,12 @@ fn cell_kinds_and_cells() {
     }
     golden(
         &Cell::attribute(Value::U64(7)),
-        &[1, 3, 0, 0, 0, 0, 0, 0, 0, 7],
+        &[1, 13, 0, 0, 0, 0, 0, 0, 0, 7],
     );
-    golden(&Cell::field(Value::bytes(&[])), &[2, 5, 0, 0, 0, 0]);
+    golden(&Cell::field(Value::bytes(&[])), &[2, 3, 0, 0, 0, 0]);
     golden(
         &(name("title"), Cell::field(Value::str("hi"))),
-        &cat(&[&lp(b"title"), &[2, 4, 0, 0, 0, 2, b'h', b'i']]),
+        &cat(&[&lp(b"title"), &[2, 2, 0, 0, 0, 2, b'h', b'i']]),
     );
 }
 
@@ -603,9 +603,9 @@ fn write_op_vectors() -> Vec<(WriteOp, Vec<u8>)> {
                 &[1, b'a'],
                 &[0, 0, 0, 2],
                 &lp(b"price"),
-                &[1, 3, 0, 0, 0, 0, 0, 0, 0, 7],
+                &[1, 13, 0, 0, 0, 0, 0, 0, 0, 7],
                 &lp(b"note"),
-                &[2, 4, 0, 0, 0, 2, b'h', b'i'],
+                &[2, 2, 0, 0, 0, 2, b'h', b'i'],
             ]),
         ),
         (
@@ -621,8 +621,8 @@ fn write_op_vectors() -> Vec<(WriteOp, Vec<u8>)> {
                 &[1, b'a'],
                 &[0, 0, 0, 1],
                 &lp(b"price"),
-                &[1, 2],
-                &[0xff; 8],
+                &[1, 17, 0x7f],
+                &[0xff; 7],
                 &[0, 0, 0, 1],
                 &lp(b"note"),
             ]),
@@ -705,7 +705,7 @@ fn engine_admission_bounds_are_left_to_the_engine() {
         &[1, b'a'],
         &[0, 0, 0, 1],
         &lp(b"x"),
-        &[1, 5, 0, 0, 0, 0],
+        &[1, 3, 0, 0, 0, 0],
     ]);
     let attribute: WriteOp = decode_exact(&bytes_attribute).unwrap();
     let duplicate = cat(&[
@@ -798,14 +798,13 @@ fn argument_and_query_faults() {
         (ArgumentFault::SetAndRemoveOverlap, 4),
         (ArgumentFault::ValueTooLarge, 5),
         (ArgumentFault::BytesNotIndexable, 6),
-        (ArgumentFault::EmptyPatch, 7),
-        (ArgumentFault::NotHostOperation, 8),
-        (ArgumentFault::UnsupportedType, 9),
+        (ArgumentFault::NotHostOperation, 7),
+        (ArgumentFault::NameTooLong, 8),
     ];
     for (fault, tag) in arguments {
         golden(&fault, &[tag]);
     }
-    for tag in [0, 10] {
+    for tag in [0, 9] {
         rejects::<ArgumentFault>(
             &[tag],
             DecodeError::UnknownTag {
@@ -871,7 +870,7 @@ fn rejections() {
     );
     golden(
         &Rejection::InvalidArgument(ArgumentFault::NotHostOperation),
-        &[12, 8],
+        &[12, 7],
     );
     golden(
         &Rejection::InvalidQuery(QueryFault::ProjectionTooLarge),
@@ -1052,28 +1051,45 @@ fn price_schedules_carry_exactly_31_weights() {
 }
 
 #[test]
-fn limits_are_six_u64_fields() {
+fn limits_are_nine_u64_fields() {
     golden(
         &Limits::DEFAULT,
         &cat(&[
             &[0, 0, 0, 1, 0, 0, 0, 0],
             &be64(64),
+            &be64(32),
             &be64(4096),
+            &be64(4096),
+            &be64(128),
             &be64(200),
             &be64(8),
             &be64(8),
         ]),
     );
+    // golem-db's facade test limits, every field distinct from its default.
     golden(
         &Limits {
             namespace_cap: 3,
             max_cells: 2,
-            max_value_len: 1,
+            max_cell_name_len: 10,
+            max_str_len: 64,
+            max_bytes_len: 128,
+            max_indexed_len: 16,
             max_page: 5,
             max_groups: 7,
             max_literals: 11,
         },
-        &cat(&[&be64(3), &be64(2), &be64(1), &be64(5), &be64(7), &be64(11)]),
+        &cat(&[
+            &be64(3),
+            &be64(2),
+            &be64(10),
+            &be64(64),
+            &be64(128),
+            &be64(16),
+            &be64(5),
+            &be64(7),
+            &be64(11),
+        ]),
     );
 }
 
@@ -1092,14 +1108,14 @@ fn every_accepted_short_input_is_canonical() {
         .collect();
 
     // Single bytes, counted from the tag tables: bool 00/01; option 00;
-    // five type ids; two cell kinds; eight argument and eleven query
+    // 25 type ids; two cell kinds; eight argument and eleven query
     // faults; ten field-less rejections (1, 2, 5–11, 14); outcome 01; two
     // receipt kinds.
     assert_eq!(count::<bool>(&singles), 2);
     assert_eq!(count::<Option<bool>>(&singles), 1);
     assert_eq!(count::<TypeTag>(&singles), 25);
     assert_eq!(count::<CellKind>(&singles), 2);
-    assert_eq!(count::<ArgumentFault>(&singles), 9);
+    assert_eq!(count::<ArgumentFault>(&singles), 8);
     assert_eq!(count::<QueryFault>(&singles), 11);
     assert_eq!(count::<Rejection>(&singles), 10);
     assert_eq!(count::<Outcome>(&singles), 1);
@@ -1114,7 +1130,7 @@ fn every_accepted_short_input_is_canonical() {
     assert_eq!(count::<RecordKey>(&pairs), 256);
     assert_eq!(count::<Value>(&pairs), 2);
     assert_eq!(count::<Effect>(&pairs), 4);
-    assert_eq!(count::<Rejection>(&pairs), 9 + 11);
+    assert_eq!(count::<Rejection>(&pairs), 8 + 11);
     assert_eq!(count::<Outcome>(&pairs), 10);
     assert_eq!(count::<Option<bool>>(&pairs), 2);
     assert_eq!(count::<(bool, bool)>(&pairs), 4);
@@ -1194,16 +1210,16 @@ fn every_accepted_mutation_is_canonical() {
         fuzz::<WriteOp>(&mut rng, &bytes);
     }
     fuzz::<Receipt>(&mut rng, &APPLIED_379);
-    fuzz::<Value>(&mut rng, &[4, 0, 0, 0, 3, b'h', 0xc3, 0xa9]);
+    fuzz::<Value>(&mut rng, &[2, 0, 0, 0, 3, b'h', 0xc3, 0xa9]);
     fuzz::<Effect>(&mut rng, &[5, 0, 0, 0, 0, 0, 0, 0, 7]);
     fuzz::<Rejection>(
         &mut rng,
         &[3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2],
     );
-    fuzz::<Limits>(&mut rng, &[1; 48]);
+    fuzz::<Limits>(&mut rng, &[1; 72]);
     fuzz::<Vec<(CellName, Cell)>>(
         &mut rng,
-        &cat(&[&[0, 0, 0, 1], &lp(b"x"), &[1, 3], &[0; 8]]),
+        &cat(&[&[0, 0, 0, 1], &lp(b"x"), &[1, 13], &[0; 8]]),
     );
     fuzz::<NamespaceDescriptor>(&mut rng, &cat(&[&NS1, &lp(b"blog"), &[0xa1; 20], &[0; 8]]));
     fuzz::<Option<RecordKey>>(&mut rng, &[1, 2, b'a', b'b']);
@@ -1295,5 +1311,5 @@ fn values_round_trip_through_shared_storage() {
     let value = Value::Str(Arc::clone(&text));
     let decoded: Value = decode_exact(&encode(&value)).unwrap();
     assert_eq!(decoded, value);
-    assert_eq!(encode(&decoded), cat(&[&[4], &lp(b"shared")]));
+    assert_eq!(encode(&decoded), cat(&[&[2], &lp(b"shared")]));
 }

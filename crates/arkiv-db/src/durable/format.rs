@@ -1,4 +1,4 @@
-//! Engine-only durable profile; logical state encodings remain unchanged.
+//! The durable engine profile: genesis and publication manifests.
 
 use super::{DurableError, corrupt, incompatible};
 use crate::{
@@ -7,19 +7,13 @@ use crate::{
 };
 use arkiv_db_trie::EMPTY_ROOT_HASH;
 
-pub const PROFILE: &[u8; 8] = if cfg!(feature = "arkiv-v2") {
-    b"ARKENG02"
-} else {
-    b"ARKENG01"
-};
-const PREFILLED_PROFILE: &[u8; 8] = if cfg!(feature = "arkiv-v2") {
-    b"ARKENG03"
-} else {
-    b"ARKENG04"
-};
+pub const PROFILE: &[u8; 8] = b"ARKENG01";
 pub const PROFILE_KEY: &[u8] = b"engine/profile";
 pub const GENESIS_KEY: &[u8] = b"engine/genesis";
-pub const GENESIS_BYTES: usize = 8 + 6 * 4 + 32 + 48 + 256 + 8;
+/// An empty genesis: profile, versions, deployment, limits, pricing, object
+/// limit and an absent initial state.
+pub const GENESIS_BYTES: usize = 8 + 6 * 4 + 32 + Limits::MIN_ENCODED_LEN + 256 + 8 + 1;
+/// A prefilled genesis.
 pub const GENESIS_MAX_BYTES: usize = GENESIS_BYTES + StateHeader::MIN_ENCODED_LEN;
 pub const MANIFEST_MAX_BYTES: usize = 4 + 32 + 8 + 1 + 40 + 348 + 32 + 32;
 
@@ -30,8 +24,8 @@ pub struct EngineGenesis {
     pub limits: Limits,
     pub pricing: PriceSchedule,
     pub max_object_bytes: u64,
-    /// Explicit initial state for an atomic prefilled genesis. `None` keeps
-    /// the original empty-genesis encoding and identity byte for byte.
+    /// Explicit initial state for an atomic prefilled genesis; `None` for an
+    /// empty genesis.
     pub initial_state: Option<StateHeader>,
 }
 
@@ -54,9 +48,13 @@ impl EngineGenesis {
         }
         // Sequence/string counts in existing codecs are u32. Never permit an
         // admitted value whose later canonical encoding would panic/narrow.
+        self.limits.validate().map_err(incompatible)?;
         for n in [
             self.limits.max_cells,
-            self.limits.max_value_len,
+            self.limits.max_str_len,
+            self.limits.max_bytes_len,
+            self.limits.max_cell_name_len,
+            self.limits.max_indexed_len,
             self.limits.max_page,
             self.limits.max_groups,
             self.limits.max_literals,
@@ -65,7 +63,7 @@ impl EngineGenesis {
         }
         self.limits
             .max_cells
-            .checked_mul(self.limits.max_value_len.saturating_add(32))
+            .checked_mul(self.limits.max_payload_len().saturating_add(32))
             .ok_or_else(|| incompatible("row size arithmetic overflow"))?;
         if let Some(header) = &self.initial_state {
             decode_exact::<StateHeader>(&encode(header))
@@ -123,11 +121,7 @@ impl EngineGenesis {
 
 impl Encode for EngineGenesis {
     fn encode_to(&self, e: &mut Encoder) {
-        for b in if self.initial_state.is_some() {
-            PREFILLED_PROFILE
-        } else {
-            PROFILE
-        } {
+        for b in PROFILE {
             e.u8(*b);
         }
         for version in [
@@ -146,26 +140,19 @@ impl Encode for EngineGenesis {
         e.put(&self.limits);
         e.put(&self.pricing);
         e.u64(self.max_object_bytes);
-        if let Some(header) = &self.initial_state {
-            e.put(header);
-        }
+        e.put(&self.initial_state);
     }
 }
 
 impl Decode for EngineGenesis {
     const MIN_ENCODED_LEN: usize = GENESIS_BYTES;
     fn decode_from(d: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        let profile = d.array::<8>()?;
-        let prefilled = if &profile == PREFILLED_PROFILE {
-            true
-        } else if &profile == PROFILE {
-            false
-        } else {
+        if &d.array::<8>()? != PROFILE {
             return Err(DecodeError::Invalid {
                 kind: "engine profile",
                 reason: "wrong magic",
             });
-        };
+        }
         for expected in [
             crate::LAYOUT_VERSION,
             crate::CODEC_VERSION,
@@ -191,7 +178,7 @@ impl Decode for EngineGenesis {
             limits: d.get()?,
             pricing: d.get()?,
             max_object_bytes: d.u64()?,
-            initial_state: if prefilled { Some(d.get()?) } else { None },
+            initial_state: d.get()?,
         })
     }
 }

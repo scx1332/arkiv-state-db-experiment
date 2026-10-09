@@ -38,7 +38,7 @@
 //!   length and the high nibbles of the tag and presence bytes can never
 //!   differ while the bytes before them agree; the value length can, since
 //!   a `Str` value may end in zero bytes); adding a record to that term
-//!   rehashes exactly 176 term nodes.
+//!   rehashes exactly 177 term nodes.
 //!
 //! The measured numbers are printed with `--nocapture` and reported in
 //! `docs/state-trie.md`. What this file does not establish: time, memory or
@@ -83,6 +83,15 @@ struct Store {
 impl ObjectReader for Store {
     fn read_object(&self, space: SpaceId, id: &ObjectId) -> Result<Option<Vec<u8>>, StorageError> {
         Ok(self.objects.lock().unwrap().get(&(space, *id)).cloned())
+    }
+
+    fn read_object_bounded(
+        &self,
+        space: SpaceId,
+        id: &ObjectId,
+        _max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        self.read_object(space, id)
     }
 }
 
@@ -686,12 +695,12 @@ fn a_deep_term_path_rehashes_its_whole_path() {
 
     // One more record holding S: S's posting and S's existence posting
     // gain its id, so both term leaves are rewritten. Rewriting S rebuilds
-    // its whole 175-node path; the existence leaf hangs off the branch on
-    // nibble 45 of that path, so it adds one node: 176. Every one of them
+    // its whole 175-node path; the existence leaf and its side of the trie
+    // add two nodes: 177. Every one of them
     // is at least 32 bytes (each branch and extension holds a 33-byte
     // reference to the rest of the path, and both leaves hold 40-byte
     // posting handles), and no two are equal (distinct leaves, and each
-    // path node references the next), so all 176 are hashed and staged.
+    // path node references the next), so all 177 are hashed and staged.
     let measurement = chain.block(&[create(
         1,
         b"another",
@@ -704,19 +713,15 @@ fn a_deep_term_path_rehashes_its_whole_path() {
     assert_eq!(measurement.writes[&MapKind::Terms], 2);
     assert_eq!(
         measurement.hashed(MapKind::Terms),
-        if cfg!(feature = "arkiv-v2") { 177 } else { 176 }
+        177
     );
     assert_eq!(
         measurement.staged(MapKind::Terms),
-        if cfg!(feature = "arkiv-v2") { 177 } else { 176 }
+        177
     );
     assert_eq!(
         measurement.allowed(MapKind::Terms),
-        if cfg!(feature = "arkiv-v2") {
-            2 * 330
-        } else {
-            2 * 178
-        }
+2 * 330
     );
     report("a record added to the 175-node term path", &measurement);
 }

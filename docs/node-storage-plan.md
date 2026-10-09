@@ -498,7 +498,7 @@ N3a is done: the `arkiv-db-trie` crate (see the
 (catalog, host map, and per namespace the raw records, key bindings, rows,
 terms and the postings nested in term leaves) is a `MerkleMap` keyed by the
 frozen state-format-1 encodings (8-byte ids, 32-byte host keys, 21-byte
-padded raw keys, 33-byte `RecordKey` v2, the 88-byte term composite) with
+padded raw keys, 33-byte `RecordKey`, the 164-byte term composite) with
 canonical-codec leaves; the catalog leaf carries each namespace's
 descriptor, record allocator and map roots. `state_root =
 digest("arkiv/state/v1", encode(StateHeader { format 1, catalog root and

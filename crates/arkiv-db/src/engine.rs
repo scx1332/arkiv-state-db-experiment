@@ -446,7 +446,15 @@ impl Engine {
 
     /// Creates an engine with explicit instance parameters. They are fixed
     /// for the engine's lifetime and checked at admission.
+    ///
+    /// # Panics
+    ///
+    /// If `limits` fail [`Limits::validate`] (a cell limit above its hard
+    /// cap): a configuration error, not an input error.
     pub fn with_limits(schedule: PriceSchedule, limits: Limits) -> Self {
+        if let Err(reason) = limits.validate() {
+            panic!("invalid engine limits: {reason}");
+        }
         let state = WorkingState {
             catalog: Catalog::new(),
             next_namespace: 1,
@@ -2939,6 +2947,15 @@ mod tests {
             }
             self.allowance.store(left - 1, Ordering::SeqCst);
             Ok(self.objects.get(&(space, *id)).cloned())
+        }
+
+        fn read_object_bounded(
+            &self,
+            space: SpaceId,
+            id: &ObjectId,
+            _max_bytes: usize,
+        ) -> Result<Option<Vec<u8>>, StorageError> {
+            self.read_object(space, id)
         }
     }
 

@@ -1,4 +1,4 @@
-//! The canonical binary codec for the selected [`CODEC_VERSION`] profile.
+//! The canonical binary codec, version [`CODEC_VERSION`].
 //!
 //! Every byte string that is hashed, stored or compared between nodes is
 //! produced by this codec. The rules are few and fixed:
@@ -46,7 +46,7 @@ use crate::{
     namespace::{NamespaceDescriptor, NamespaceId, NamespaceName, OwnerId, Revision},
     query::QueryFault,
     record::{
-        ArgumentFault, Cell, CellKind, CellName, Float32, Float64, Limits, NameFault, RecordId,
+        ArgumentFault, Cell, CellKind, CellName, Limits, NameFault, RecordId,
         RecordKey, TypeTag, Value,
     },
 };
@@ -60,12 +60,6 @@ pub const CODEC_VERSION: u32 = crate::LAYOUT_VERSION;
 // Enum tags. Every table is documented in docs/block-format.md; a tag is
 // never reused and never derived from a Rust discriminant.
 
-// TypeTag and Value (the value tag is the value's type id).
-const TYPE_BOOL: u8 = 1;
-const TYPE_I64: u8 = 2;
-const TYPE_U64: u8 = 3;
-const TYPE_STR: u8 = 4;
-const TYPE_BYTES: u8 = 5;
 
 // CellKind.
 const KIND_ATTRIBUTE: u8 = 1;
@@ -96,8 +90,8 @@ const ARGUMENT_DUPLICATE_CELL: u8 = 3;
 const ARGUMENT_SET_AND_REMOVE_OVERLAP: u8 = 4;
 const ARGUMENT_VALUE_TOO_LARGE: u8 = 5;
 const ARGUMENT_BYTES_NOT_INDEXABLE: u8 = 6;
-const ARGUMENT_EMPTY_PATCH: u8 = 7;
-const ARGUMENT_NOT_HOST_OPERATION: u8 = 8;
+const ARGUMENT_NOT_HOST_OPERATION: u8 = 7;
+const ARGUMENT_NAME_TOO_LONG: u8 = 8;
 
 // QueryFault.
 const QUERY_NO_GROUPS: u8 = 1;
@@ -835,137 +829,52 @@ impl Decode for RecordId {
 // ---------------------------------------------------------------------------
 // Typed values and cells.
 
-const fn type_tag(tag: TypeTag) -> u8 {
-    // Explicit ids, documented in docs/block-format.md ("Value types").
-    match tag {
-        TypeTag::Bool => TYPE_BOOL,
-        TypeTag::I64 => TYPE_I64,
-        TypeTag::U64 => TYPE_U64,
-        TypeTag::Str => TYPE_STR,
-        TypeTag::Bytes => TYPE_BYTES,
-        TypeTag::I32 => 6,
-        TypeTag::U256 => 7,
-        TypeTag::Dec => 8,
-        TypeTag::Bytes32 => 9,
-        TypeTag::Addr => 10,
-        TypeTag::Key => 11,
-        TypeTag::Bytes4 => 12,
-        TypeTag::Bytes8 => 13,
-        TypeTag::Bytes16 => 14,
-        TypeTag::U32 => 15,
-        TypeTag::U128 => 16,
-        TypeTag::I128 => 17,
-        TypeTag::I256 => 18,
-        TypeTag::Dec32 => 19,
-        TypeTag::Dec64 => 20,
-        TypeTag::Dec128 => 21,
-        TypeTag::F32 => 22,
-        TypeTag::F64 => 23,
-        TypeTag::Date32 => 24,
-        TypeTag::Timestamp64 => 25,
-    }
-}
-
-/// The type id as one byte.
+/// The type id as one byte ([`TypeTag::id`], golem-db's cell type id).
 impl Encode for TypeTag {
     fn encode_to(&self, encoder: &mut Encoder) {
-        encoder.u8(type_tag(*self));
+        encoder.u8(self.id());
     }
 }
 
 impl Decode for TypeTag {
     fn decode_from(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
         let tag = decoder.u8()?;
-        TypeTag::from_id(tag)
-            .filter(|decoded| type_tag(*decoded) == tag)
-            .ok_or(DecodeError::UnknownTag {
-                kind: "TypeTag",
-                tag,
-            })
-    }
-}
-
-/// Decodes the payload of a fixed-width scalar with type id `tag`; `None`
-/// for `Str`, `Bytes` and unknown ids, which the caller handles.
-pub(crate) fn decode_fixed_scalar(
-    tag: u8,
-    decoder: &mut Decoder<'_>,
-) -> Option<Result<Value, DecodeError>> {
-    fn non_nan<T>(value: Option<T>) -> Result<T, DecodeError> {
-        value.ok_or(DecodeError::Invalid {
-            kind: "Value",
-            reason: "float is NaN or negative zero",
+        TypeTag::from_id(tag).ok_or(DecodeError::UnknownTag {
+            kind: "TypeTag",
+            tag,
         })
     }
-    Some(match tag {
-        TYPE_BOOL => decoder.bool().map(Value::Bool),
-        TYPE_I64 => decoder.i64().map(Value::I64),
-        TYPE_U64 => decoder.u64().map(Value::U64),
-        6 => decoder.array().map(i32::from_be_bytes).map(Value::I32),
-        7 => decoder.array().map(Value::U256),
-        8 => decoder.array().map(Value::Dec),
-        9 => decoder.array().map(Value::Bytes32),
-        10 => decoder.array().map(Value::Addr),
-        11 => decoder.array().map(Value::Key),
-        12 => decoder.array().map(Value::Bytes4),
-        13 => decoder.array().map(Value::Bytes8),
-        14 => decoder.array().map(Value::Bytes16),
-        15 => decoder.array().map(u32::from_be_bytes).map(Value::U32),
-        16 => decoder.array().map(u128::from_be_bytes).map(Value::U128),
-        17 => decoder.array().map(i128::from_be_bytes).map(Value::I128),
-        18 => decoder.array().map(Value::I256),
-        19 => decoder.array().map(i32::from_be_bytes).map(Value::Dec32),
-        20 => decoder.array().map(i64::from_be_bytes).map(Value::Dec64),
-        21 => decoder.array().map(i128::from_be_bytes).map(Value::Dec128),
-        22 => decoder
-            .array()
-            .and_then(|bits| non_nan(Float32::from_bits(u32::from_be_bytes(bits))))
-            .map(Value::F32),
-        23 => decoder
-            .array()
-            .and_then(|bits| non_nan(Float64::from_bits(u64::from_be_bytes(bits))))
-            .map(Value::F64),
-        24 => decoder.array().map(i32::from_be_bytes).map(Value::Date32),
-        25 => decoder
-            .array()
-            .map(i64::from_be_bytes)
-            .map(Value::Timestamp64),
-        _ => return None,
-    })
 }
 
-/// `type id ‖ payload`: `Bool` one byte, `Str` and `Bytes` length-prefixed,
-/// every other type its natural fixed width ([`TypeTag::width`]) in
-/// big-endian: unsigned integers as-is, signed integers, decimals and the
-/// time types in plain two's complement (not the order-preserving term
-/// form), fixed-width bytes as-is, floats as their IEEE-754 bits (never NaN
-/// or negative zero).
+/// Decodes the payload of a value of type `tag`: `Str` and `Bytes` are
+/// length-prefixed, every other type is its fixed-width term bytes.
+pub(crate) fn decode_payload(tag: TypeTag, decoder: &mut Decoder<'_>) -> Result<Value, DecodeError> {
+    match tag {
+        TypeTag::Str => decoder.str().map(|text| Value::Str(Arc::from(text))),
+        TypeTag::Bytes => decoder.bytes().map(|bytes| Value::Bytes(Arc::from(bytes))),
+        fixed => {
+            let width = fixed.width().expect("fixed-width type");
+            let bytes = decoder.fixed(width)?;
+            Value::from_term_bytes(fixed, bytes).ok_or(DecodeError::Invalid {
+                kind: "Value",
+                reason: "not a canonical value of its type",
+            })
+        }
+    }
+}
+
+/// `type id ‖ payload`. `Str` and `Bytes` are length-prefixed; every other
+/// type is its fixed-width term bytes ([`Value::term_bytes`]), which are
+/// golem-db's stored value bytes: big-endian, signed integers, decimals and
+/// time types with the sign bit flipped, floats in the IEEE total-order
+/// form (never NaN or negative zero), `Bool` as `00`/`01`.
 impl Encode for Value {
     fn encode_to(&self, encoder: &mut Encoder) {
-        encoder.u8(type_tag(self.tag()));
+        encoder.u8(self.tag().id());
         match self {
-            Self::Bool(flag) => encoder.bool(*flag),
-            Self::I64(value) | Self::Dec64(value) | Self::Timestamp64(value) => encoder.i64(*value),
-            Self::U64(value) => encoder.u64(*value),
             Self::Str(text) => encoder.str(text),
             Self::Bytes(bytes) => encoder.bytes(bytes),
-            Self::I32(value) | Self::Dec32(value) | Self::Date32(value) => {
-                encoder.fixed(&value.to_be_bytes())
-            }
-            Self::U256(value)
-            | Self::Dec(value)
-            | Self::Bytes32(value)
-            | Self::Key(value)
-            | Self::I256(value) => encoder.fixed(value),
-            Self::Addr(value) => encoder.fixed(value),
-            Self::Bytes4(value) => encoder.fixed(value),
-            Self::Bytes8(value) => encoder.fixed(value),
-            Self::Bytes16(value) => encoder.fixed(value),
-            Self::U32(value) => encoder.u32(*value),
-            Self::U128(value) => encoder.fixed(&value.to_be_bytes()),
-            Self::I128(value) | Self::Dec128(value) => encoder.fixed(&value.to_be_bytes()),
-            Self::F32(value) => encoder.u32(value.to_bits()),
-            Self::F64(value) => encoder.u64(value.to_bits()),
+            fixed => encoder.fixed(&fixed.term_bytes().expect("indexable")),
         }
     }
 }
@@ -974,12 +883,9 @@ impl Decode for Value {
     const MIN_ENCODED_LEN: usize = 2;
 
     fn decode_from(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        match decoder.u8()? {
-            TYPE_STR => decoder.str().map(|text| Self::Str(Arc::from(text))),
-            TYPE_BYTES => decoder.bytes().map(|bytes| Self::Bytes(Arc::from(bytes))),
-            tag => decode_fixed_scalar(tag, decoder)
-                .unwrap_or(Err(DecodeError::UnknownTag { kind: "Value", tag })),
-        }
+        let tag = decoder.u8()?;
+        let tag = TypeTag::from_id(tag).ok_or(DecodeError::UnknownTag { kind: "Value", tag })?;
+        decode_payload(tag, decoder)
     }
 }
 
@@ -1231,9 +1137,8 @@ impl Encode for ArgumentFault {
             Self::SetAndRemoveOverlap => ARGUMENT_SET_AND_REMOVE_OVERLAP,
             Self::ValueTooLarge => ARGUMENT_VALUE_TOO_LARGE,
             Self::BytesNotIndexable => ARGUMENT_BYTES_NOT_INDEXABLE,
-            Self::EmptyPatch => ARGUMENT_EMPTY_PATCH,
             Self::NotHostOperation => ARGUMENT_NOT_HOST_OPERATION,
-            Self::UnsupportedType => 9,
+            Self::NameTooLong => ARGUMENT_NAME_TOO_LONG,
         });
     }
 }
@@ -1247,9 +1152,8 @@ impl Decode for ArgumentFault {
             ARGUMENT_SET_AND_REMOVE_OVERLAP => Ok(Self::SetAndRemoveOverlap),
             ARGUMENT_VALUE_TOO_LARGE => Ok(Self::ValueTooLarge),
             ARGUMENT_BYTES_NOT_INDEXABLE => Ok(Self::BytesNotIndexable),
-            ARGUMENT_EMPTY_PATCH => Ok(Self::EmptyPatch),
             ARGUMENT_NOT_HOST_OPERATION => Ok(Self::NotHostOperation),
-            9 => Ok(Self::UnsupportedType),
+            ARGUMENT_NAME_TOO_LONG => Ok(Self::NameTooLong),
             tag => Err(DecodeError::UnknownTag {
                 kind: "ArgumentFault",
                 tag,
@@ -1494,21 +1398,29 @@ impl Decode for PriceSchedule {
 }
 
 /// Every field as a `u64`, in declaration order: `namespace_cap`,
-/// `max_cells`, `max_value_len`, `max_page`, `max_groups`, `max_literals`.
+/// `max_cells`, `max_cell_name_len`, `max_str_len`, `max_bytes_len`,
+/// `max_indexed_len`, `max_page`, `max_groups`, `max_literals`.
 impl Encode for Limits {
     fn encode_to(&self, encoder: &mut Encoder) {
         let wide = |value: usize| u64::try_from(value).expect("usize fits in u64");
         encoder.u64(self.namespace_cap);
-        encoder.u64(wide(self.max_cells));
-        encoder.u64(wide(self.max_value_len));
-        encoder.u64(wide(self.max_page));
-        encoder.u64(wide(self.max_groups));
-        encoder.u64(wide(self.max_literals));
+        for value in [
+            self.max_cells,
+            self.max_cell_name_len,
+            self.max_str_len,
+            self.max_bytes_len,
+            self.max_indexed_len,
+            self.max_page,
+            self.max_groups,
+            self.max_literals,
+        ] {
+            encoder.u64(wide(value));
+        }
     }
 }
 
 impl Decode for Limits {
-    const MIN_ENCODED_LEN: usize = 6 * 8;
+    const MIN_ENCODED_LEN: usize = 9 * 8;
 
     fn decode_from(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
         let namespace_cap = decoder.u64()?;
@@ -1521,7 +1433,10 @@ impl Decode for Limits {
         Ok(Self {
             namespace_cap,
             max_cells: narrow()?,
-            max_value_len: narrow()?,
+            max_cell_name_len: narrow()?,
+            max_str_len: narrow()?,
+            max_bytes_len: narrow()?,
+            max_indexed_len: narrow()?,
             max_page: narrow()?,
             max_groups: narrow()?,
             max_literals: narrow()?,
@@ -1536,7 +1451,8 @@ mod tests {
     #[test]
     fn value_tags_are_the_type_ids() {
         for tag in TypeTag::ALL {
-            assert_eq!(type_tag(tag), tag.id(), "{tag}");
+            assert_eq!(encode(&tag), [tag.id()], "{tag}");
+            assert_eq!(TypeTag::from_id(tag.id()), Some(tag));
         }
     }
 

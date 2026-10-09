@@ -153,27 +153,26 @@ map's keys carry the same bytes, so the state root commits to them (node
 step N3b).
 
 - `RecordKey`: 1 to 32 caller-assigned bytes (`RecordKey::MAX_LEN = 32`),
-  unique among the live records of a namespace. The canonical encoding,
-  version 2 (`RecordKey::ENCODING_VERSION`), is 33 bytes
-  (`RecordKey::ENCODED_LEN`): `len ‖ bytes ‖ zero padding`, a bijection:
+  unique among the live records of a namespace. The canonical encoding is
+  33 bytes (`RecordKey::ENCODED_LEN`): `len ‖ bytes ‖ zero padding`, a bijection:
   `decode` rejects a length byte of 0 or above 32 and any non-zero padding.
   Vectors: `b"a"` → `01 61 00…00` (33 bytes); 31 zero bytes → `1f 00…00`;
   a 32-byte key `k` → `20 ‖ k` with no padding; an empty key and a 33-byte
   key are not keys. Charges count the raw key length, never the encoding.
-  The compatibility rules are under "Record-key encoding" below.
 - `RecordId`: the dense per-namespace creation ordinal from 1, never reused.
   A deleted key recreated gets a new id, so a reused key never joins two
   histories. Ids are provisional until publication: rollback restores the
   allocator like the namespace ordinal. Display `rec:{n}`. The id is the
   only result order of queries.
-- `CellName`: ASCII, 1 to 20 bytes; the first character is a letter or `$`
+- `CellName`: ASCII, 1 to 32 bytes (writes: `Limits::max_cell_name_len`); the first character is a letter or `$`
   followed by a letter; every later character is a letter, digit, `_`, `-`,
   `.` or `:`; case-sensitive, ordered bytewise. `#`, `@`, spaces and
   non-ASCII are invalid, so engine-reserved names are unreachable from the
   data plane. A `$`-name is an ordinary name to the engine.
-- `TypeTag::{Bool = 1, I64 = 2, U64 = 3, Str = 4, Bytes = 5}` (local ids, not
-  the SDK's). `Bytes` is field-only; `I64` and `U64` are ordered; `Str`
-  supports prefixes.
+- `TypeTag`: golem-db's cell type ids (`Bool = 1`, `Str = 2`, `Bytes = 3`,
+  `U64 = 13`, `I64 = 17`, …; see `docs/block-format.md`), not the SDK's.
+  `Bytes` is field-only; every other type is ordered by its term bytes;
+  `Str` also supports prefixes.
 - `Value`: encoded length 1 (`Bool`), 8 (`I64`, `U64`) or the byte length
   (`Str`, `Bytes`). Term bytes: `Bool` `00`/`01`; `I64` big-endian with the
   sign bit flipped; `U64` big-endian; `Str` its UTF-8 bytes; none for
@@ -181,17 +180,18 @@ step N3b).
   `80 00 00 00 00 00 00 00`, `I64(i64::MIN)` → `00…00`, `I64(i64::MAX)` →
   `ff…ff`, `U64(258)` → `00 00 00 00 00 00 01 02`, `Str("ab")` → `61 62`.
   Values of different types never compare equal or order against each other.
-  Indexed attribute values have a hard 64-byte encoded limit
-  (`Value::MAX_INDEXED_LEN`), including UTF-8 strings measured in bytes.
-  Fields/payloads retain `max_value_len` (4096 by default); raising it never
-  raises the indexed cap. Indexed string inputs and prefixes obey
-  `min(max_value_len, 64)` on writes, predicates and term bounds.
+  Indexed strings obey `Limits::indexed_value_len()` =
+  `min(max_indexed_len, max_str_len)` (at most the hard 128-byte
+  `Value::MAX_INDEXED_LEN`), measured in UTF-8 bytes, on writes,
+  predicates, range bounds, prefixes and term bounds. Field values obey
+  `max_str_len` and `max_bytes_len` (4096 by default).
 - `Cell { kind: Attribute | Field, value }`. Attributes are indexed and
   filterable; fields are stored and returned only. Kind and type are bound
   per record, not per name. An attribute holding `Bytes` is invalid.
 - `Row { id, key: Option<RecordKey>, cells }`: the id is always returned; the
   key and the cells are projected; cells are sorted by name.
-- `Limits { namespace_cap: 2^32, max_cells: 64, max_value_len: 4096,
+- `Limits { namespace_cap: 2^32, max_cells: 64, max_cell_name_len: 32,
+  max_str_len: 4096, max_bytes_len: 4096, max_indexed_len: 128,
   max_page: 200, max_groups: 8, max_literals: 8 }` (`Limits::DEFAULT`) are
   instance parameters, fixed for an engine's lifetime
   (`Engine::with_limits`, `Engine::limits`, `Branch::limits`;
@@ -289,53 +289,39 @@ recorded):
 
 - Writes, in order: the host-path restriction, then the arguments.
   `CreateRecord`: more than `max_cells` cells → `TooManyCells`; then per cell
-  in submitted order `DuplicateCell`, a `Str`/`Bytes` value longer than
-  `max_value_len` or an indexed value longer than 64 bytes → `ValueTooLarge`,
+  in submitted order `DuplicateCell`, a name longer than
+  `max_cell_name_len` → `NameTooLong`, a `Str`/`Bytes` value longer than
+  `max_str_len`/`max_bytes_len` or a `Str` attribute longer than the
+  indexed-string bound → `ValueTooLarge`,
   an attribute holding `Bytes` →
   `BytesNotIndexable`. `PatchRecord`: both lists empty is valid (golem-db's
   no-op: `NotFound` for a missing key, otherwise applied with DirectoryLookup,
-  PointRead and RecordPatch 1 charged and nothing written; `EmptyPatch` is
-  retired); `set.len() + remove.len() > max_cells` → `TooManyCells`; `set` validated
-  like create cells; a duplicate in `remove` → `DuplicateCell`; a name in
+  PointRead and RecordPatch 1 charged and nothing written); `set.len() + remove.len() > max_cells` → `TooManyCells`; `set` validated
+  like create cells; a duplicate in `remove` → `DuplicateCell`, a name in
+  `remove` longer than `max_cell_name_len` → `NameTooLong`; a name in
   both lists → `SetAndRemoveOverlap`. Then the milestone-1 block admission
   (`ExceedsBlockBudget`).
 - Reads: `get_record` checks a `Named` projection's size
   (`ProjectionTooLarge`). `query` checks, in order: `NoGroups`,
   `TooManyGroups`, `TooManyLiterals`, `ZeroLimit`, `LimitTooLarge`; per
   literal in order: `Eq`/`NotEq` with a `Bytes` value → `NotIndexable`, with
-  a `Str` value longer than `min(max_value_len, 64)` → `ValueTooLarge`; `Range` with
+  a `Str` value longer than the indexed-string bound → `ValueTooLarge`; `Range` with
   both bounds `Unbounded` → `UnboundedRange`, bounds of different types →
-  `MixedBounds`, an unordered type → `NotOrdered` (range bounds are never
-  `ValueTooLarge`); `StartsWith` with a prefix longer than `min(max_value_len, 64)` →
+  `MixedBounds`, a `Bytes` bound → `NotOrdered`, a `Str` bound longer than the
+  indexed-string bound → `ValueTooLarge`; `StartsWith` with a prefix longer than the indexed-string bound →
   `ValueTooLarge`; `Exists` with `Bytes` → `NotIndexable`; then
   `ProjectionTooLarge`; then the cursor check. `count` validates the query
   the same way with an implicit limit of 1. `terms` checks, in order: a
   type that is not indexable → `NotIndexable`; a bound value of another
-  type → `MixedBounds`; a `Str` bound longer than `min(max_value_len, 64)` →
+  type → `MixedBounds`; a `Str` bound longer than the indexed-string bound →
   `ValueTooLarge`; `ZeroLimit`; `LimitTooLarge`.
 
 Record-key encoding (settled in node step N0b-1). The SDK addresses entities
 by 32-byte hashed keys, so `RecordKey::MAX_LEN` is 32 and the canonical
-encoding is version 2, 33 bytes wide, as listed above. The rules:
-
-- Version 1 was 32 bytes wide and held keys of 1 to 31 bytes
-  (`len ‖ bytes ‖ zero padding`). It remains available only for explicit
-  migration: `RecordKey::encoded_v1() -> Option<[u8; 32]>` (`None` for a
-  32-byte key, which version 1 cannot hold) and `RecordKey::decode_v1`,
-  which rejects a length byte of 0 or above 31 and any non-zero padding.
-- The two versions differ in width (32 and 33 bytes), so a stored encoding
-  of one version can never be read as the other by accident: a decoder
-  takes a fixed-size array of its own version's width. A key shorter than
-  32 bytes has one encoding per version, and both carry the same length
-  byte and key bytes.
-- No version-1 encoding was ever persisted (the engine had no durable
-  storage), so no migration is needed; the helpers exist for tests and any
-  external fixture that recorded the old form.
-- The encoding does not enter any charge: `RowByte`, `ReadByte` and
-  projected bytes count the raw key length.
-- The fixed-width form is the key of the key-binding map since node step
-  N3b. SDK wire compatibility still needs the node's JSON adapter (N1) and
-  is not claimed.
+encoding is 33 bytes wide, as listed above. The encoding does not enter any
+charge: `RowByte`, `ReadByte` and projected bytes count the raw key length.
+The fixed-width form is the key of the key-binding map since node step
+N3b.
 
 There is no engine-assigned key mode: every key is caller-assigned.
 
@@ -588,8 +574,8 @@ namespace or with uncharged data:
 - Row emission computes p before cloning any cell, and a row already loaded
   by a probe or by a row-map source is reused for emission rather than
   loaded again (fewer `record_nodes`; charges unchanged).
-- Each `TermVisit` covers one comparison of at most `min(max_value_len, 64)` bytes
-  (`Str` terms have a hard 64-byte cap; integers are 8 bytes) and the
+- Each `TermVisit` covers one comparison of at most 128 bytes (the indexed
+  `Str` cap; fixed-width terms are at most 32 bytes) and the
   positioning of that posting after the cursor.
 - The run merge (a heap over the run's postings) is O(log k) per charged
   `PostingEntry`, with k at most the charged `TermVisit`s.

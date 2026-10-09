@@ -227,11 +227,11 @@ fn empty_prefill_has_namespace_and_ordinary_block_one() {
     assert_eq!(p.burned_wei, U256::ZERO);
     assert_eq!(
         p.state.root().to_string(),
-        "0x45f7562a51b1af8412561201c2a9078d852539808047a98a0f5cad0214c81ea2"
+        "0x35298586aacf30b4b7739133946384ee3d949597cbb1c8f4193d283912f76ef3"
     );
     assert_eq!(
         g.hash().to_string(),
-        "0xf0cd90676755dfcbf96d66ae8cc8c664794374ab9a61294e1fcbfe857f98e571"
+        "0x071ed2c996ad871264f57d2ca3daf3b943915b70a0fbb5c3783e1b9fda7186b8"
     );
     assert_eq!(
         p.stream_hash.to_string(),

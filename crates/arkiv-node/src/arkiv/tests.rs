@@ -4,7 +4,8 @@ fn setup() -> (Engine, Branch, ArkivExecutionContext) {
     let engine = Engine::with_limits(
         PriceSchedule::FIXTURE,
         Limits {
-            max_value_len: 128 * 1024,
+            max_str_len: 128 * 1024,
+            max_bytes_len: 128 * 1024,
             ..Limits::DEFAULT
         },
     );

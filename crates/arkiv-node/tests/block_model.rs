@@ -73,10 +73,11 @@ const ACTORS: [OwnerId; 3] = [ALICE, BOB, CAROL];
 const LIMITS: Limits = Limits {
     namespace_cap: 1 << 32,
     max_cells: 5,
-    max_value_len: 16,
+    max_str_len: 16,
+    max_bytes_len: 16,
     max_page: 2,
     max_groups: 8,
-    max_literals: 8,
+    max_literals: 8,    ..Limits::DEFAULT
 };
 
 /// The block budget is `user_budget + expiry_per_block ×` the dearest

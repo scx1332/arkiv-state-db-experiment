@@ -172,29 +172,27 @@ fn signed_numeric_extremes_and_each_supported_numeric_index() {
         ],
         vec![Value::U64(u64::MAX), Value::U64(1), Value::U64(0)],
     ];
-    if cfg!(feature = "arkiv-v2") {
-        groups.push(vec![
-            Value::I32(i32::MAX),
-            Value::I32(-1),
-            Value::I32(i32::MIN),
-            Value::I32(0),
-        ]);
-        groups.push(vec![
-            Value::U256([255; 32]),
-            Value::U256([1; 32]),
-            Value::U256([0; 32]),
-        ]);
-        let mut min = [0; 32];
-        min[0] = 128;
-        let mut max = [255; 32];
-        max[0] = 127;
-        groups.push(vec![
-            Value::Dec(max),
-            Value::Dec([255; 32]),
-            Value::Dec(min),
-            Value::Dec([0; 32]),
-        ]);
-    }
+    groups.push(vec![
+        Value::I32(i32::MAX),
+        Value::I32(-1),
+        Value::I32(i32::MIN),
+        Value::I32(0),
+    ]);
+    groups.push(vec![
+        Value::U256([255; 32]),
+        Value::U256([1; 32]),
+        Value::U256([0; 32]),
+    ]);
+    let mut min = [0; 32];
+    min[0] = 128;
+    let mut max = [255; 32];
+    max[0] = 127;
+    groups.push(vec![
+        Value::Dec(max),
+        Value::Dec([255; 32]),
+        Value::Dec(min),
+        Value::Dec([0; 32]),
+    ]);
     for values in groups {
         let (engine, model) = fixture(values.iter().cloned().map(|v| (v, true)).collect());
         let snapshot = engine.snapshot(engine.head()).unwrap();
@@ -261,9 +259,9 @@ fn unsupported_and_mixed_bounds_fail_before_reading() {
     for (lower, upper) in [
         (Unbounded, Unbounded),
         (Included(Value::U64(1)), Included(Value::I64(2))),
-        (Included(Value::str("a")), Unbounded),
-        (Included(Value::Bool(false)), Unbounded),
+        (Included(Value::str("a")), Included(Value::Bool(true))),
         (Included(Value::bytes(b"a")), Unbounded),
+        (Unbounded, Excluded(Value::str(&"x".repeat(Value::MAX_INDEXED_LEN + 1)))),
     ] {
         let r = request(&snapshot, lower, upper);
         assert!(
@@ -601,6 +599,15 @@ fn reopened_proof_reads_only_matching_index_region_and_selected_rows() {
             id: &ObjectId,
         ) -> Result<Option<Vec<u8>>, StorageError> {
             Ok(self.0.lock().unwrap().get(&(space, *id)).cloned())
+        }
+
+        fn read_object_bounded(
+            &self,
+            space: SpaceId,
+            id: &ObjectId,
+            _max_bytes: usize,
+        ) -> Result<Option<Vec<u8>>, StorageError> {
+            self.read_object(space, id)
         }
     }
     let (engine, _) = fixture((0..300).map(|n| (Value::U64(n * 100), true)).collect());

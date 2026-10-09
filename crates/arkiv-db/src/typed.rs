@@ -148,16 +148,13 @@ fn validate_cells(limits: &Limits, cells: &[(CellName, Cell)]) -> Result<(), Arg
     }
     let mut names = BTreeSet::new();
     for (name, cell) in cells {
-        if !cell.value.tag().is_supported() {
-            return Err(ArgumentFault::UnsupportedType);
-        }
         if !names.insert(name) {
             return Err(ArgumentFault::DuplicateCell);
         }
-        if (matches!(cell.value, Value::Str(_) | Value::Bytes(_))
-            && cell.value.encoded_len() > limits.max_value_len)
-            || (cell.is_attribute() && cell.value.encoded_len() > Value::MAX_INDEXED_LEN)
-        {
+        if name.len() > limits.max_cell_name_len {
+            return Err(ArgumentFault::NameTooLong);
+        }
+        if !limits.admits_value(&cell.value, cell.is_attribute()) {
             return Err(ArgumentFault::ValueTooLarge);
         }
         if cell.is_attribute() && !cell.value.tag().is_indexable() {
@@ -189,6 +186,9 @@ pub(crate) fn validate_patch(
     for name in remove {
         if !removed.insert(name) {
             return Err(ArgumentFault::DuplicateCell);
+        }
+        if name.len() > limits.max_cell_name_len {
+            return Err(ArgumentFault::NameTooLong);
         }
     }
     if set.iter().any(|(name, _)| removed.contains(name)) {
@@ -275,6 +275,11 @@ pub(crate) fn validate_query(
                 }
                 if !first.tag().is_ordered() {
                     return Err(QueryFault::NotOrdered);
+                }
+                // A `Str` bound obeys the indexed-string limit, as an
+                // equality value does: the seek key holds its bytes.
+                for bound in [bound_value(lower), bound_value(upper)].into_iter().flatten() {
+                    validate_value(limits, bound)?;
                 }
             }
             Term::StartsWith { prefix, .. } => {

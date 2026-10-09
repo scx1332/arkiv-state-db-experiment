@@ -568,22 +568,14 @@ pub trait ObjectReader: Send + Sync {
     /// Successful and absent reads have the ordinary read's counter and
     /// failure semantics; an oversized value is a failed read.
     ///
-    /// The default fails closed with [`StorageErrorKind::Incompatible`]
-    /// without calling [`read_object`](Self::read_object). Existing readers
-    /// remain source-compatible, but must override this method to support
-    /// bounded reads. Reading first and checking the allocated `Vec` later
-    /// would not satisfy the contract. Wrappers must forward this method.
+    /// Reading first and checking the allocated `Vec` later does not
+    /// satisfy the contract. Wrappers must forward this method.
     fn read_object_bounded(
         &self,
-        _space: SpaceId,
-        _id: &ObjectId,
-        _max_bytes: usize,
-    ) -> Result<Option<Vec<u8>>, StorageError> {
-        Err(StorageError::new(
-            StorageErrorKind::Incompatible,
-            "this object reader does not support pre-copy bounded reads",
-        ))
-    }
+        space: SpaceId,
+        id: &ObjectId,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, StorageError>;
 
     /// Loads an object that a committed structure references: absence is
     /// [`StorageErrorKind::Missing`], never `None`.
@@ -670,24 +662,12 @@ pub trait VersionedStore: ObjectReader {
     /// bound applies to the value, not the caller-supplied lookup key or
     /// backend page buffers. All record tables, including metadata and
     /// manifests, follow the same inclusive bound and counter semantics.
-    ///
-    /// The default returns the latched failure, if any, or `Incompatible`
-    /// without reading/copying the record. Implementations and wrappers
-    /// must override it to support the pre-copy contract.
     fn read_record_bounded(
         &self,
-        _table: Table,
-        _key: &[u8],
-        _max_bytes: usize,
-    ) -> Result<Option<Vec<u8>>, StorageError> {
-        match self.health() {
-            Health::Failed(error) => Err(error),
-            Health::Available => Err(StorageError::new(
-                StorageErrorKind::Incompatible,
-                "this store does not support pre-copy bounded record reads",
-            )),
-        }
-    }
+        table: Table,
+        key: &[u8],
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, StorageError>;
 
     /// Applies a batch atomically against the expected head.
     fn commit(&self, batch: CommitBatch) -> CommitOutcome;
@@ -1073,66 +1053,6 @@ impl StatsRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A pre-bounded-read implementation must still compile, and its default
-    /// bounded methods must never fall back to the allocating read methods.
-    struct LegacyStore;
-
-    impl ObjectReader for LegacyStore {
-        fn read_object(&self, _: SpaceId, _: &ObjectId) -> Result<Option<Vec<u8>>, StorageError> {
-            panic!("a bounded read must not call the legacy allocating object read")
-        }
-    }
-
-    impl VersionedStore for LegacyStore {
-        fn database_id(&self) -> DatabaseId {
-            DatabaseId([0; 16])
-        }
-        fn head(&self) -> Result<Option<Head>, StorageError> {
-            Ok(None)
-        }
-        fn read_record(&self, _: Table, _: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-            panic!("a bounded read must not call the legacy allocating record read")
-        }
-        fn commit(&self, _: CommitBatch) -> CommitOutcome {
-            unreachable!("the legacy read compatibility test never writes")
-        }
-        fn health(&self) -> Health {
-            Health::Available
-        }
-        fn recover(&self) -> Result<Option<Head>, StorageError> {
-            Ok(None)
-        }
-        fn stats(&self) -> StoreStats {
-            StoreStats::default()
-        }
-    }
-
-    #[test]
-    fn bounded_defaults_fail_without_allocating_legacy_values() {
-        let store = Arc::new(Box::new(LegacyStore) as Box<dyn VersionedStore>);
-        assert_eq!(
-            store
-                .read_object_bounded(SpaceId::Catalog, &[0; 32], 0)
-                .unwrap_err()
-                .kind,
-            StorageErrorKind::Incompatible
-        );
-        assert_eq!(
-            store
-                .load_object_bounded(SpaceId::Catalog, &[0; 32], 10)
-                .unwrap_err()
-                .kind,
-            StorageErrorKind::Incompatible
-        );
-        assert_eq!(
-            store
-                .read_record_bounded(Table::Meta, b"test", 0)
-                .unwrap_err()
-                .kind,
-            StorageErrorKind::Incompatible
-        );
-    }
 
     fn head(height: u64, tag: u8) -> Head {
         Head {

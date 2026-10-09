@@ -5158,16 +5158,31 @@
           "valueType": {
             "enum": [
               "bool",
-              "u64",
               "str",
-              "i32",
-              "u256",
-              "dec",
-              "bytes32",
               "addr",
+              "bytes4",
+              "bytes8",
+              "bytes16",
+              "bytes32",
+              "u32",
+              "u64",
+              "u128",
+              "u256",
+              "i32",
+              "i64",
+              "i128",
+              "i256",
+              "dec32",
+              "dec64",
+              "dec128",
+              "dec",
+              "f32",
+              "f64",
+              "date32",
+              "timestamp64",
               "key"
             ],
-            "description": "Arkiv v2 indexed value types. Legacy builds additionally support i64 instead of v2-only types."
+            "description": "Any indexed (attribute) value type; i64 only on a node built without arkiv-v2. Ranges follow the stored value bytes: numeric order for integers, decimals, floats and time types; false < true; unsigned bytewise order for fixed-width bytes, addr and key; UTF-8 byte order for str (a proper prefix sorts first)."
           },
           "lower": {
             "anyOf": [
@@ -5197,7 +5212,7 @@
           "valueType"
         ],
         "additionalProperties": false,
-        "description": "At least one bound must be supplied. Only ordered indexed types are supported. Returns a complete unpaged result; proof limits may reject large ranges."
+        "description": "At least one bound must be supplied; both bounds have the same type. Every indexed type is ordered. A str bound is at most the configured indexed-string limit. Returns a complete unpaged result; proof limits may reject large ranges."
       },
       "CanonicalRequest": {
         "type": "object",

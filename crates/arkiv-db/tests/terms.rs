@@ -1082,7 +1082,8 @@ fn a_historical_snapshot_keeps_its_terms_after_later_mutations() {
 fn terms_validation_faults_are_admission_rejections_in_the_briefs_order() {
     // max_value_len 4: "abcd" is the longest admissible Str bound.
     let limits = Limits {
-        max_value_len: 4,
+        max_str_len: 4,
+        max_bytes_len: 4,
         ..Limits::DEFAULT
     };
     let (mut engine, ns) = fixture_with_limits(limits);

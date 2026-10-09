@@ -187,7 +187,10 @@ struct Pricing {
 struct EngineLimits {
     namespace_cap: u64,
     max_cells: usize,
-    max_value_len: usize,
+    max_cell_name_len: usize,
+    max_str_len: usize,
+    max_bytes_len: usize,
+    max_indexed_len: usize,
     max_page: usize,
     max_groups: usize,
     max_literals: usize,
@@ -662,8 +665,8 @@ fn profile_native(profile: &Profile, chain: &Chain) -> Result<Genesis> {
     expect(&profile.entity_rules, "arkiv-entity-v2", "entity rules")?;
     expect(&profile.account_rules, "glm-v2", "account rules")?;
     expect(&profile.pricing.rent_rule, "glm-rent-v1", "rent rule")?;
-    if profile.state_layout != 2
-        || profile.codec_version != 2
+    if profile.state_layout != arkiv_db::LAYOUT_VERSION
+        || profile.codec_version != arkiv_db::CODEC_VERSION
         || !profile.admins.is_empty()
         || number::<u64>(&profile.pricing.gas_price_wei)? != crate::accounts::GAS_PRICE_WEI
     {
@@ -683,7 +686,10 @@ fn profile_native(profile: &Profile, chain: &Chain) -> Result<Genesis> {
         limits: Limits {
             namespace_cap: e.namespace_cap,
             max_cells: e.max_cells,
-            max_value_len: e.max_value_len,
+            max_cell_name_len: e.max_cell_name_len,
+            max_str_len: e.max_str_len,
+            max_bytes_len: e.max_bytes_len,
+            max_indexed_len: e.max_indexed_len,
             max_page: e.max_page,
             max_groups: e.max_groups,
             max_literals: e.max_literals,

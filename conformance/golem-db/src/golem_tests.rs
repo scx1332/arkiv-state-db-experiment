@@ -6,7 +6,9 @@
 //! Porting rules:
 //! - `each_backend` runs the arkiv memory engine and the arkiv durable
 //!   (redb) engine instead of golem memory/MDBX x {keccak, blake3}; the
-//!   arkiv engine has one hash (keccak), so the hash loop is dropped.
+//!   arkiv engine supports keccak-256 only (a Blake3 genesis is refused at
+//!   open, see `blake3_genesis_is_refused_at_open`), so the hash loop is
+//!   dropped.
 //! - Every `assert!`/`assert_eq!` became a *soft* check (`check!`,
 //!   `check_eq!`): a failing check is recorded with its line and the test
 //!   continues, so one run lists every divergent assertion. `.unwrap()`s are
@@ -79,6 +81,10 @@ fn limits() -> CellLimits {
     }
 }
 
+fn genesis() -> Genesis {
+    Genesis::new(HashAlgorithm::Keccak256, limits())
+}
+
 fn options() -> ArkivOptions {
     ArkivOptions {
         exact_version: true,
@@ -98,12 +104,12 @@ fn input(key: RecordKey, price: i32) -> RecordOp<op::Create> {
 
 fn each_backend(contract: fn(Db)) {
     BACKEND.with(|b| *b.borrow_mut() = "arkiv-memory");
-    contract(Arc::new(ArkivDb::open_memory(limits(), options()).unwrap()));
+    contract(Arc::new(ArkivDb::open_memory(&genesis(), options()).unwrap()));
     BACKEND.with(|b| *b.borrow_mut() = "arkiv-redb");
     {
         let dir = tempfile::tempdir().unwrap();
         contract(Arc::new(
-            ArkivDb::open_durable(dir.path(), limits(), options()).unwrap(),
+            ArkivDb::open_durable(dir.path(), &genesis(), options()).unwrap(),
         ));
     }
     finish();
@@ -424,8 +430,8 @@ fn competing_commits_and_cross_thread_clones_use_one_registry() {
 #[test]
 fn separate_engines_do_not_share_branch_handles() {
     BACKEND.with(|b| *b.borrow_mut() = "arkiv-memory");
-    let first = ArkivDb::open_memory(limits(), options()).unwrap();
-    let second = ArkivDb::open_memory(limits(), options()).unwrap();
+    let first = ArkivDb::open_memory(&genesis(), options()).unwrap();
+    let second = ArkivDb::open_memory(&genesis(), options()).unwrap();
     let branch = first.begin().unwrap();
     first.create(branch, input(KEY, 50)).unwrap();
     check!(matches!(
@@ -445,7 +451,7 @@ fn durable_facade_reopens_committed_state_and_discards_pending_work() {
     BACKEND.with(|b| *b.borrow_mut() = "arkiv-redb");
     let dir = tempfile::tempdir().unwrap();
     let (sealed, pending) = {
-        let db = ArkivDb::open_durable(dir.path(), limits(), options()).unwrap();
+        let db = ArkivDb::open_durable(dir.path(), &genesis(), options()).unwrap();
         let branch = db.begin().unwrap();
         db.create(branch, input(KEY, 50)).unwrap();
         let sealed = db.seal(branch).unwrap();
@@ -454,7 +460,7 @@ fn durable_facade_reopens_committed_state_and_discards_pending_work() {
         db.delete(pending, RecordOp::delete(KEY)).unwrap();
         (sealed, pending)
     };
-    let db = ArkivDb::reopen_durable(dir.path(), limits(), options()).unwrap();
+    let db = ArkivDb::reopen_durable(dir.path(), &genesis(), options()).unwrap();
     // not portable: info().created / genesis_id / state_root / index_root.
     check_eq!(db.head().unwrap(), sealed.commit_id);
     check!(matches!(
@@ -574,7 +580,7 @@ fn durable_reopens_empty_records_created_directly_or_by_removing_all_cells() {
     BACKEND.with(|b| *b.borrow_mut() = "arkiv-redb");
     let dir = tempfile::tempdir().unwrap();
     {
-        let db = ArkivDb::open_durable(dir.path(), limits(), options()).unwrap();
+        let db = ArkivDb::open_durable(dir.path(), &genesis(), options()).unwrap();
         let branch = db.begin().unwrap();
         db.create(branch, RecordOp::create(KEY)).unwrap();
         db.create(branch, input(MISSING, 50)).unwrap();
@@ -591,7 +597,7 @@ fn durable_reopens_empty_records_created_directly_or_by_removing_all_cells() {
         .unwrap();
         db.commit(branch).unwrap();
     }
-    let db = ArkivDb::reopen_durable(dir.path(), limits(), options()).unwrap();
+    let db = ArkivDb::reopen_durable(dir.path(), &genesis(), options()).unwrap();
     for key in [KEY, MISSING] {
         let record = db.get(ReadTarget::Head, RecordOp::get(key)).unwrap();
         check_eq!(record.cells.len(), 1);
@@ -788,7 +794,7 @@ fn empty_patch_is_a_no_op_or_not_found_without_an_adapter_read() {
             ..options()
         };
         BACKEND.with(|b| *b.borrow_mut() = "arkiv-memory");
-        let db = ArkivDb::open_memory(limits(), options).unwrap();
+        let db = ArkivDb::open_memory(&genesis(), options).unwrap();
         let branch = db.begin().unwrap();
         db.create(branch, input(KEY, 50)).unwrap();
         db.commit(branch).unwrap();
@@ -805,5 +811,112 @@ fn empty_patch_is_a_no_op_or_not_found_without_an_adapter_read() {
         db.commit(branch).unwrap();
         check_eq!(get(&db, ReadTarget::Head), before);
     }
+    finish();
+}
+
+// ---- adapter-specific: genesis settings are the engine's ----
+
+#[test]
+fn blake3_genesis_is_refused_at_open() {
+    let blake3 = Genesis::new(HashAlgorithm::Blake3, limits());
+    let refused = |result: OpenResult<ArkivDb>| match result {
+        Err(OpenError::InvalidConfig(message)) => message.contains("only keccak-256"),
+        _ => false,
+    };
+    BACKEND.with(|b| *b.borrow_mut() = "arkiv-memory");
+    check!(refused(ArkivDb::open_memory(&blake3, options())));
+    check!(ArkivDb::open_memory(&genesis(), options()).is_ok());
+    BACKEND.with(|b| *b.borrow_mut() = "arkiv-redb");
+    let dir = tempfile::tempdir().unwrap();
+    check!(refused(ArkivDb::open_durable(dir.path(), &blake3, options())));
+    check!(ArkivDb::open_durable(dir.path(), &genesis(), options()).is_ok());
+    check!(refused(ArkivDb::reopen_durable(dir.path(), &blake3, options())));
+    finish();
+}
+
+/// golem's cell limits pass through to the engine, which enforces them: a
+/// genesis tighter than the engine's hard caps (32-byte names) shows the
+/// rejection comes from the engine's admission, not from the adapter.
+#[test]
+fn genesis_cell_limits_are_enforced_by_the_engine() {
+    let tight = Genesis::new(
+        HashAlgorithm::Keccak256,
+        CellLimits {
+            max_cell_name_len: 10,
+            max_str_len: 8,
+            max_bytes_len: 16,
+        },
+    );
+    let engine_rejects = |result: Result<()>, fault: &str| match result {
+        Err(ApiError::InvalidArgument { message, .. }) => {
+            message.contains("arkiv engine") && message.contains(fault)
+        }
+        _ => false,
+    };
+    BACKEND.with(|b| *b.borrow_mut() = "arkiv-memory");
+    let db = ArkivDb::open_memory(&tight, options()).unwrap();
+    let branch = db.begin().unwrap();
+    let ok = RecordOp::create(KEY)
+        .field(&"n".repeat(10), CellValue::from_bool(true))
+        .unwrap()
+        .attribute("s", CellValue::from_str(&"v".repeat(8)))
+        .unwrap()
+        .field("b", CellValue::from_bytes(&[0; 16]))
+        .unwrap();
+    check!(db.create(branch, ok).is_ok());
+    for (bad, fault) in [
+        (
+            RecordOp::create(MISSING)
+                .field(&"n".repeat(11), CellValue::from_bool(true))
+                .unwrap(),
+            "name",
+        ),
+        (
+            RecordOp::create(MISSING)
+                .attribute("s", CellValue::from_str(&"v".repeat(9)))
+                .unwrap(),
+            "too large",
+        ),
+        (
+            RecordOp::create(MISSING)
+                .field("b", CellValue::from_bytes(&[0; 17]))
+                .unwrap(),
+            "too large",
+        ),
+    ] {
+        check!(engine_rejects(db.create(branch, bad).map(|_| ()), fault));
+    }
+    // golem's limits: 65-byte strings and 129-byte bytes are the engine's
+    // rejections too.
+    let db = ArkivDb::open_memory(&genesis(), options()).unwrap();
+    let branch = db.begin().unwrap();
+    for bad in [
+        RecordOp::create(KEY)
+            .field("long", CellValue::from_str(&"v".repeat(65)))
+            .unwrap(),
+        RecordOp::create(KEY)
+            .field("long", CellValue::from_bytes(&[0; 129]))
+            .unwrap(),
+    ] {
+        check!(engine_rejects(db.create(branch, bad).map(|_| ()), "too large"));
+    }
+    // A durable database keeps its limits: reopening with others fails.
+    BACKEND.with(|b| *b.borrow_mut() = "arkiv-redb");
+    let dir = tempfile::tempdir().unwrap();
+    drop(ArkivDb::open_durable(dir.path(), &tight, options()).unwrap());
+    check!(ArkivDb::reopen_durable(dir.path(), &tight, options()).is_ok());
+    check!(ArkivDb::reopen_durable(dir.path(), &genesis(), options()).is_err());
+    // A cell-name limit above the engine's 32-byte cap is refused at open.
+    let wide = Genesis::new(
+        HashAlgorithm::Keccak256,
+        CellLimits {
+            max_cell_name_len: 33,
+            ..limits()
+        },
+    );
+    check!(matches!(
+        ArkivDb::open_memory(&wide, options()),
+        Err(OpenError::InvalidConfig(_))
+    ));
     finish();
 }

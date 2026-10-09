@@ -8,7 +8,7 @@ publish.workspace = true
 
 [features]
 default = []
-arkiv-v2 = ["arkiv-db/arkiv-v2"]
+arkiv-v2 = []
 
 [dependencies]
 alloy-primitives = { workspace = true, features = ["k256"] }

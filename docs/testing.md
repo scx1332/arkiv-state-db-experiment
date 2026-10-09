@@ -242,10 +242,9 @@ version 2. No new test file was added; the change is in the literals:
   delete), the budget was re-chosen so the operation stops at the
   corresponding charge under model 3, and the new abort point is derived by
   hand.
-- `records.rs` and the `record` unit tests check the version-2 key vectors
-  (1-, 31- and 32-byte keys, rejection of length 0, length 33 and non-zero
-  padding) and the version-1 migration helpers (`encoded_v1` is `None` for
-  a 32-byte key; `decode_v1` rejects length 32).
+- `records.rs` and the `record` unit tests check the key vectors (1-, 31-
+  and 32-byte keys, rejection of length 0, length 33 and non-zero
+  padding).
 - The engine is exercised with the longest key. `query_metering.rs`
   creates a record under a 32-byte key and reads it back under every
   budget. The hand-derived receipts count the raw key, not its 33-byte

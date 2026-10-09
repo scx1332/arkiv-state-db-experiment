@@ -222,6 +222,24 @@ impl Context {
 }
 
 impl ObjectReader for Context {
+    /// Every object this context reads is already bounded by the genesis
+    /// object limit before it is copied; a smaller `max_bytes` is checked
+    /// on the (cached or freshly read) bytes.
+    fn read_object_bounded(
+        &self,
+        space: SpaceId,
+        id: &ObjectId,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        match self.read_object(space, id)? {
+            Some(bytes) if bytes.len() > max_bytes => Err(StorageError::new(
+                StorageErrorKind::Corrupt,
+                "object exceeds the read bound",
+            )),
+            other => Ok(other),
+        }
+    }
+
     fn read_object(&self, space: SpaceId, id: &ObjectId) -> Result<Option<Vec<u8>>, StorageError> {
         let mut gate = self.lock()?;
         self.healthy(&gate)?;

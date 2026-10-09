@@ -72,13 +72,14 @@ smaller.
 Decoders enforce every invariant of the decoded **type**, so a decoded
 value is always one the Rust constructors could have built:
 
-- name grammar and length for `NamespaceName` and `CellName` (1 to 20
-  bytes, ASCII, letter or `$`-plus-letter first, then letters, digits,
+- name grammar and length for `NamespaceName` (1 to 20 bytes) and
+  `CellName` (1 to 32 bytes, the term-key name width), ASCII, letter or `$`-plus-letter first, then letters, digits,
   `_`, `-`, `.`, `:`);
 - record-key length 1 to 32;
 - nonzero `NamespaceId` and `RecordId`;
-- type ids 1 to 25 (both profiles), every enum tag, `bool` and `Option`
-  bytes; float payloads that are NaN or negative zero;
+- the 25 type ids (table below), every enum tag, `bool` and `Option`
+  bytes; fixed-width payloads that are not a canonical term form (a bool
+  byte above 1, the forms of NaN and negative zero);
 - UTF-8 text;
 - a `PriceSchedule` class count equal to `OperationClass::ALL.len()` (31
   under counting-rule version 3);
@@ -86,15 +87,15 @@ value is always one the Rust constructors could have built:
   header version this build does not support is `UnsupportedVersion`.
 
 Decoders do **not** apply the engine's admission rules: value and cell
-limits (`Limits`), the 64-byte indexed-value cap, attribute kinds (a
-`Bytes` attribute), duplicate or overlapping cell names and the 20-byte
-raw-key cap. (An empty patch is not an admission fault: it is golem-db's
-no-op, see `ArgumentFault` below.) Those depend on instance limits or produce
+limits (`Limits`: name, `Str`, `Bytes` and indexed-string lengths),
+attribute kinds (a `Bytes` attribute), duplicate or overlapping cell names
+and the 20-byte raw-key cap. (An empty patch is not an admission fault: it
+is golem-db's no-op.) Those depend on instance limits or produce
 deterministic rejections with receipts; an operation that violates them
 decodes and is then rejected by the engine at admission, or earlier by the
 host's static validation (N0b-3). `codec.rs` tests this boundary.
 
-### Versioning and compatibility
+### Versioning
 
 - `CODEC_VERSION = 1` covers the rules, every layout and every tag table in
   this part. Codec bytes do not carry the version themselves: the container
@@ -103,25 +104,20 @@ host's static validation (N0b-3). `codec.rs` tests this boundary.
   does not know rather than guessing.
 - Unknown tags are rejected (`UnknownTag`), never skipped or mapped to a
   default.
-- A new enum variant gets a new tag; a tag is never reused, even after its
-  variant is removed. Adding a variant is a compatible extension for
-  writers that never emit it; readers of an older build reject it.
+- A new enum variant gets a new tag; a tag is never reused.
 - Any change to an existing layout, a field order, a width or a rule needs
-  a new codec version. Old bytes are migrated explicitly, never
-  reinterpreted.
+  a new codec version; a reader never reinterprets bytes of another
+  version.
 - A `PriceSchedule` encodes one weight per operation class. Counting-rule
-  version 3 has 31 classes. When a later counting-rule version appends
-  classes, the count changes and schedules encoded under the old model are
-  rejected (`ClassCountMismatch`), never padded with default weights; a
-  migration must choose the new weights explicitly. A version-2 schedule
-  (27 classes) is rejected today.
+  version 3 has 31 classes; a schedule with another count is rejected
+  (`ClassCountMismatch`), never padded with default weights.
 - `RecordKey` has two canonical forms for two purposes: the codec's
   variable-width `u8 len ‖ bytes` used inside encoded values, and the fixed
-  33-byte key encoding version 2 (`len ‖ bytes ‖ zero padding`,
-  `RecordKey::encoded`) used where keys must sort as fixed-width map keys
-  (N3b). They differ in length for every key shorter than 32 bytes; for a
-  32-byte key they are the same 33 bytes and read back as the same key, so
-  neither form is ever misread as the other.
+  33-byte key encoding (`len ‖ bytes ‖ zero padding`, `RecordKey::encoded`)
+  used where keys must sort as fixed-width map keys (N3b). They differ in
+  length for every key shorter than 32 bytes; for a 32-byte key they are
+  the same 33 bytes and read back as the same key, so neither form is ever
+  misread as the other.
 - A receipt's debug ledger is never encoded: receipts that differ only in
   their ledgers have equal bytes, and a decoded receipt has `ledger: None`.
 
@@ -135,11 +131,11 @@ host's static validation (N0b-3). `codec.rs` tests this boundary.
 | `Cost` | units `u64` | 8 |
 | `RecordId` | ordinal `u64`; zero rejected | 8 |
 | `NamespaceName` | text (validated name) | 5–24 |
-| `CellName` | text (validated name) | 5–24 |
+| `CellName` | text (validated name) | 5–36 |
 | `NamespaceDescriptor` | `id ‖ name ‖ owner ‖ revision` | 41–60 |
 | `RecordKey` | `u8 len ‖ bytes`, len 1–32 | 2–33 |
 | `TypeTag` | type id `u8` (table below) | 1 |
-| `Value` | `type id ‖ payload`: `Bool` one `bool` byte; `Str` text; `Bytes` bytes; every other type its fixed natural width (table below), signed types in plain two's complement (not the sign-flipped term form) | 2+ |
+| `Value` | `type id ‖ payload`: `Str` text; `Bytes` bytes; every other type its fixed-width term bytes (golem-db's stored form, table below) | 2+ |
 | `CellKind` | `u8` (table below) | 1 |
 | `Cell` | `kind ‖ value` | 3+ |
 | `WriteOp` | tag ‖ fields (table below) | |
@@ -150,10 +146,27 @@ host's static validation (N0b-3). `codec.rs` tests this boundary.
 | `ReceiptKind` | tag | 1 |
 | `Receipt` | `kind ‖ model_version u32 ‖ schedule_id u32 ‖ spent u64 ‖ outcome` | 18–35 |
 | `PriceSchedule` | `id u32 ‖ u32 class count (31) ‖ 31 × u64 weight` in `OperationClass::ALL` order | 256 |
-| `Limits` | `namespace_cap ‖ max_cells ‖ max_value_len ‖ max_page ‖ max_groups ‖ max_literals`, each `u64` | 48 |
+| `Limits` | `namespace_cap ‖ max_cells ‖ max_cell_name_len ‖ max_str_len ‖ max_bytes_len ‖ max_indexed_len ‖ max_page ‖ max_groups ‖ max_literals`, each `u64` | 72 |
 
 `Limits` fields that are `usize` in Rust are encoded as `u64`; a value
 that does not fit the platform's `usize` is rejected (`OutOfRange`).
+
+The four cell limits follow golem-db's genesis `cell_limits`:
+
+| Field | Bounds | Default | Hard cap |
+| --- | --- | --- | --- |
+| `max_cell_name_len` | every cell name a write sets or removes (`$` counted) | 32 | 32 (term-key name width) |
+| `max_str_len` | every `Str` value, attribute or field | 4096 | none (codec `u32`) |
+| `max_bytes_len` | every `Bytes` value (fields only) | 4096 | none (codec `u32`) |
+| `max_indexed_len` | `Str` attributes and `Str` query values, range bounds, prefixes and `terms` bounds; effective bound `min(max_indexed_len, max_str_len)` | 128 | 128 (term-key value width) |
+
+The term key pads a name to 32 bytes and an indexed value to 128 bytes
+(`docs/state-trie.md`), so those two limits cannot exceed their caps;
+`Limits::validate` rejects such a configuration (and a zero name limit),
+the engine constructors and a durable genesis require it, and the node
+checks it with the chain parameters. Fixed-width types have no
+configurable limit. A durable database persists its limits in its genesis,
+and opening it with any other limits is `Incompatible`.
 `B256` hashes and `[u8; N]` identifiers (such as the 32-byte request ids
 of part 2) are their raw bytes. Cell lists (`Vec<(CellName, Cell)>`) and
 name lists (`Vec<CellName>`) keep the order they were given in; the engine,
@@ -165,87 +178,83 @@ Tags start at 1 so that a zeroed byte is never a valid tag. Every table is
 also a list of constants in `crates/arkiv-db/src/codec.rs`; none is derived
 from a Rust discriminant.
 
-`TypeTag` and the `Value` tag (the value's type id, the same ids the term
-encoding uses):
+`TypeTag` and the `Value` tag: the type id, which is golem-db's cell type
+id (golem `CellType::id`). One id table serves both systems. `Key`, the
+engine's only type without a golem counterpart, takes 64, outside golem's
+7-bit table. Ids 5–7, 26, 27 and 30–63 are golem's reserved ids and are
+rejected, as is every other unlisted id.
 
-| Tag | Type | Payload |
-| --- | --- | --- |
-| 1 | `Bool` | `00`/`01` |
-| 2 | `I64` | 8 bytes, two's complement |
-| 3 | `U64` | 8 bytes |
-| 4 | `Str` | `u32 len ‖ UTF-8` |
-| 5 | `Bytes` | `u32 len ‖ bytes` |
-| 6 | `I32` | 4 bytes, two's complement |
-| 7 | `U256` | 32 bytes |
-| 8 | `Dec` | 32 bytes, two's complement units of 10^-18 (golem `dec256`) |
-| 9 | `Bytes32` | 32 bytes |
-| 10 | `Addr` | 20 bytes (golem `bytes20`) |
-| 11 | `Key` | 32 bytes |
-| 12 | `Bytes4` | 4 bytes |
-| 13 | `Bytes8` | 8 bytes |
-| 14 | `Bytes16` | 16 bytes |
-| 15 | `U32` | 4 bytes |
-| 16 | `U128` | 16 bytes |
-| 17 | `I128` | 16 bytes, two's complement |
-| 18 | `I256` | 32 bytes, two's complement |
-| 19 | `Dec32` | 4 bytes, two's complement units of 10^-4 |
-| 20 | `Dec64` | 8 bytes, two's complement units of 10^-6 |
-| 21 | `Dec128` | 16 bytes, two's complement units of 10^-18 |
-| 22 | `F32` | 4 bytes, IEEE-754 binary32 bits; NaN and `80000000` rejected |
-| 23 | `F64` | 8 bytes, IEEE-754 binary64 bits; NaN and `8000…00` rejected |
-| 24 | `Date32` | 4 bytes, two's complement days since the Unix epoch |
-| 25 | `Timestamp64` | 8 bytes, two's complement microseconds since the Unix epoch |
+A fixed-width payload is the value's **term bytes**, the order-preserving
+form that is also golem-db's stored value. So one byte form serves storage,
+hashing and index order, and `Value::from_term_bytes` decodes it.
 
-Ids 6–11 were introduced with the `arkiv-v2` profile; ids 12–25 complete
-golem-db's cell type grid. All 25 ids are admitted by **both** profiles (see
-[Value types](#value-types) below). Every payload is big-endian.
+| Id | Type | golem type | Payload |
+| --- | --- | --- | --- |
+| 1 | `Bool` | `bool` | `00` / `01` |
+| 2 | `Str` | `str` | `u32 len ‖ UTF-8` |
+| 3 | `Bytes` | `bytes` | `u32 len ‖ bytes` |
+| 4 | `Addr` | `bytes20` | 20 bytes |
+| 8 | `Bytes4` | `bytes4` | 4 bytes |
+| 9 | `Bytes8` | `bytes8` | 8 bytes |
+| 10 | `Bytes16` | `bytes16` | 16 bytes |
+| 11 | `Bytes32` | `bytes32` | 32 bytes |
+| 12 | `U32` | `u32` | 4 bytes, big-endian |
+| 13 | `U64` | `u64` | 8 bytes, big-endian |
+| 14 | `U128` | `u128` | 16 bytes, big-endian |
+| 15 | `U256` | `u256` | 32 bytes, big-endian |
+| 16 | `I32` | `i32` | 4 bytes, two's complement, sign bit flipped |
+| 17 | `I64` | `i64` | 8 bytes, likewise |
+| 18 | `I128` | `i128` | 16 bytes, likewise |
+| 19 | `I256` | `i256` | 32 bytes, likewise |
+| 20 | `Dec32` | `dec32` | 4 bytes, units of 10^-4, sign bit flipped |
+| 21 | `Dec64` | `dec64` | 8 bytes, units of 10^-6, likewise |
+| 22 | `Dec128` | `dec128` | 16 bytes, units of 10^-18, likewise |
+| 23 | `Dec` | `dec256` | 32 bytes, units of 10^-18, likewise |
+| 24 | `F32` | `f32` | 4 bytes, IEEE total-order form |
+| 25 | `F64` | `f64` | 8 bytes, IEEE total-order form |
+| 28 | `Date32` | `date32` | 4 bytes, days since the Unix epoch, sign bit flipped |
+| 29 | `Timestamp64` | `timestamp64` | 8 bytes, microseconds since the Unix epoch, sign bit flipped |
+| 64 | `Key` | (none; reads as `bytes32`) | 32 bytes |
 
-#### Value types
+The IEEE total-order form flips the sign bit of a non-negative float and
+every bit of a negative one. Floats have one valid form per value: NaN is
+rejected at construction and decode, `-0.0` normalizes to `+0.0`, and
+infinities are admitted. Decimal types carry golem's fixed scale per type;
+values are unscaled integers and are never rescaled. Every payload is
+big-endian.
 
-The term bytes of an attribute (`Value::term_bytes`, the bytes inside a
-term key, see `docs/state-trie.md`) are order-preserving and equal golem-db's
-stored value bytes for the same type:
+#### Value types and order
 
-| Types | Term bytes |
+Every type except `Bytes` can be an attribute, and every attribute type is
+ordered (`TypeTag::is_ordered`): range predicates, keyset-paginated range
+queries and range proofs apply to all of them. The order is the bytewise
+order of the term bytes, which is golem-db's attribute order:
+
+| Types | Order |
 | --- | --- |
-| `Bool` | `00` / `01` |
-| `Str` | UTF-8 bytes |
-| `U32`, `U64`, `U128`, `U256` | big-endian |
-| `I32`, `I64`, `I128`, `I256`, `Dec32`, `Dec64`, `Dec128`, `Dec`, `Date32`, `Timestamp64` | big-endian two's complement, sign bit flipped |
-| `F32`, `F64` | IEEE bits; a non-negative value flips the sign bit, a negative value flips every bit |
-| `Bytes4`, `Bytes8`, `Bytes16`, `Bytes32`, `Addr`, `Key` | the bytes |
+| integers, decimals, `Date32`, `Timestamp64` | numeric |
+| `F32`, `F64` | IEEE total order (`-inf` < … < `-0` = `+0` < … < `+inf`) |
+| `Bool` | `false` < `true` |
+| `Addr`, `Bytes4/8/16/32`, `Key` | unsigned bytewise (big-endian) |
+| `Str` | bytewise over UTF-8, which is code point order; a proper prefix sorts first, so `"" < "a" < "a\0" < "ab"` |
 | `Bytes` | none: field-only |
 
-Range predicates and range proofs apply to the integers, decimals, floats
-and the time types (`TypeTag::is_ordered`). `Bool`, `Str` (plus prefix) and
-the fixed-width byte types are equality-only, as `Bytes32` always was.
-Floats have one valid byte form per value: NaN is rejected at construction
-and decode, `-0.0` normalizes to `+0.0`, infinities are admitted. Decimal
-types carry a fixed scale per type (golem's: `dec32` 4, `dec64` 6, `dec128`
-and `dec256` 18); values are unscaled integers and are never rescaled.
+golem stores a `str` with no length prefix and lets it run to the end of
+its index key, so its order is plain bytewise order over the UTF-8 bytes.
+The engine's term key pads the value to the 128-byte cap and appends its
+length; that encoding orders exactly as bytewise order on the unpadded
+bytes (a shorter string that is a prefix of a longer one compares on the
+length byte, after equal zero padding), so the two orders agree, including
+strings that contain `\0`. `Str` also supports prefix predicates. Values
+of different types never compare: a range is typed by its bounds and
+matches only attributes of that type.
 
-Golden vectors: `crates/arkiv-db/tests/codec.rs`
-(`extended_type_ids_and_values`) for the storage form and
-`crates/arkiv-db/tests/golem_types.rs` (`term_bytes_are_golem_stored_forms`)
-for the term form.
-
-**Why both profiles, and why no version bump.** The addition is strictly
-additive: ids 1–5 and their encodings, every other tag table, and every
-layout are unchanged, so every existing byte string, state root and golden
-vector is unchanged (`roots.rs`, `rehash.rs` and the legacy durable vectors
-pass untouched). `CODEC_VERSION`/`LAYOUT_VERSION` therefore stay 1 (default)
-and 2 (`arkiv-v2`): no existing encoding gains a second meaning, and an
-older decoder never misreads a new value: it rejects the unknown id with
-`UnknownTag`. Earlier the default profile rejected ids 6–11 only because
-they arrived with the v2 work, not because of an encoding conflict; nothing
-in the generic profile depends on that rejection. The one compatibility
-constraint is operational: on a running chain, nodes on an older binary
-reject blocks that carry the new types. Mixed-version networks must upgrade
-together (there is no height activation). The fixed-width values are at most
-32 bytes, within both profiles' indexed-value caps (64 / 128 bytes). The
-Arkiv SDK boundary of the v2 entity namespace (`arkiv/schema.rs`, signed
-JSON-RPC) keeps admitting only SDK types; the new ids are generic-namespace
-types there, like `i64`.
+Golden vectors: `crates/arkiv-db/tests/codec.rs` (`type_tags_and_values`)
+for the encoding, `crates/arkiv-db/tests/golem_types.rs`
+(`term_bytes_are_golem_stored_forms`) against golem's own vectors, and
+`crates/arkiv-db/tests/ordered_ranges.rs` for the order of the byte-ordered
+types. The Arkiv SDK boundary of the v2 entity namespace
+(`arkiv/schema.rs`, signed JSON-RPC) admits only SDK types.
 
 `CellKind`: 1 `Attribute`, 2 `Field`.
 
@@ -275,13 +284,11 @@ types there, like `i64`.
 
 `ArgumentFault`: 1 `KeyTooLong`, 2 `TooManyCells`, 3 `DuplicateCell`,
 4 `SetAndRemoveOverlap`, 5 `ValueTooLarge`, 6 `BytesNotIndexable`,
-7 `EmptyPatch` (retired: never produced since an empty patch became
-golem-db's no-op; the tag still decodes), 8 `NotHostOperation`,
-9 `UnsupportedType`.
+7 `NotHostOperation`, 8 `NameTooLong`.
 
 `QueryFault`: 1 `NoGroups`, 2 `TooManyGroups`, 3 `TooManyLiterals`,
 4 `ZeroLimit`, 5 `LimitTooLarge`, 6 `NotIndexable`, 7 `ValueTooLarge`,
-8 `UnboundedRange`, 9 `MixedBounds`, 10 `NotOrdered`,
+8 `UnboundedRange`, 9 `MixedBounds`, 10 `NotOrdered` (a `Bytes` bound),
 11 `ProjectionTooLarge`.
 
 `Rejection`:
@@ -323,13 +330,13 @@ Hex, with `‖` between fields. Each is one of the golden vectors in
 `codec.rs`, where it is assembled from these pieces.
 
 - `NamespaceId` 258: `0000000000000102`.
-- `Value::I64(-2)`: `02 ‖ fffffffffffffffe`; `Value::Str("hé")`:
-  `04 ‖ 00000003 ‖ 68c3a9`.
+- `Value::I64(-2)`: `11 ‖ 7ffffffffffffffe`; `Value::Str("hé")`:
+  `02 ‖ 00000003 ‖ 68c3a9`.
 - `RecordKey` `"a"`: `01 ‖ 61`.
 - `WriteOp::CreateRecord { namespace 1, key "a", cells [("price",
   attribute U64 7), ("note", field Str "hi")] }`:
-  `05 ‖ 0000000000000001 ‖ 01 61 ‖ 00000002 ‖ 00000005 7072696365 ‖ 01 03
-  0000000000000007 ‖ 00000004 6e6f7465 ‖ 02 04 00000002 6869`.
+  `05 ‖ 0000000000000001 ‖ 01 61 ‖ 00000002 ‖ 00000005 7072696365 ‖ 01 0d
+  0000000000000007 ‖ 00000004 6e6f7465 ‖ 02 02 00000002 6869`.
 - An applied write receipt of 379 units under schedule 1, model 3:
   `01 ‖ 00000003 ‖ 00000001 ‖ 000000000000017b ‖ 01`.
 - `Rejection::StaleRevision { expected 1, current 2 }`:
@@ -337,7 +344,8 @@ Hex, with `‖` between fields. Each is one of the golden vectors in
 - `PriceSchedule::FIXTURE`: `00000001 ‖ 0000001f ‖ 0000000000000001 ‖
   0000000000000032 ‖ … ‖ 0000000000000001` (256 bytes).
 - `Limits::DEFAULT`: `0000000100000000 ‖ 0000000000000040 ‖
-  0000000000001000 ‖ 00000000000000c8 ‖ 0000000000000008 ‖
+  0000000000000020 ‖ 0000000000001000 ‖ 0000000000001000 ‖
+  0000000000000080 ‖ 00000000000000c8 ‖ 0000000000000008 ‖
   0000000000000008`.
 
 ### Digest
@@ -432,7 +440,7 @@ is 32 raw bytes, `OwnerId` 20, `RequestId` (a request id) 32.
 | Type | Layout | Bytes |
 | --- | --- | --- |
 | `ChainParams` | `block_budget u64 ‖ user_budget u64 ‖ expiry_per_block u32 ‖ max_admin_per_block u32 ‖ max_txs_per_block u32 ‖ max_ops_per_tx u32 ‖ max_ops_per_block u32 ‖ max_tx_bytes u32 ‖ max_block_input_bytes u32 ‖ max_lifetime u64` | 52 |
-| `Genesis` | `format_version u32 ‖ protocol_version u32 ‖ chain_id u64 ‖ timestamp_ms u64 ‖ limits: Limits ‖ pricing: PriceSchedule ‖ params: ChainParams ‖ admins: Vec<OwnerId>` | 384 + 20 per admin |
+| `Genesis` | `format_version u32 ‖ protocol_version u32 ‖ chain_id u64 ‖ timestamp_ms u64 ‖ limits: Limits ‖ pricing: PriceSchedule ‖ params: ChainParams ‖ admins: Vec<OwnerId>` | 408 + 20 per admin |
 | `Header` (version 1) | `version u32 (1) ‖ chain_id u64 ‖ height u64 ‖ parent_hash ‖ timestamp_ms u64 ‖ inputs_digest ‖ outcomes_digest` | 124 |
 | `Header` (version 2) | the version-1 fields with `version` 2, then `‖ state_root` | 156 |
 | `BlockInputs` | `admin: Vec<AdminInput> ‖ txs: Vec<TxEnvelope>` | 8 when empty |
@@ -539,7 +547,9 @@ overflow fails the check):
   `$expiresAt` and the host's named-projection expiry read is refused;
   with `max_page = 0` the sweep's reads are refused; with `max_groups = 0`
   or `max_literals = 0` the sweep's `Eq` query (one group of one literal)
-  is refused. Each would halt the chain at its first due height.
+  is refused. Each would halt the chain at its first due height;
+- `Limits::validate`: a cell-name limit of 1 to 32 and an indexed-string
+  limit of at most 128 (`GenesisError::CellLimits`).
 
 **Expiry reservation**: `block_budget ≥ user_budget + expiry_per_block ×
 max_expiry_delete_cost`, where `max_expiry_delete_cost` is the model-3

@@ -55,7 +55,10 @@ or database metadata.
 
 The storage backend format itself is unchanged. Engine manifests and state
 headers gate the logical layout, and node genesis/header domains gate the chain.
-Legacy decoder rejects new scalar tags; legacy write admission rejects new types.
+Scalar type ids are shared by both profiles: the default build now also admits
+ids 6–11 and the golem-db grid ids 12–25 in generic namespaces (additive, no
+existing encoding or root changes; see `docs/block-format.md`, "Value types").
+The Arkiv entity namespace still admits only the SDK scalars above.
 Retained legacy golden vectors are exercised by default builds. Shared database
 tests run under both profiles; node v2 uses dedicated host, HTTP, full/light and
 crash suites because the preserved generic/signed node fixtures describe another

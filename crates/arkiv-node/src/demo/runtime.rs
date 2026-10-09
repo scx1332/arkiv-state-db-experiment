@@ -390,7 +390,12 @@ impl Node {
             "u64" => Value::U64(number(&value)?),
             "i64" => Value::I64(value.parse().map_err(|_| DemoError::InvalidRequest)?),
             "str" => Value::str(&value),
-            _ => return Err(DemoError::UnsupportedProof),
+            "bytes" => return Err(DemoError::UnsupportedProof),
+            other => match arkiv_db::TypeTag::from_name(other) {
+                Some(_) => crate::value_json::from_json(other, &Json::String(value))
+                    .ok_or(DemoError::InvalidRequest)?,
+                None => return Err(DemoError::UnsupportedProof),
+            },
         };
         let request = EqRequest {
             snapshot: SnapshotRef {
@@ -623,7 +628,10 @@ fn proof_error(error: arkiv_db::proof::ProofError) -> DemoError {
 }
 pub fn rows_json(rows: &[Row]) -> Json {
     Json::Array(rows.iter().map(|row| json!({"id": row.id.ordinal().to_string(), "key":row.key.as_ref().map(|k| hex(k.as_bytes())), "cells": row.cells.iter().map(|(name,cell)| {
-        let (tag,value) = match &cell.value { Value::Bool(v) => ("bool",v.to_string()), Value::I64(v) => ("i64",v.to_string()), Value::U64(v) => ("u64",v.to_string()), Value::Str(v) => ("str",v.to_string()), Value::Bytes(v) => ("bytes",hex(v)), Value::I32(v) => ("i32",v.to_string()), Value::U256(v) => ("u256",alloy_primitives::U256::from_be_bytes(*v).to_string()), Value::Dec(v) => ("dec",crate::simulator::metadata::decimal_text(v)), Value::Bytes32(v) => ("bytes32",hex(v)), Value::Key(v) => ("key",hex(v)), Value::Addr(v) => ("addr",hex(v)) };
+        // Text in every case: booleans as true/false, the rest as their
+        // value_json text.
+        let tag = cell.value.tag().name();
+        let value = match crate::value_json::to_json(&cell.value) { Json::String(text) => text, other => other.to_string() };
         json!({"name":name.as_str(),"kind":if cell.is_attribute(){"attribute"}else{"field"},"type":tag,"value":value})
     }).collect::<Vec<_>>() })).collect())
 }

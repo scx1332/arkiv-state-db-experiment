@@ -43,6 +43,7 @@ pub mod select;
 pub mod signed;
 pub mod simulator;
 pub mod validate;
+pub mod value_json;
 
 pub use block::{
     AdminAction, AdminInput, AdminOutcome, AdminRejection, Block, BlockInputs, BlockOutcomes,

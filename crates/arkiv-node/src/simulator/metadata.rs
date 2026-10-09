@@ -23,19 +23,7 @@ fn corrupt() -> StorageError {
     )
 }
 pub fn value_type(v: &Value) -> &'static str {
-    match v {
-        Value::Bool(_) => "bool",
-        Value::I64(_) => "i64",
-        Value::U64(_) => "u64",
-        Value::Str(_) => "str",
-        Value::Bytes(_) => "bytes",
-        Value::I32(_) => "i32",
-        Value::U256(_) => "u256",
-        Value::Dec(_) => "dec",
-        Value::Bytes32(_) => "bytes32",
-        Value::Addr(_) => "addr",
-        Value::Key(_) => "key",
-    }
+    v.tag().name()
 }
 pub fn value_digest(v: &Value) -> String {
     hex(digest("arkiv/simulator-value/v1", &encode(v)).as_slice())
@@ -51,20 +39,10 @@ pub fn record_change(namespace: NamespaceId, row: arkiv_db::Row) -> super::Resul
             {
                 expiry = n;
             }
-            let value = match &cell.value {
-                Value::Bool(b) => serde_json::json!(b),
-                Value::I64(n) => serde_json::json!(n.to_string()),
-                Value::U64(n) => serde_json::json!(n.to_string()),
-                Value::I32(n) => serde_json::json!(n.to_string()),
-                Value::U256(n) => {
-                    serde_json::json!(alloy_primitives::U256::from_be_bytes(*n).to_string())
-                }
-                Value::Dec(n) => serde_json::json!(decimal_text(n)),
-                Value::Bytes32(n) | Value::Key(n) => serde_json::json!(hex(n)),
-                Value::Addr(n) => serde_json::json!(hex(n)),
-                Value::Str(s) => serde_json::json!(s.as_ref()),
-                Value::Bytes(_) => return Err(super::Error("StorageCorrupt")),
-            };
+            if matches!(cell.value, Value::Bytes(_)) {
+                return Err(super::Error("StorageCorrupt"));
+            }
+            let value = crate::value_json::to_json(&cell.value);
             attributes.push(Attribute {
                 name: name.as_str().into(),
                 value_type: value_type(&cell.value).into(),
@@ -386,12 +364,5 @@ pub fn capture(
 /// Decimal projection is only admitted by the v2 profile. Legacy callers cannot
 /// decode or commit this type; retain total diagnostic formatting for Value.
 pub fn decimal_text(value: &[u8; 32]) -> String {
-    #[cfg(feature = "arkiv-v2")]
-    {
-        crate::arkiv::format_decimal(value)
-    }
-    #[cfg(not(feature = "arkiv-v2"))]
-    {
-        hex(value)
-    }
+    crate::value_json::scaled_text(*value, 18)
 }

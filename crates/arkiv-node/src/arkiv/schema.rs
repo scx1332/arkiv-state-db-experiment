@@ -30,7 +30,8 @@ impl ArkivTypeId {
             Value::Str(_) => Self::Str,
             Value::Addr(_) => Self::Addr,
             Value::Key(_) => Self::Key,
-            Value::I64(_) => return Err(ArkivFault::Value),
+            // i64 and the golem-grid scalars are not SDK types.
+            _ => return Err(ArkivFault::Value),
         })
     }
 }
@@ -289,7 +290,8 @@ pub fn encode_abi_value(value: &Value) -> Result<Vec<u8>, ArkivFault> {
         Value::U256(v) | Value::Dec(v) | Value::Bytes32(v) | Value::Key(v) => word = *v,
         Value::Str(v) => return Ok(v.as_bytes().to_vec()),
         Value::Bytes(v) => return Ok(v.to_vec()),
-        Value::I64(_) => return Err(ArkivFault::Value),
+        // i64 and the golem-grid scalars are not SDK types.
+        _ => return Err(ArkivFault::Value),
     }
     Ok(word.to_vec())
 }
@@ -357,7 +359,8 @@ pub fn encode_natural_value(value: &Value) -> Result<Vec<u8>, ArkivFault> {
         Value::Addr(v) => v.to_vec(),
         Value::Str(v) => v.as_bytes().to_vec(),
         Value::Bytes(v) => v.to_vec(),
-        Value::I64(_) => return Err(ArkivFault::Value),
+        // i64 and the golem-grid scalars are not SDK types.
+        _ => return Err(ArkivFault::Value),
     })
 }
 pub fn decode_natural_value(type_id: u8, bytes: &[u8]) -> Result<Value, ArkivFault> {

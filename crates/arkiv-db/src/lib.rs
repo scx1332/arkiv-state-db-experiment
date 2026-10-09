@@ -98,8 +98,8 @@ pub use meter::{
 pub use namespace::{NamespaceDescriptor, NamespaceId, NamespaceName, OwnerId, Revision};
 pub use query::{CellSelect, Cursor, Literal, Projection, Query, QueryFault, QueryPage, Term};
 pub use record::{
-    ArgumentFault, Cell, CellKind, CellName, Limits, NameFault, RecordId, RecordKey, Row, TypeTag,
-    Value,
+    ArgumentFault, Cell, CellKind, CellName, Float32, Float64, Limits, NameFault, RecordId,
+    RecordKey, Row, TypeTag, Value,
 };
 pub use state::{
     MapKind, NamespaceRoots, STATE_FORMAT, STATE_ROOT_DOMAIN, StagedObject, StateHeader,

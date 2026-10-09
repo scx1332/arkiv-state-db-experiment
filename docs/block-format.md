@@ -77,7 +77,8 @@ value is always one the Rust constructors could have built:
   `_`, `-`, `.`, `:`);
 - record-key length 1 to 32;
 - nonzero `NamespaceId` and `RecordId`;
-- type ids 1 to 5, every enum tag, `bool` and `Option` bytes;
+- type ids 1 to 25 (both profiles), every enum tag, `bool` and `Option`
+  bytes; float payloads that are NaN or negative zero;
 - UTF-8 text;
 - a `PriceSchedule` class count equal to `OperationClass::ALL.len()` (31
   under counting-rule version 3);
@@ -86,8 +87,9 @@ value is always one the Rust constructors could have built:
 
 Decoders do **not** apply the engine's admission rules: value and cell
 limits (`Limits`), the 64-byte indexed-value cap, attribute kinds (a
-`Bytes` attribute), duplicate or overlapping cell names, empty patches and
-the 20-byte raw-key cap. Those depend on instance limits or produce
+`Bytes` attribute), duplicate or overlapping cell names and the 20-byte
+raw-key cap. (An empty patch is not an admission fault: it is golem-db's
+no-op, see `ArgumentFault` below.) Those depend on instance limits or produce
 deterministic rejections with receipts; an operation that violates them
 decodes and is then rejected by the engine at admission, or earlier by the
 host's static validation (N0b-3). `codec.rs` tests this boundary.
@@ -137,7 +139,7 @@ host's static validation (N0b-3). `codec.rs` tests this boundary.
 | `NamespaceDescriptor` | `id ‖ name ‖ owner ‖ revision` | 41–60 |
 | `RecordKey` | `u8 len ‖ bytes`, len 1–32 | 2–33 |
 | `TypeTag` | type id `u8` (table below) | 1 |
-| `Value` | `type id ‖ payload`: `Bool` one `bool` byte; `I64` 8 bytes two's complement (not the sign-flipped term form); `U64` 8 bytes; `Str` text; `Bytes` bytes | 2+ |
+| `Value` | `type id ‖ payload`: `Bool` one `bool` byte; `Str` text; `Bytes` bytes; every other type its fixed natural width (table below), signed types in plain two's complement (not the sign-flipped term form) | 2+ |
 | `CellKind` | `u8` (table below) | 1 |
 | `Cell` | `kind ‖ value` | 3+ |
 | `WriteOp` | tag ‖ fields (table below) | |
@@ -173,6 +175,77 @@ encoding uses):
 | 3 | `U64` | 8 bytes |
 | 4 | `Str` | `u32 len ‖ UTF-8` |
 | 5 | `Bytes` | `u32 len ‖ bytes` |
+| 6 | `I32` | 4 bytes, two's complement |
+| 7 | `U256` | 32 bytes |
+| 8 | `Dec` | 32 bytes, two's complement units of 10^-18 (golem `dec256`) |
+| 9 | `Bytes32` | 32 bytes |
+| 10 | `Addr` | 20 bytes (golem `bytes20`) |
+| 11 | `Key` | 32 bytes |
+| 12 | `Bytes4` | 4 bytes |
+| 13 | `Bytes8` | 8 bytes |
+| 14 | `Bytes16` | 16 bytes |
+| 15 | `U32` | 4 bytes |
+| 16 | `U128` | 16 bytes |
+| 17 | `I128` | 16 bytes, two's complement |
+| 18 | `I256` | 32 bytes, two's complement |
+| 19 | `Dec32` | 4 bytes, two's complement units of 10^-4 |
+| 20 | `Dec64` | 8 bytes, two's complement units of 10^-6 |
+| 21 | `Dec128` | 16 bytes, two's complement units of 10^-18 |
+| 22 | `F32` | 4 bytes, IEEE-754 binary32 bits; NaN and `80000000` rejected |
+| 23 | `F64` | 8 bytes, IEEE-754 binary64 bits; NaN and `8000…00` rejected |
+| 24 | `Date32` | 4 bytes, two's complement days since the Unix epoch |
+| 25 | `Timestamp64` | 8 bytes, two's complement microseconds since the Unix epoch |
+
+Ids 6–11 were introduced with the `arkiv-v2` profile; ids 12–25 complete
+golem-db's cell type grid. All 25 ids are admitted by **both** profiles (see
+[Value types](#value-types) below). Every payload is big-endian.
+
+#### Value types
+
+The term bytes of an attribute (`Value::term_bytes`, the bytes inside a
+term key, see `docs/state-trie.md`) are order-preserving and equal golem-db's
+stored value bytes for the same type:
+
+| Types | Term bytes |
+| --- | --- |
+| `Bool` | `00` / `01` |
+| `Str` | UTF-8 bytes |
+| `U32`, `U64`, `U128`, `U256` | big-endian |
+| `I32`, `I64`, `I128`, `I256`, `Dec32`, `Dec64`, `Dec128`, `Dec`, `Date32`, `Timestamp64` | big-endian two's complement, sign bit flipped |
+| `F32`, `F64` | IEEE bits; a non-negative value flips the sign bit, a negative value flips every bit |
+| `Bytes4`, `Bytes8`, `Bytes16`, `Bytes32`, `Addr`, `Key` | the bytes |
+| `Bytes` | none: field-only |
+
+Range predicates and range proofs apply to the integers, decimals, floats
+and the time types (`TypeTag::is_ordered`). `Bool`, `Str` (plus prefix) and
+the fixed-width byte types are equality-only, as `Bytes32` always was.
+Floats have one valid byte form per value: NaN is rejected at construction
+and decode, `-0.0` normalizes to `+0.0`, infinities are admitted. Decimal
+types carry a fixed scale per type (golem's: `dec32` 4, `dec64` 6, `dec128`
+and `dec256` 18); values are unscaled integers and are never rescaled.
+
+Golden vectors: `crates/arkiv-db/tests/codec.rs`
+(`extended_type_ids_and_values`) for the storage form and
+`crates/arkiv-db/tests/golem_types.rs` (`term_bytes_are_golem_stored_forms`)
+for the term form.
+
+**Why both profiles, and why no version bump.** The addition is strictly
+additive: ids 1–5 and their encodings, every other tag table, and every
+layout are unchanged, so every existing byte string, state root and golden
+vector is unchanged (`roots.rs`, `rehash.rs` and the legacy durable vectors
+pass untouched). `CODEC_VERSION`/`LAYOUT_VERSION` therefore stay 1 (default)
+and 2 (`arkiv-v2`): no existing encoding gains a second meaning, and an
+older decoder never misreads a new value: it rejects the unknown id with
+`UnknownTag`. Earlier the default profile rejected ids 6–11 only because
+they arrived with the v2 work, not because of an encoding conflict; nothing
+in the generic profile depends on that rejection. The one compatibility
+constraint is operational: on a running chain, nodes on an older binary
+reject blocks that carry the new types. Mixed-version networks must upgrade
+together (there is no height activation). The fixed-width values are at most
+32 bytes, within both profiles' indexed-value caps (64 / 128 bytes). The
+Arkiv SDK boundary of the v2 entity namespace (`arkiv/schema.rs`, signed
+JSON-RPC) keeps admitting only SDK types; the new ids are generic-namespace
+types there, like `i64`.
 
 `CellKind`: 1 `Attribute`, 2 `Field`.
 
@@ -202,7 +275,9 @@ encoding uses):
 
 `ArgumentFault`: 1 `KeyTooLong`, 2 `TooManyCells`, 3 `DuplicateCell`,
 4 `SetAndRemoveOverlap`, 5 `ValueTooLarge`, 6 `BytesNotIndexable`,
-7 `EmptyPatch`, 8 `NotHostOperation`.
+7 `EmptyPatch` (retired: never produced since an empty patch became
+golem-db's no-op; the tag still decodes), 8 `NotHostOperation`,
+9 `UnsupportedType`.
 
 `QueryFault`: 1 `NoGroups`, 2 `TooManyGroups`, 3 `TooManyLiterals`,
 4 `ZeroLimit`, 5 `LimitTooLarge`, 6 `NotIndexable`, 7 `ValueTooLarge`,
@@ -613,11 +688,12 @@ carries a statically valid expiry (not `(0, 0)`, and `min_lifetime ≤
 max_lifetime`), and passes the engine's argument validation
 (`WriteOp::validate`: raw keys and prefixes of at most 20 bytes, cell and
 patch counts, duplicates, set/remove overlap, value and indexed-value
-sizes, `Bytes` attributes, empty patches) **as it will execute**: with a
+sizes, `Bytes` attributes) **as it will execute**: with a
 placeholder `$expiresAt = U64(0)` injected when it carries an expiry. So
 a record with an expiry has at most `max_cells − 1` user cells, and an
 expiry-only patch is valid. Names of at most 20 characters and record keys
-of 1 to 32 bytes are guaranteed by their types. An admin input is valid
+of 1 to 32 bytes are guaranteed by their types. An empty patch (no set,
+no remove, no expiry) is valid too: golem-db's no-op. An admin input is valid
 when its actor is a genesis admin. A block's inputs are valid when every
 admin input and transaction is, the selection limits hold, and no request
 identity repeats; the executor also checks that the block follows its

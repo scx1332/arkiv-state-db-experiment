@@ -325,7 +325,8 @@ impl Weights {
     /// order over set ∪ remove: a removal per term in old − new (value
     /// first), then an insert per term in new − old (value first). Newness
     /// excludes the patched record. `n` = key bytes + Σ over the resulting
-    /// cells of (name bytes + encoded value bytes).
+    /// cells of (name bytes + encoded value bytes). An empty patch charges
+    /// DirectoryLookup, PointRead and RecordPatch 1 only.
     fn patch_charges(
         &self,
         model: &NsModel,
@@ -335,6 +336,10 @@ impl Weights {
         set: &[(CellName, Cell)],
         remove: &[CellName],
     ) -> Vec<u64> {
+        if set.is_empty() && remove.is_empty() {
+            // golem-db's no-op: the lookups and the patch base charge only.
+            return vec![self.directory_lookup, self.point_read, self.record_patch];
+        }
         let bytes: u64 = set.iter().map(|(name, cell)| cell_bytes(name, cell)).sum();
         let new_cells = patched_cells(old, set, remove);
         let row = count(key.as_bytes().len())
@@ -466,11 +471,14 @@ fn receipt(kind: ReceiptKind, schedule_id: u32, spent: u64, outcome: Outcome) ->
 /// for Str and Bytes.
 fn encoded_len(value: &Value) -> u64 {
     match value {
-        Value::I32(_) => 4,
+        Value::I32(_) | Value::Bytes4(_) | Value::U32(_) | Value::Dec32(_) => 4,
+        Value::F32(_) | Value::Date32(_) => 4,
         Value::Addr(_) => 20,
-        Value::U256(_) | Value::Dec(_) | Value::Bytes32(_) | Value::Key(_) => 32,
+        Value::U256(_) | Value::Dec(_) | Value::Bytes32(_) | Value::Key(_) | Value::I256(_) => 32,
+        Value::Bytes16(_) | Value::U128(_) | Value::I128(_) | Value::Dec128(_) => 16,
         Value::Bool(_) => 1,
-        Value::I64(_) | Value::U64(_) => 8,
+        Value::I64(_) | Value::U64(_) | Value::Bytes8(_) | Value::Dec64(_) => 8,
+        Value::F64(_) | Value::Timestamp64(_) => 8,
         Value::Str(text) => count(text.len()),
         Value::Bytes(bytes) => count(bytes.len()),
     }
@@ -564,9 +572,6 @@ fn argument_fault(op: &WriteOp) -> Option<ArgumentFault> {
     match op {
         WriteOp::CreateRecord { cells, .. } => cells_fault(cells),
         WriteOp::PatchRecord { set, remove, .. } => {
-            if set.is_empty() && remove.is_empty() {
-                return Some(ArgumentFault::EmptyPatch);
-            }
             if set.len() + remove.len() > LIMITS.max_cells {
                 return Some(ArgumentFault::TooManyCells);
             }
@@ -2416,7 +2421,7 @@ fn fault_op(namespace: NamespaceId, bytes: &[u8], which: usize) -> (Path, WriteO
                 .map(|n| (n.clone(), field(Value::Bool(true))))
                 .collect(),
         ),
-        // EmptyPatch.
+        // Empty patch: golem-db's no-op (or NotFound).
         4 => patch(namespace, bytes, vec![], vec![]),
         // TooManyCells: set + remove name seven cells.
         5 => patch(
@@ -3821,7 +3826,6 @@ fn full_run(seed: u32) {
         "InvalidArgument(SetAndRemoveOverlap)",
         "InvalidArgument(ValueTooLarge)",
         "InvalidArgument(BytesNotIndexable)",
-        "InvalidArgument(EmptyPatch)",
         "InvalidArgument(NotHostOperation)",
     ] {
         assert!(

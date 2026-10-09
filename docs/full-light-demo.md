@@ -227,7 +227,8 @@ must not accidentally start concurrent instances with the same identity.
 ## Complete equality page proof: `eq-page-v1`
 
 The supported expression is exactly one positive `Eq(attribute, value)`
-with type `Bool`, `I64`, `U64` or `Str`, using current typed equality and
+with any indexable type (every scalar except `Bytes`; the JSON forms are in
+`crates/arkiv-node/src/value_json.rs`), using current typed equality and
 indexed-value bounds. Order is ascending `RecordId`. Projection is fixed
 to id, key and **all cells**. No AND/OR, negation, ranges, prefixes,
 `Exists`, sorting, `Bytes` equality, count endpoint or selectable projection

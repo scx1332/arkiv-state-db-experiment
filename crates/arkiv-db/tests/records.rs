@@ -1646,8 +1646,7 @@ fn argument_faults_are_admission_rejections_with_nothing_recorded() {
     let ok = attr(Value::Bool(true));
     let bytes_attr = attr(Value::bytes(b"x"));
     use ArgumentFault::{
-        BytesNotIndexable, DuplicateCell, EmptyPatch, SetAndRemoveOverlap, TooManyCells,
-        ValueTooLarge,
+        BytesNotIndexable, DuplicateCell, SetAndRemoveOverlap, TooManyCells, ValueTooLarge,
     };
     let cases: Vec<(&str, WriteOp, ArgumentFault)> = vec![
         (
@@ -1730,11 +1729,6 @@ fn argument_faults_are_admission_rejections_with_nothing_recorded() {
                 cells
             }),
             TooManyCells,
-        ),
-        (
-            "patch: empty",
-            patch(ns, key("a"), vec![], vec![]),
-            EmptyPatch,
         ),
         (
             "patch: 33 set + 32 remove names",

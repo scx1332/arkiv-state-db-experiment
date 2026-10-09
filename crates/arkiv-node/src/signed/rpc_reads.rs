@@ -386,7 +386,8 @@ fn scalar(value: &Value) -> Result<(&'static str, Json)> {
         Value::Str(v) => ("str", json!(v.as_ref())),
         Value::Addr(v) => ("addr", json!(hex(v))),
         Value::Key(v) => ("key", json!(hex(v))),
-        Value::I64(_) => return Err(Error("InvalidEntity")),
+        // i64 and the golem-grid scalars are not SDK types.
+        _ => return Err(Error("InvalidEntity")),
     })
 }
 fn project(row: &Row, selected: &Json) -> Result<Json> {

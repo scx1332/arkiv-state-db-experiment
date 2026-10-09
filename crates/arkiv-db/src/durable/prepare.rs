@@ -44,11 +44,6 @@ fn row_size(row: &StoredRecord) -> Result<usize, DurableError> {
         bytes = add(
             bytes,
             match &cell.value {
-                Value::Bool(_) => 1,
-                Value::I32(_) => 4,
-                Value::Addr(_) => 20,
-                Value::U256(_) | Value::Dec(_) | Value::Bytes32(_) | Value::Key(_) => 32,
-                Value::I64(_) | Value::U64(_) => 8,
                 Value::Str(value) => {
                     u32::try_from(value.len())
                         .map_err(|_| DurableError::ResourceLimit("string width".into()))?;
@@ -59,6 +54,7 @@ fn row_size(row: &StoredRecord) -> Result<usize, DurableError> {
                         .map_err(|_| DurableError::ResourceLimit("value width".into()))?;
                     add(4, value.len())?
                 }
+                fixed => fixed.encoded_len(),
             },
         )?;
     }

@@ -3,8 +3,10 @@
 `range-complete-v1` proves one typed numeric attribute range at one selected
 snapshot. It supports inclusive/exclusive lower and upper bounds, or one
 unbounded end. At least one bound is required and both ends must have the same
-numeric type. The engine supports `i64` and `u64`, plus `i32`, `u256` and `dec`
-under `arkiv-v2`; the signed Arkiv HTTP adapter accepts its existing scalar
+numeric type. The engine supports every ordered type in both profiles: the
+integers `i32`/`i64`/`i128`/`i256` and `u32`/`u64`/`u128`/`u256`, the decimals
+`dec32`/`dec64`/`dec128`/`dec`, the floats `f32`/`f64` and the time types
+`date32`/`timestamp64` (`TypeTag::is_ordered`); the signed Arkiv HTTP adapter accepts its existing scalar
 profile (`u64`, `i32`, `u256`, `dec`). Reversed bounds and equal excluded bounds
 produce a complete empty result. Different types, fields, and missing attributes
 do not match. All cells and keys of matching rows are returned in RecordId order.

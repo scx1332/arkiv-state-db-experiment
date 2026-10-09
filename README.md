@@ -54,9 +54,11 @@ are now implemented in memory as the **block engine** (`Engine`):
   of 1 to 32 bytes (the SDK's entity keys are 32-byte hashes; the canonical
   key encoding is version 2, 33 bytes `len ‖ bytes ‖ zero padding`) plus up
   to 64 named cells; each cell is an attribute
-  (indexed, filterable) or a field (stored and returned only) holding a
-  `Bool`, `I64`, `U64`, `Str` or `Bytes` value under frozen canonical
-  encodings. Cell names are at most 20 ASCII characters; indexed values are
+  (indexed, filterable) or a field (stored and returned only) holding one
+  of 25 scalar types, golem-db's full cell type grid (`Bool`, `Str`,
+  `Bytes`, fixed bytes, `u32`–`u256`, `i32`–`i256`, `dec32`–`dec256`,
+  `f32`/`f64`, `date32`, `timestamp64`, plus `Key`), under frozen canonical
+  encodings (`docs/block-format.md`, "Value types"). Cell names are at most 20 ASCII characters; indexed values are
   at most 64 bytes, while field/payload values retain their configurable
   limit (4096 bytes by default). Local raw engine keys and scan prefixes are
   capped at 20 bytes and rejected before lookup when oversized.

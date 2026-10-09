@@ -2235,6 +2235,19 @@ impl Branch {
         self.read(|state, nodes| state.host_range(nodes, from, limit))
     }
 
+    /// The state root the branch's current state would seal to, without
+    /// consuming the branch: equal to the [`SealedCandidate::state_root`]
+    /// of a seal right now. Hashes only the map nodes not hashed yet and
+    /// keeps their hashes, so a later seal or further calls redo none of
+    /// that work; never reads storage. [`EngineError::Poisoned`] on a
+    /// poisoned branch.
+    pub fn try_state_root(&self) -> Result<B256, EngineError> {
+        if self.is_poisoned() {
+            return Err(EngineError::Poisoned);
+        }
+        Ok(self.working.header().root())
+    }
+
     /// Freezes the candidate. No further operations are possible.
     ///
     /// # Panics

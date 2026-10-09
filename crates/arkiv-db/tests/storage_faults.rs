@@ -24,9 +24,9 @@
 //!   estimates, reads and the expiry sweep) returns the error, records no
 //!   receipt, adds nothing to the block's spend and poisons the branch:
 //!   every later call returns a storage error even after the store heals,
-//!   and `try_checkpoint`, `rollback_to`, `set_pricing` and `try_seal`
-//!   return `EngineError::Poisoned`. An operation given enough reads
-//!   succeeds with the receipt the memory engine issues.
+//!   and `try_checkpoint`, `rollback_to`, `set_pricing`, `try_state_root`
+//!   and `try_seal` return `EngineError::Poisoned`. An operation given
+//!   enough reads succeeds with the receipt the memory engine issues.
 //! - Leaves that decode but contradict the key they sit under (a catalog
 //!   leaf describing another namespace, a key binding naming a row that
 //!   holds another key) are `Corrupt`, and so is a row whose attribute no
@@ -545,6 +545,11 @@ fn assert_poisoned(branch: &mut Branch, context: &str) {
     assert!(branch.try_namespace_count().is_err());
     assert_eq!(
         branch.try_checkpoint(),
+        Err(EngineError::Poisoned),
+        "{context}"
+    );
+    assert_eq!(
+        branch.try_state_root(),
         Err(EngineError::Poisoned),
         "{context}"
     );

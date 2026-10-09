@@ -1,0 +1,31 @@
+# Scaled-down copy of scenarios/large/large-realistic.toml (1/10 of the commits: fill 75 x 1,000 = 75k records,
+# then 75 steady-state commits of 1,000). Same seed, database, shape, mixes and block size; profile_at removed
+# (perf unavailable); logs renamed to small-*.
+name = "large-realistic-small"
+description = "75k Arkiv-like records (6 attributes, 1 KB payload), then 75 commits of 35% creates, 30% patches, 35% deletes (1/10 of large-realistic)"
+seed = 5
+commit_log = "results/small-large-realistic.csv"
+table_log = "results/small-large-realistic-tables.csv"
+
+[database]
+hash = "keccak-256"
+limits = { max_cell_name_len = 32, max_str_len = 64, max_bytes_len = 1024 }
+max_map_size_gib = 256
+
+[shape]
+attributes = [
+    { name = "project", type = "str", cardinality = 50, distribution = "zipf", len = 16 },     # one per app, a few big apps
+    { name = "entityType", type = "str", cardinality = 10, len = 12 },
+    { name = "id", type = "str", distribution = "unique", len = 36 },                          # UUID-sized
+    { name = "created", type = "u64", distribution = "unique" },                               # timestamp
+    { name = "status", type = "str", cardinality = 4, len = 8 },
+    { name = "ref", type = "str", cardinality = 10000, distribution = "zipf", len = 64 },     # key of another entity
+]
+fields = [{ name = "payload", type = "bytes", len = 1024 }]
+
+[workload]
+kind = "blocks"
+blocks = [
+    { ops = 1000, repeat = 75 },                                                       # fill: 75k records
+    { ops = 1000, repeat = 75, mix = { create = 35, patch = 30, delete = 35 } },       # steady state
+]

@@ -125,11 +125,13 @@ Runtime defaults are an 8 MiB/16,384-entry FIFO encoded-object cache and a
 preflight/staging pass. Zero cache bytes or entries disables retention.
 Cache hits still check the store's health. Recovery holds the context gate
 against loads and clears cached bytes before reopening. The cache stores no
-decoded trees, misses, errors, or uncommitted objects.
+decoded trees, misses, errors, or uncommitted objects. A key index beside
+the FIFO makes lookups O(1); the FIFO grows geometrically up to the entry
+limit, and a second load of a retained key is not inserted again.
 
 `stats()` separates retained cache buffer capacity, entry/container bytes,
-hits/misses, generation, resident manifests, pending payload, and the last
-preparation's visits, objects, bytes and map-kind counts. The consuming
+the key index's approximate bytes, hits/misses, generation, resident
+manifests, pending payload, and the last preparation's visits, objects, bytes and map-kind counts. The consuming
 adapter commit API currently requires one temporary clone of the bounded
 batch; its payload is reported explicitly. The temporary dedup B-tree's
 entry payload is reported separately from its allocator/node overhead.

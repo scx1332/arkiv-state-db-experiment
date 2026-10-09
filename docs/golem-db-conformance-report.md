@@ -1,4 +1,4 @@
-# golem-db conformance report (2026-10-09)
+# golem-db conformance report
 
 This report checks our engine against
 [golemfactory/golem-db-conformance-testing](https://github.com/golemfactory/golem-db-conformance-testing).
@@ -10,71 +10,66 @@ in-process `Api` trait. It treats `HandleInvalid` and `Conflict` as a lost
 race and treats any other error as fatal.
 
 To run the harness on our engine, we wrote an adapter that implements the
-real `golemdb_api::Api` trait over our `Engine`. It is in
+real `golemdb_api::Api` trait over our engine. It is in
 [`conformance/golem-db/`](../conformance/golem-db/README.md), together with
-the harness patch, the scaled scenarios and the ported golem API tests.
+the harness patch, the scaled scenarios and the tests.
 
 ## Verdict
 
 - **Every harness scenario runs on our engine with no errors**, on both the
   durable (redb) and memory backends. Those are 13 scenarios; the two
   `large/*` ones were scaled to 1/10.
-- **The `golemdb-api` semantics the harness uses can all be adapted.** That
-  covers create, patch and delete, read targets, the branch lifecycle,
-  first-committer-wins, checkpoint/rollback frames and seal/commit/discard.
-  None of it needs a deep engine change.
-- **Ported golem API tests: 4 pass and 5 fail.** Every failure is either
-  a golem-internal system record (`#alloc`, `#recordKeys`, `#roots`) or a
-  read of an old commit. golem returns `CommitUnavailable` for an old
-  commit, while we keep history and return the data. All user-visible
-  record and branch behaviour passes. Two adapter tests (every golem cell
-  type round-trips; empty patch semantics) also pass.
+- **The `golemdb-api` semantics can all be adapted** without a deep engine
+  change: create, patch and delete, read targets, the branch lifecycle,
+  first-committer-wins, checkpoint/rollback frames, seal/commit/discard,
+  exact `BranchInfo::version`, golem's genesis YAML, opening modes and
+  `OpenInfo`, and golem's storage-error mapping with retry after a failed
+  call.
+- **Ported golem API tests: 9 of 14 pass.** Every failure is either a
+  golem-internal system record (`#alloc`, `#recordKeys`, `#roots`) or a
+  read of an old commit, where golem returns `CommitUnavailable` and we
+  keep history and return the data. All user-visible record, branch,
+  opening and storage-failure behaviour passes.
+- **Adapter tests: 6 of 6 pass.** One of them runs seeded random scripts
+  on golem-db itself and on both of our backends and finds no difference
+  in any call's outcome or `BranchInfo`.
 - **Every golem cell type is native,** with golem's type ids and byte
-  order, every attribute type supports range queries, golem's genesis
-  `cell_limits` are the engine's `Limits`, and an empty patch is golem's
-  no-op in the engine itself.
-- **The run found one engine performance bug,** which is fixed here: the
-  durable object cache did a linear scan on every lookup.
+  order, and every attribute type supports range queries.
 
-## Changes made in this repository
+## The adapter
+
+`conformance/golem-db/src/arkiv.rs`; details in the kit's README.
+
+| golem-db API | adapter |
+|---|---|
+| `Genesis` (YAML via `Genesis::from_yaml`/`load`) | Becomes the engine genesis. `max_cell_name_len`, `max_str_len` and `max_bytes_len` are the engine's `Limits`; `max_str_len` is also the indexed-string limit, because golem indexes `str` attributes up to it. Values above the engine's caps (32-byte names, 128-byte indexed values) and Blake3 are refused with `InvalidConfig`, not narrowed. The harness takes a YAML file through `GOLEMDB_GENESIS`. |
+| Opening modes and errors | `CreateIfMissing`, `ExistingOnly`, `CreateNew`; `NotInitialized`, `AlreadyInitialized`, `GenesisMismatch` (checked before the mode, as in golem), `CorruptState`. |
+| `OpenInfo` | `created`, the head commit, the engine state root, and the engine genesis id. Memory and durable databases of one genesis report the same `OpenInfo`. `index_root` is zeros (see below). |
+| `BranchInfo::version` | golem's undo-entry count, computed exactly from the branch's write log when asked. No write reads a record for it. The one extra read left is a non-empty patch right after a rollback, where golem's frame rule depends on whether the patch changes anything. |
+| Storage failures | A full medium is `StoreFull`; any other failure is `Internal` with the storage error as source; a poisoned lock is `Internal`. A failed call leaves the branch as it was, so the call can be retried: a branch the engine poisoned is rebuilt from its log after the durable engine recovers the store. A failed commit keeps its seal, can be retried or discarded, and does not block other branches. |
+| Branch ids | Process-wide, as in golem's branch manager. |
+| Harness `table_log` | redb tables per engine space, other tables, free file space, the object cache, and live record, term and snapshot counts at head. |
+
+## Engine changes made for the conformance work
 
 1. **Durable object cache: O(1) lookups**
-   (`crates/arkiv-db/src/durable/cache.rs`).
-   - **The bug:** every lookup scanned the whole FIFO, and while the cache
-     filled, `reserve_exact(1)` copied the whole ring on every insert.
-     Durable creates were 3–6x slower than they needed to be. A larger
-     cache made it much worse, down to 49 ops/s with single creates taking
-     up to 380 ms.
-   - **The fix:** a key → sequence index sits beside the FIFO, and the FIFO
-     grows geometrically up to the entry limit.
-   - **Duplicate inserts** are skipped. Recovery clears the index, and a
-     load is cached only if the cache generation is unchanged.
-   - **Stats:** the new `CacheStats::index_bytes` reports the index's size.
-2. **`Branch::try_state_root(&self)`** (`crates/arkiv-db/src/engine.rs`).
-   - Returns the root a seal would produce, without consuming the branch.
-   - The node hashes it computes are kept, so a later seal does not redo
-     that work.
-   - golem-db's API keeps a sealed branch readable. The adapter needs this
-     call to provide that, and two ported checks went from failing to
-     passing.
-3. **The conformance kit** under `conformance/golem-db/`. It is not a
-   workspace member.
-4. **golem's full cell type grid** (`crates/arkiv-db/src/record.rs`,
-   `codec.rs`). The engine's type id is golem's cell type id, and each
-   type's term bytes equal golem's stored value bytes, so index order is
-   golem's order. Encodings and golden vectors are in
-   `docs/block-format.md` ("Value types and order"). The node's JSON forms
-   are in `crates/arkiv-node/src/value_json.rs`.
-5. **Empty patch is golem's no-op** (`crates/arkiv-db/src/typed.rs`).
-   `NotFound` for a missing record; otherwise it is applied, charges the
-   lookups and the patch base weight, writes nothing, and leaves the state
-   root unchanged.
-6. **Ranges on every attribute type** in golem's byte order, with range
+   (`crates/arkiv-db/src/durable/cache.rs`). Every lookup used to scan the
+   whole FIFO, and while the cache filled, `reserve_exact(1)` copied the
+   whole ring on every insert. That made durable creates 3–6x slower than
+   they needed to be. The fix puts a key → sequence index beside the FIFO.
+2. **`Branch::try_state_root(&self)`.** It returns the root a seal would
+   produce without consuming the branch and keeps the hashes for the seal.
+   The adapter uses it to keep a sealed branch readable, as golem does.
+3. **golem's full cell type grid** (`record.rs`, `codec.rs`). The engine's
+   type id is golem's cell type id, and each type's term bytes equal golem's
+   stored value bytes, so index order is golem's order. Encodings and golden
+   vectors are in `docs/block-format.md` ("Value types and order").
+4. **Empty patch is golem's no-op** (`typed.rs`): `NotFound` for a missing
+   record; otherwise it charges the lookups and writes nothing.
+5. **Ranges on every attribute type** in golem's byte order, with range
    proofs (`docs/range-proofs.md`).
-7. **Genesis-configurable cell limits** (`Limits::max_cell_name_len`,
-   `max_str_len`, `max_bytes_len`, `max_indexed_len`, within the hard caps
-   of 32-byte names and 128-byte indexed values). The adapter maps golem's
-   genesis `cell_limits` onto them.
+6. **Genesis-configurable cell limits** (`Limits::max_cell_name_len`,
+   `max_str_len`, `max_bytes_len`, `max_indexed_len`).
 
 ### Type mapping
 
@@ -95,16 +90,41 @@ The engine id equals golem's id for every golem type.
 | `timestamp64` (29) | `Timestamp64` | yes | yes | µs since epoch |
 
 golem's API has no queries, so "range queries" is our engine's query
-subset. The index order matches golem's bytewise attribute order for every
-type, and fixed-width values are stored as golem's value bytes.
+subset.
 
-## Results (ops/s; seal / commit p50 in ms)
+## Benchmarks
 
-All runs used tmpfs, so fsync cost almost nothing for either engine, and
-both engines ran on the same machine. Treat the cross-engine ratios as
-rough. Our durable runs use the default object cache (8 MiB / 16384
-entries). Raw logs: `S/conf/runs` for the unmodified engine and
-`S/final-runs` after the fixes, where `S` is the scratchpad.
+All runs used tmpfs, so fsync cost almost nothing for either engine. Both
+engines ran on the same machine. Treat cross-engine ratios as rough. Our
+durable runs use the default object cache (8 MiB / 16384 entries).
+`S` below is the session scratchpad.
+
+### Runs of 2026-10-09 with the current adapter
+
+Engine at `305d79e`; ops/s, with seal / commit p50 in ms. Logs:
+`S/adapter-runs`.
+
+| Scenario | arkiv durable | arkiv memory | golem-db (MDBX) |
+|---|---|---|---|
+| commit-growth | 5479 (0.18 / 1.31) | 26214 (0.21 / 0.001) | – |
+| block-size/2 (100 ops) | 5161 (1.41 / 9.96) | 21128 (1.55 / 0.005) | – |
+| concurrent-writers (8) | 2626 (2.19 / 13.2) | 15668 (2.96 / 0.013) | 1343 (35.6 / 23.8) |
+| large-2m, 1/10 scale | 5661 (12.9 / 97.1) | 20838 (14.7 / 0.14) | – |
+
+- **No cost from the adapter changes.** commit-growth earlier gave 5368,
+  5477 and 5613 ops/s on durable.
+- **`table_log` now works on both arkiv backends.** It runs between
+  commits, outside the timers. Durable large-2m without `table_log` gave
+  5973 ops/s. After the last commit the table log shows:
+  `objects:namespace` with 1,711,346 objects in 551 MiB (B-tree height 4),
+  catalog 0.08 MiB, other tables 0.13 MiB, 476 MiB free in a 1028 MiB file,
+  and 200,000 live records with 209,711 index terms over 202 snapshots.
+
+### Runs of 2026-10-09 before the adapter changes
+
+Engine before the cell-type grid and the configurable limits. These are the
+runs that found and checked the object-cache fix (logs `S/conf/runs` and
+`S/final-runs`).
 
 | Scenario | golem-db (MDBX) | arkiv durable, linear-scan cache | arkiv durable, indexed cache |
 |---|---|---|---|
@@ -124,31 +144,66 @@ entries). Raw logs: `S/conf/runs` for the unmodified engine and
 
 - **Disk:** our durable database used 5–16x less disk than golem's MDBX
   file, even though we keep every snapshot.
-- **Concurrent writers:** about 87% of branch attempts lose the race on our
-  engine, against 64% on golem-db.
-- **With the type grid and empty-patch change** (durable, same setup):
-  commit-growth 5613 ops/s (seal/commit p50 0.17 / 1.33 ms),
-  block-size/2 4975, 5309 and 5407 ops/s over three runs (seal/commit p50
-  1.31–1.40 / 9.7–10.6 ms). That is within run-to-run noise of the
-  indexed-cache column. Logs: `S/types-runs`.
-- **golem's own tests:** on golem-db itself, `cargo test -p golemdb-api`
-  passes 15 tests and the integration `api` target passes 26.
+
+### Concurrent writers: a semantics check only
+
+Arkiv has a single writer, the block producer, so racing writers are not
+an Arkiv workload. The scenario only checks that first-committer-wins
+works: losers get `HandleInvalid` or `Conflict` and retry on the new head.
+Both backends finish the scenario with no errors.
+
+Attempts per commit in the runs above:
+
+| | attempts | commits | attempts per commit |
+|---|---|---|---|
+| arkiv durable | 6304 | 788 | 8.0 |
+| arkiv memory | 37606 | 4701 | 8.0 |
+| golem-db | 1064 | 407 | 2.6 |
+
+With W identical writers on one head, one commit wins each round and the
+other W − 1 branches lose, so (W − 1)/W of attempts fail: 7/8 = 87.5% for
+W = 8, which is 8 attempts per commit. That is what we measure. golem-db
+loses fewer attempts (62%) because its commits are slower: seal p50 36 ms
+and commit 24 ms against our 2 and 13 ms. Losing commits wait up to
+seconds behind the writer lock (`commit lost` p50 251 ms), so the losers
+stay alive across rounds instead of racing every round. Fewer branches
+start per round, so fewer of them lose. The percentage says how the
+writers interleave, not how good the engine is.
 
 ## Remaining differences
 
-- **Key type.** The engine-only `Key` type (id 64) has no golem
-  counterpart; golem sees it as `bytes32`.
-- **Hash.** We support Keccak only. golem can also use Blake3, which the
-  harness never selects; the adapter refuses a Blake3 genesis.
-- **Roots and system records.** We have one state root, with no separate
-  index root. golem's `#alloc`, `#recordKeys` and `#roots` records have no
-  equivalent. These are different designs, not bugs.
-- **Durable engine performance.**
-  - **No decoded-node cache:** every access re-decodes the stored trie
-    nodes. A durable create costs 4–5x a memory create, and throughput
-    drops as the database grows.
-  - **One mutex for all reads:** it serializes every durable read and is
-    held during the redb read itself, which limits concurrent writers.
+- **System records.** golem's `#alloc`, `#recordKeys` and `#roots` have no
+  equivalent. `#params` and the other system keys are answered with their
+  identity, and `#params` with the genesis limits.
+- **History.** Old commits stay readable. golem returns `CommitUnavailable`.
+- **Roots.** We have one state root with no separate index root, because
+  the index is part of the namespace state. `SealInfo::index_root` and
+  `OpenInfo::index_root` are zeros. Reporting the namespace's term-map root
+  there would need a `Branch` accessor for namespace roots; `Snapshot` has
+  one (`try_namespace_roots`).
+- **Hash and limits.** Keccak only. Blake3 is refused at open, and so are
+  limits above the engine's caps: names over 32 bytes, and `max_str_len`
+  over 128 bytes, because golem indexes `str` attributes up to
+  `max_str_len`. golem has no per-record cell limit; the engine's default
+  of 64 cells applies.
+- **`head()`** reads the adapter's copy of the head, so it cannot fail.
+  golem reads storage, so a failing store fails `head()`.
+- **Storage failure model.** The redb store latches an I/O or full-medium
+  error and refuses every call until it recovers. The adapter recovers on
+  the next call, so golem's retry contract holds. A commit whose outcome is
+  indeterminate has no golem counterpart: the adapter resolves it at once
+  if it can. If it cannot, the next call resolves it, and a commit found
+  applied then makes the committing branch's retry a `Conflict`.
+- **Engine branches across recovery.** After a store recovery, engine
+  branches made before it cannot publish (the cache generation changed).
+  The adapter replays each branch's log on the new generation, and keeps
+  that log for the branch's lifetime, one copy of every applied write.
+- **Adapter genesis commit.** The adapter's namespace is created by a
+  commit after the engine's genesis, so golem commit N is engine snapshot
+  N + 1. A crash between the two leaves a database that reopens as
+  `CorruptState`. An engine-only prefilled genesis
+  (`DurableEngine::initialize` with an initial state, which today only the
+  simulator profile exposes) would make it atomic and remove the offset.
+- **Not supported.** Immutable-data calls return `NotImplemented`, as in
+  golem-db. `profile_at` needs `perf`; the scaled scenarios drop it.
 - **No pruning.** Our disk use grows with history.
-- **Harness tooling.** `table_log` reads MDBX statistics and `profile_at`
-  needs perf, so neither applies to our backend. Both were skipped.

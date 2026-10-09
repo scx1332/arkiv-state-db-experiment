@@ -1,0 +1,24 @@
+# Scaled-down copy of scenarios/large/large-2m.toml (1/10 of the commits: 200 x 1,000 creates = 200k records).
+# Same seed, database, shape and block size; profile_at removed (perf unavailable); logs renamed to small-*.
+name = "large-2m-small"
+description = "200k records created, 1,000 per commit (1/10 of large-2m); table sizes after each commit"
+seed = 4
+commit_log = "results/small-large-2m.csv"
+table_log = "results/small-large-2m-tables.csv"
+
+[database]
+hash = "keccak-256"
+limits = { max_cell_name_len = 32, max_str_len = 64, max_bytes_len = 1024 }
+max_map_size_gib = 256
+
+[shape]
+attributes = [
+    { name = "type", type = "str", cardinality = 20, len = 16 },
+    { name = "owner", type = "u64", cardinality = 10000, distribution = "zipf" },
+    { name = "created", type = "u64", distribution = "unique" },
+]
+fields = [{ name = "payload", type = "bytes", len = 256 }]
+
+[workload]
+kind = "blocks"
+blocks = [{ ops = 1000, repeat = 200 }]

@@ -768,6 +768,7 @@ Branch::{base, pricing, block_limit, spent, remaining, receipts, limits}
 Branch::{namespace_count, record_count, typed_record_count, term_count}       // unmetered statistics
 Branch::seal(self) -> SealedCandidate               // { base, receipts, spent }
 Branch::try_seal(self) -> Result<SealedCandidate, EngineError>                // Poisoned on a poisoned branch
+Branch::try_state_root(&self) -> Result<B256, EngineError>                    // the root a seal now would have; Poisoned on a poisoned branch
 SealedCandidate::{base, receipts, spent, state_header, state_root}
 Engine::publish(&SealedCandidate) -> Result<SnapshotId, EngineError>          // in-process only
 Snapshot::{id, base, pricing}
@@ -826,7 +827,7 @@ snapshot is a pointer copy that touches no storage, and the durable
 its manifest and index associations without trie loads. `begin`,
 `checkpoint`, `rollback_to`, `set_pricing`, `seal` and `publish` walk no
 state either; on a poisoned branch `try_checkpoint`, `rollback_to`,
-`set_pricing` and `try_seal` return `EngineError::Poisoned`. Host writes
+`set_pricing`, `try_state_root` and `try_seal` return `EngineError::Poisoned`. Host writes
 advance a branch's mutation serial, so a branch cursor issued before one is
 a `CursorMismatch`.
 

@@ -505,8 +505,8 @@ again once storage does. On a branch it **poisons** the branch: the failed
 operation's changes are discarded (the working state is restored to its
 value before the operation), no receipt is recorded and nothing is added to
 the block's spend; every later `try_` call on the branch returns the
-poisoning error, and `try_checkpoint`, `rollback_to`, `set_pricing` and
-`try_seal` return `EngineError::Poisoned`, so a poisoned candidate can never
+poisoning error, and `try_checkpoint`, `rollback_to`, `set_pricing`,
+`try_state_root` and `try_seal` return `EngineError::Poisoned`, so a poisoned candidate can never
 be sealed or published. A call made of several operations
 (`try_expire_records`) keeps the receipts of the operations that completed
 before the failure, in a branch that can no longer be sealed. The host

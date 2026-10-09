@@ -28,6 +28,8 @@
 //!   one cell value. Each changed root equals the model's.
 //! - The sealed candidate's root equals the root of the snapshot it
 //!   publishes, and `state_header().root()` is `state_root()`.
+//! - An open branch's `try_state_root` equals the model's root after every
+//!   transaction (asking does not change later roots), and the seal root.
 //!
 //! What it does not establish: roots of states read from storage (see
 //! `storage_faults.rs`), proofs (node step N3d), or anything about header
@@ -629,9 +631,20 @@ fn produce(engine: &mut Engine, model: &mut Model, block: &Block, context: &str)
         } else {
             *model = shadow;
         }
+        // The open branch's root between transactions, before further writes.
+        assert_eq!(
+            branch.try_state_root().unwrap(),
+            model_roots(model).state,
+            "{context}: open branch root"
+        );
     }
+    let open_root = branch.try_state_root().unwrap();
     let sealed: SealedCandidate = branch.seal();
     let root = sealed.state_root();
+    assert_eq!(
+        open_root, root,
+        "{context}: open branch root is the seal root"
+    );
     assert_eq!(sealed.state_header().root(), root);
     let id = engine.publish(&sealed).unwrap();
     let snapshot = engine.snapshot(id).unwrap();

@@ -181,9 +181,6 @@ pub(crate) fn validate_patch(
     set: &[(CellName, Cell)],
     remove: &[CellName],
 ) -> Result<(), ArgumentFault> {
-    if set.is_empty() && remove.is_empty() {
-        return Err(ArgumentFault::EmptyPatch);
-    }
     if set.len() + remove.len() > limits.max_cells {
         return Err(ArgumentFault::TooManyCells);
     }
@@ -495,6 +492,13 @@ pub(crate) fn patch(
     meter: &mut Meter<'_>,
 ) -> Result<(TypedState, RecordId), Fault> {
     let id = lookup_key(state, loaders, key, meter)?.ok_or(Rejection::NotFound)?;
+    if set.is_empty() && remove.is_empty() {
+        // golem-db semantics: an empty patch of an existing record is a
+        // successful no-op. It pays the key lookup and the patch base
+        // charge, loads and writes nothing, and leaves every root unchanged.
+        meter.charge(OperationClass::RecordPatch, 1)?;
+        return Ok((state.clone(), id));
+    }
     let row = load_row(state, loaders, id, Some(key), meter)?;
     // The resulting cell list: old cells, replaced or extended by `set`,
     // minus `remove`, kept sorted by name. One linear merge of the sorted

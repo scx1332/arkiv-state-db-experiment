@@ -2051,16 +2051,6 @@ fn patch_that_would_overfill_the_record_is_record_full_after_the_lookup() {
         rejected.receipt,
         traced(write_receipt(0, Outcome::Rejected(fault)), lines(&[]))
     );
-    let rejected = branch
-        .execute(ALICE, patch(ns, "a", Vec::new(), &[]), Budget::unlimited())
-        .expect_err("an empty patch is refused");
-    assert_eq!(
-        rejected.receipt,
-        write_receipt(
-            0,
-            Outcome::Rejected(Rejection::InvalidArgument(ArgumentFault::EmptyPatch))
-        )
-    );
     assert!(
         branch.receipts().is_empty(),
         "admission faults are not recorded"
@@ -4182,16 +4172,32 @@ fn estimate_matches_execute_for_a_typed_operation_script() {
             )),
         ),
         (
+            // An empty patch is golem-db's no-op: the directory lookup, the
+            // key lookup and the patch base charge, nothing written.
             "empty patch",
             ALICE,
             patch(ns, "a", Vec::new(), &[]),
+            Budget::unlimited().traced(),
+            Ok((
+                Effect::RecordPatched { id: id(1) },
+                traced(
+                    write_receipt(14, Outcome::Applied),
+                    lines(&[
+                        (OperationClass::DirectoryLookup, 1, 1, 1),
+                        (OperationClass::PointRead, 1, 3, 3),
+                        (OperationClass::RecordPatch, 1, 10, 10),
+                    ]),
+                ),
+            )),
+        ),
+        (
+            "empty patch of a missing key",
+            ALICE,
+            patch(ns, "zz", Vec::new(), &[]),
             Budget::unlimited(),
             Err((
-                Rejection::InvalidArgument(ArgumentFault::EmptyPatch),
-                write_receipt(
-                    0,
-                    Outcome::Rejected(Rejection::InvalidArgument(ArgumentFault::EmptyPatch)),
-                ),
+                Rejection::NotFound,
+                write_receipt(4, Outcome::Rejected(Rejection::NotFound)),
             )),
         ),
     ];
@@ -4207,11 +4213,11 @@ fn estimate_matches_execute_for_a_typed_operation_script() {
             "{label}: execute differs from the vector"
         );
     }
-    assert_eq!(branch.spent(), Cost::new(789));
+    assert_eq!(branch.spent(), Cost::new(789 + 14 + 4));
     assert_eq!(
         branch.receipts().len(),
-        9,
-        "the two admission rejections are not recorded"
+        11,
+        "the admission rejection is not recorded"
     );
     assert_eq!(branch.index_consistent(ns), Some(true));
 }

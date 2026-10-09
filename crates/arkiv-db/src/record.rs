@@ -243,6 +243,10 @@ impl fmt::Display for CellName {
 
 /// The type of a value. Ids are local to this repository (they are not the
 /// SDK's typeIds) and are never reassigned.
+///
+/// Ids 1–11 are the original scalars; ids 12–25 complete golem-db's cell
+/// type grid (see `docs/block-format.md`, "Value types"). Every id is
+/// admitted by both engine profiles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TypeTag {
     /// `true` or `false`.
@@ -255,27 +259,51 @@ pub enum TypeTag {
     Str = 4,
     /// Opaque bytes; field-only, never indexed.
     Bytes = 5,
-    /// Distinct Arkiv i32 scalar.
+    /// Signed 32-bit integer.
     I32 = 6,
-    /// Distinct Arkiv u256 scalar.
+    /// Unsigned 256-bit integer.
     U256 = 7,
-    /// Distinct Arkiv dec scalar.
+    /// Signed 256-bit decimal at scale 18 (golem `dec256`).
     Dec = 8,
-    /// Distinct Arkiv bytes32 scalar.
+    /// Exactly 32 opaque bytes.
     Bytes32 = 9,
-    /// Distinct Arkiv addr scalar.
+    /// Exactly 20 address bytes (golem `bytes20`).
     Addr = 10,
-    /// Distinct Arkiv key scalar.
+    /// Exactly 32 entity-reference bytes.
     Key = 11,
+    /// Exactly 4 opaque bytes.
+    Bytes4 = 12,
+    /// Exactly 8 opaque bytes.
+    Bytes8 = 13,
+    /// Exactly 16 opaque bytes.
+    Bytes16 = 14,
+    /// Unsigned 32-bit integer.
+    U32 = 15,
+    /// Unsigned 128-bit integer.
+    U128 = 16,
+    /// Signed 128-bit integer.
+    I128 = 17,
+    /// Signed 256-bit integer.
+    I256 = 18,
+    /// Signed 32-bit decimal at scale 4.
+    Dec32 = 19,
+    /// Signed 64-bit decimal at scale 6.
+    Dec64 = 20,
+    /// Signed 128-bit decimal at scale 18.
+    Dec128 = 21,
+    /// IEEE-754 binary32, never NaN or negative zero.
+    F32 = 22,
+    /// IEEE-754 binary64, never NaN or negative zero.
+    F64 = 23,
+    /// Signed days since the Unix epoch.
+    Date32 = 24,
+    /// Signed microseconds since the Unix epoch.
+    Timestamp64 = 25,
 }
 
 impl TypeTag {
-    /// Every tag, in id order.
-    #[cfg(not(feature = "arkiv-v2"))]
-    pub const ALL: [Self; 5] = [Self::Bool, Self::I64, Self::U64, Self::Str, Self::Bytes];
-    /// Every tag supported by the v2 profile.
-    #[cfg(feature = "arkiv-v2")]
-    pub const ALL: [Self; 11] = [
+    /// Every tag, in id order. Both profiles admit every tag.
+    pub const ALL: [Self; 25] = [
         Self::Bool,
         Self::I64,
         Self::U64,
@@ -287,11 +315,27 @@ impl TypeTag {
         Self::Bytes32,
         Self::Addr,
         Self::Key,
+        Self::Bytes4,
+        Self::Bytes8,
+        Self::Bytes16,
+        Self::U32,
+        Self::U128,
+        Self::I128,
+        Self::I256,
+        Self::Dec32,
+        Self::Dec64,
+        Self::Dec128,
+        Self::F32,
+        Self::F64,
+        Self::Date32,
+        Self::Timestamp64,
     ];
 
-    /// Whether the selected engine profile admits this type.
+    /// Whether the selected engine profile admits this type. Every type is
+    /// admitted by both profiles; the method is kept for callers that gate
+    /// on it.
     pub const fn is_supported(self) -> bool {
-        cfg!(feature = "arkiv-v2") || self.id() <= 5
+        true
     }
 
     /// The type id.
@@ -299,29 +343,23 @@ impl TypeTag {
         self as u8
     }
 
-    /// Whether attributes of this type exist (everything except `Bytes`).
-    pub const fn is_indexable(self) -> bool {
-        self.is_supported() && !matches!(self, Self::Bytes)
+    /// The tag with type id `id`, if any.
+    pub const fn from_id(id: u8) -> Option<Self> {
+        if id == 0 || id as usize > Self::ALL.len() {
+            None
+        } else {
+            Some(Self::ALL[id as usize - 1])
+        }
     }
 
-    /// Whether range predicates apply to this profile's numeric types.
-    pub const fn is_ordered(self) -> bool {
-        self.is_supported()
-            && matches!(
-                self,
-                Self::I64 | Self::U64 | Self::I32 | Self::U256 | Self::Dec
-            )
+    /// The tag whose [`Self::name`] is `name`, if any.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tag| tag.name() == name)
     }
 
-    /// Whether prefix predicates apply (`Str`).
-    pub const fn supports_prefix(self) -> bool {
-        matches!(self, Self::Str)
-    }
-}
-
-impl fmt::Display for TypeTag {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
+    /// The lower-case type name used by docs and JSON APIs.
+    pub const fn name(self) -> &'static str {
+        match self {
             Self::Bool => "bool",
             Self::I64 => "i64",
             Self::U64 => "u64",
@@ -333,9 +371,200 @@ impl fmt::Display for TypeTag {
             Self::Bytes32 => "bytes32",
             Self::Addr => "addr",
             Self::Key => "key",
-        };
-        formatter.write_str(name)
+            Self::Bytes4 => "bytes4",
+            Self::Bytes8 => "bytes8",
+            Self::Bytes16 => "bytes16",
+            Self::U32 => "u32",
+            Self::U128 => "u128",
+            Self::I128 => "i128",
+            Self::I256 => "i256",
+            Self::Dec32 => "dec32",
+            Self::Dec64 => "dec64",
+            Self::Dec128 => "dec128",
+            Self::F32 => "f32",
+            Self::F64 => "f64",
+            Self::Date32 => "date32",
+            Self::Timestamp64 => "timestamp64",
+        }
     }
+
+    /// Width of the value in bytes; `None` for `Str` and `Bytes`.
+    pub const fn width(self) -> Option<usize> {
+        match self {
+            Self::Str | Self::Bytes => None,
+            Self::Bool => Some(1),
+            Self::I32 | Self::Bytes4 | Self::U32 | Self::Dec32 | Self::F32 | Self::Date32 => {
+                Some(4)
+            }
+            Self::I64 | Self::U64 | Self::Bytes8 | Self::Dec64 | Self::F64 | Self::Timestamp64 => {
+                Some(8)
+            }
+            Self::Bytes16 | Self::U128 | Self::I128 | Self::Dec128 => Some(16),
+            Self::Addr => Some(20),
+            Self::U256 | Self::Dec | Self::Bytes32 | Self::Key | Self::I256 => Some(32),
+        }
+    }
+
+    /// Decimal places of a decimal type; `None` for other types.
+    pub const fn decimal_scale(self) -> Option<u8> {
+        match self {
+            Self::Dec32 => Some(4),
+            Self::Dec64 => Some(6),
+            Self::Dec128 | Self::Dec => Some(18),
+            _ => None,
+        }
+    }
+
+    /// Whether attributes of this type exist (everything except `Bytes`).
+    pub const fn is_indexable(self) -> bool {
+        self.is_supported() && !matches!(self, Self::Bytes)
+    }
+
+    /// Whether range predicates apply: the integers, decimals, floats and
+    /// time types. Booleans, strings and the fixed-width byte types are
+    /// equality-only.
+    pub const fn is_ordered(self) -> bool {
+        self.is_supported()
+            && matches!(
+                self,
+                Self::I64
+                    | Self::U64
+                    | Self::I32
+                    | Self::U256
+                    | Self::Dec
+                    | Self::U32
+                    | Self::U128
+                    | Self::I128
+                    | Self::I256
+                    | Self::Dec32
+                    | Self::Dec64
+                    | Self::Dec128
+                    | Self::F32
+                    | Self::F64
+                    | Self::Date32
+                    | Self::Timestamp64
+            )
+    }
+
+    /// Whether prefix predicates apply (`Str`).
+    pub const fn supports_prefix(self) -> bool {
+        matches!(self, Self::Str)
+    }
+}
+
+impl fmt::Display for TypeTag {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.name())
+    }
+}
+
+macro_rules! float_scalar {
+    ($(#[$doc:meta])* $name:ident, $float:ty, $bits:ty) => {
+        $(#[$doc])*
+        ///
+        /// The value is never NaN and never negative zero: [`Self::new`]
+        /// rejects NaN and normalizes `-0.0` to `+0.0`, and
+        /// [`Self::from_bits`] rejects both bit patterns, so every value has
+        /// exactly one canonical encoding. Infinities are admitted. Equality
+        /// is bit equality, which equals numeric equality on this domain.
+        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct $name($bits);
+
+        impl $name {
+            const SIGN: $bits = 1 << (<$bits>::BITS - 1);
+
+            /// Wraps `value`; `None` for NaN. Negative zero becomes zero.
+            pub fn new(value: $float) -> Option<Self> {
+                if value.is_nan() {
+                    None
+                } else if value == 0.0 {
+                    Some(Self(0))
+                } else {
+                    Some(Self(value.to_bits()))
+                }
+            }
+
+            /// Wraps raw IEEE-754 bits; `None` for NaN or negative zero.
+            pub fn from_bits(bits: $bits) -> Option<Self> {
+                (!<$float>::from_bits(bits).is_nan() && bits != Self::SIGN).then_some(Self(bits))
+            }
+
+            /// The raw IEEE-754 bits (the canonical storage form).
+            pub const fn to_bits(self) -> $bits {
+                self.0
+            }
+
+            /// The float value.
+            pub fn get(self) -> $float {
+                <$float>::from_bits(self.0)
+            }
+
+            /// Order-preserving bits: a non-negative value flips its sign
+            /// bit, a negative value flips every bit (golem-db's float
+            /// order encoding).
+            pub const fn order_bits(self) -> $bits {
+                if self.0 & Self::SIGN == 0 {
+                    self.0 ^ Self::SIGN
+                } else {
+                    !self.0
+                }
+            }
+
+            /// Inverse of [`Self::order_bits`]; `None` for the encodings of
+            /// NaN and negative zero.
+            pub fn from_order_bits(order: $bits) -> Option<Self> {
+                Self::from_bits(if order & Self::SIGN != 0 {
+                    order ^ Self::SIGN
+                } else {
+                    !order
+                })
+            }
+        }
+
+        impl PartialOrd for $name {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        impl Ord for $name {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.order_bits().cmp(&other.order_bits())
+            }
+        }
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(formatter, "{}({:?})", stringify!($name), self.get())
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt::Display::fmt(&self.get(), formatter)
+            }
+        }
+    };
+}
+
+float_scalar!(
+    /// An IEEE-754 binary32 scalar.
+    Float32,
+    f32,
+    u32
+);
+float_scalar!(
+    /// An IEEE-754 binary64 scalar.
+    Float64,
+    f64,
+    u64
+);
+
+/// Flips the sign bit of a big-endian two's complement integer: the
+/// order-preserving term form, and its own inverse.
+const fn flip_sign<const N: usize>(mut bytes: [u8; N]) -> [u8; N] {
+    bytes[0] ^= 0x80;
+    bytes
 }
 
 /// A typed value.
@@ -366,6 +595,34 @@ pub enum Value {
     Addr([u8; 20]),
     /// Exactly 32 entity-reference bytes; referential existence is not enforced.
     Key([u8; 32]),
+    /// Exactly 4 opaque bytes.
+    Bytes4([u8; 4]),
+    /// Exactly 8 opaque bytes.
+    Bytes8([u8; 8]),
+    /// Exactly 16 opaque bytes.
+    Bytes16([u8; 16]),
+    /// Unsigned 32-bit integer.
+    U32(u32),
+    /// Unsigned 128-bit integer.
+    U128(u128),
+    /// Signed 128-bit integer.
+    I128(i128),
+    /// Signed 256-bit integer in natural two's complement big-endian bytes.
+    I256([u8; 32]),
+    /// Signed unscaled units of 10^-4.
+    Dec32(i32),
+    /// Signed unscaled units of 10^-6.
+    Dec64(i64),
+    /// Signed unscaled units of 10^-18.
+    Dec128(i128),
+    /// IEEE-754 binary32 (never NaN or negative zero).
+    F32(Float32),
+    /// IEEE-754 binary64 (never NaN or negative zero).
+    F64(Float64),
+    /// Signed days since the Unix epoch.
+    Date32(i32),
+    /// Signed microseconds since the Unix epoch.
+    Timestamp64(i64),
 }
 
 impl Value {
@@ -383,6 +640,16 @@ impl Value {
         Self::Bytes(Arc::from(bytes))
     }
 
+    /// An `F32` value; `None` for NaN, and `-0.0` becomes `0.0`.
+    pub fn f32(value: f32) -> Option<Self> {
+        Float32::new(value).map(Self::F32)
+    }
+
+    /// An `F64` value; `None` for NaN, and `-0.0` becomes `0.0`.
+    pub fn f64(value: f64) -> Option<Self> {
+        Float64::new(value).map(Self::F64)
+    }
+
     /// The value's type.
     pub const fn tag(&self) -> TypeTag {
         match self {
@@ -397,91 +664,138 @@ impl Value {
             Self::Bytes32(_) => TypeTag::Bytes32,
             Self::Addr(_) => TypeTag::Addr,
             Self::Key(_) => TypeTag::Key,
+            Self::Bytes4(_) => TypeTag::Bytes4,
+            Self::Bytes8(_) => TypeTag::Bytes8,
+            Self::Bytes16(_) => TypeTag::Bytes16,
+            Self::U32(_) => TypeTag::U32,
+            Self::U128(_) => TypeTag::U128,
+            Self::I128(_) => TypeTag::I128,
+            Self::I256(_) => TypeTag::I256,
+            Self::Dec32(_) => TypeTag::Dec32,
+            Self::Dec64(_) => TypeTag::Dec64,
+            Self::Dec128(_) => TypeTag::Dec128,
+            Self::F32(_) => TypeTag::F32,
+            Self::F64(_) => TypeTag::F64,
+            Self::Date32(_) => TypeTag::Date32,
+            Self::Timestamp64(_) => TypeTag::Timestamp64,
         }
     }
 
-    /// Length of the canonical encoding in bytes: 1 for `Bool`, 8 for the
-    /// integers, the byte length for `Str` and `Bytes`. This is what
-    /// `CellByte` and `ReadByte` charges count.
+    /// Length of the canonical encoding in bytes: the type's fixed width
+    /// ([`TypeTag::width`]), or the byte length for `Str` and `Bytes`. This
+    /// is what `CellByte` and `ReadByte` charges count.
     pub fn encoded_len(&self) -> usize {
         match self {
-            Self::Bool(_) => 1,
-            Self::I64(_) | Self::U64(_) => 8,
             Self::Str(text) => text.len(),
             Self::Bytes(bytes) => bytes.len(),
-            Self::I32(_) => 4,
-            Self::Addr(_) => 20,
-            Self::U256(_) | Self::Dec(_) | Self::Bytes32(_) | Self::Key(_) => 32,
+            other => other.tag().width().expect("fixed-width type"),
         }
     }
 
     /// Canonical order-preserving term bytes of an indexable value; `None`
     /// for `Bytes`.
     ///
-    /// `Bool` is `00`/`01`; `I64` is the big-endian two's complement with the
-    /// sign bit flipped, so byte order equals numeric order; `U64` is
-    /// big-endian; `Str` is its UTF-8 bytes, so byte order equals code point
-    /// order and a prefix is a contiguous run.
+    /// `Bool` is `00`/`01`; unsigned integers are big-endian; signed
+    /// integers, decimals and the time types are big-endian two's complement
+    /// with the sign bit flipped, so byte order equals numeric order; floats
+    /// use the IEEE total-order form ([`Float64::order_bits`]); `Str` is its
+    /// UTF-8 bytes, so byte order equals code point order and a prefix is a
+    /// contiguous run; fixed-width bytes are themselves. Every form equals
+    /// golem-db's stored value bytes for the same type.
     pub fn term_bytes(&self) -> Option<Vec<u8>> {
-        match self {
-            Self::Bool(flag) => Some(vec![u8::from(*flag)]),
-            Self::I64(value) => Some(((*value as u64) ^ (1 << 63)).to_be_bytes().to_vec()),
-            Self::U64(value) => Some(value.to_be_bytes().to_vec()),
-            Self::Str(text) => Some(text.as_bytes().to_vec()),
-            Self::Bytes(_) => None,
-            Self::I32(value) => Some(((*value as u32) ^ (1 << 31)).to_be_bytes().to_vec()),
-            Self::U256(value) | Self::Bytes32(value) | Self::Key(value) => Some(value.to_vec()),
-            Self::Addr(value) => Some(value.to_vec()),
-            Self::Dec(value) => {
-                let mut bytes = *value;
-                bytes[0] ^= 0x80;
-                Some(bytes.to_vec())
+        Some(match self {
+            Self::Bool(flag) => vec![u8::from(*flag)],
+            Self::I64(value) | Self::Timestamp64(value) | Self::Dec64(value) => {
+                flip_sign(value.to_be_bytes()).to_vec()
             }
-        }
+            Self::U64(value) => value.to_be_bytes().to_vec(),
+            Self::Str(text) => text.as_bytes().to_vec(),
+            Self::Bytes(_) => return None,
+            Self::I32(value) | Self::Dec32(value) | Self::Date32(value) => {
+                flip_sign(value.to_be_bytes()).to_vec()
+            }
+            Self::U256(value) | Self::Bytes32(value) | Self::Key(value) => value.to_vec(),
+            Self::Addr(value) => value.to_vec(),
+            Self::Dec(value) | Self::I256(value) => flip_sign(*value).to_vec(),
+            Self::Bytes4(value) => value.to_vec(),
+            Self::Bytes8(value) => value.to_vec(),
+            Self::Bytes16(value) => value.to_vec(),
+            Self::U32(value) => value.to_be_bytes().to_vec(),
+            Self::U128(value) => value.to_be_bytes().to_vec(),
+            Self::I128(value) | Self::Dec128(value) => flip_sign(value.to_be_bytes()).to_vec(),
+            Self::F32(value) => value.order_bits().to_be_bytes().to_vec(),
+            Self::F64(value) => value.order_bits().to_be_bytes().to_vec(),
+        })
     }
 
     /// Decodes canonical term bytes of an indexable type; `None` for `Bytes`
-    /// or malformed input. The inverse of [`Self::term_bytes`].
+    /// or malformed input (wrong width, invalid UTF-8, a bool byte above 1,
+    /// or the term form of a NaN or negative-zero float). The inverse of
+    /// [`Self::term_bytes`].
     pub fn from_term_bytes(tag: TypeTag, bytes: &[u8]) -> Option<Self> {
-        match tag {
-            TypeTag::Bool => match bytes {
-                [0] => Some(Self::Bool(false)),
-                [1] => Some(Self::Bool(true)),
-                _ => None,
-            },
-            TypeTag::I64 => {
-                let raw = u64::from_be_bytes(bytes.try_into().ok()?);
-                Some(Self::I64((raw ^ (1 << 63)) as i64))
-            }
-            TypeTag::U64 => Some(Self::U64(u64::from_be_bytes(bytes.try_into().ok()?))),
-            TypeTag::Str => std::str::from_utf8(bytes).ok().map(Self::str),
-            TypeTag::Bytes => None,
-            TypeTag::I32 => Some(Self::I32(
-                (u32::from_be_bytes(bytes.try_into().ok()?) ^ (1 << 31)) as i32,
-            )),
-            TypeTag::U256 => Some(Self::U256(bytes.try_into().ok()?)),
-            TypeTag::Bytes32 => Some(Self::Bytes32(bytes.try_into().ok()?)),
-            TypeTag::Addr => Some(Self::Addr(bytes.try_into().ok()?)),
-            TypeTag::Key => Some(Self::Key(bytes.try_into().ok()?)),
-            TypeTag::Dec => {
-                let mut raw: [u8; 32] = bytes.try_into().ok()?;
-                raw[0] ^= 0x80;
-                Some(Self::Dec(raw))
-            }
+        fn signed<const N: usize>(bytes: &[u8]) -> Option<[u8; N]> {
+            bytes.try_into().ok().map(flip_sign)
         }
+        Some(match tag {
+            TypeTag::Bool => match bytes {
+                [0] => Self::Bool(false),
+                [1] => Self::Bool(true),
+                _ => return None,
+            },
+            TypeTag::I64 => Self::I64(i64::from_be_bytes(signed(bytes)?)),
+            TypeTag::U64 => Self::U64(u64::from_be_bytes(bytes.try_into().ok()?)),
+            TypeTag::Str => return std::str::from_utf8(bytes).ok().map(Self::str),
+            TypeTag::Bytes => return None,
+            TypeTag::I32 => Self::I32(i32::from_be_bytes(signed(bytes)?)),
+            TypeTag::U256 => Self::U256(bytes.try_into().ok()?),
+            TypeTag::Bytes32 => Self::Bytes32(bytes.try_into().ok()?),
+            TypeTag::Addr => Self::Addr(bytes.try_into().ok()?),
+            TypeTag::Key => Self::Key(bytes.try_into().ok()?),
+            TypeTag::Dec => Self::Dec(signed(bytes)?),
+            TypeTag::Bytes4 => Self::Bytes4(bytes.try_into().ok()?),
+            TypeTag::Bytes8 => Self::Bytes8(bytes.try_into().ok()?),
+            TypeTag::Bytes16 => Self::Bytes16(bytes.try_into().ok()?),
+            TypeTag::U32 => Self::U32(u32::from_be_bytes(bytes.try_into().ok()?)),
+            TypeTag::U128 => Self::U128(u128::from_be_bytes(bytes.try_into().ok()?)),
+            TypeTag::I128 => Self::I128(i128::from_be_bytes(signed(bytes)?)),
+            TypeTag::I256 => Self::I256(signed(bytes)?),
+            TypeTag::Dec32 => Self::Dec32(i32::from_be_bytes(signed(bytes)?)),
+            TypeTag::Dec64 => Self::Dec64(i64::from_be_bytes(signed(bytes)?)),
+            TypeTag::Dec128 => Self::Dec128(i128::from_be_bytes(signed(bytes)?)),
+            TypeTag::F32 => Self::F32(Float32::from_order_bits(u32::from_be_bytes(
+                bytes.try_into().ok()?,
+            ))?),
+            TypeTag::F64 => Self::F64(Float64::from_order_bits(u64::from_be_bytes(
+                bytes.try_into().ok()?,
+            ))?),
+            TypeTag::Date32 => Self::Date32(i32::from_be_bytes(signed(bytes)?)),
+            TypeTag::Timestamp64 => Self::Timestamp64(i64::from_be_bytes(signed(bytes)?)),
+        })
     }
 
     /// Orders two values of the same ordered type; `None` when the types
-    /// differ or the type is not ordered.
+    /// differ or the type is not ordered ([`TypeTag::is_ordered`]). Agrees
+    /// with the byte order of [`Self::term_bytes`].
     pub fn cmp_ordered(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
-            (Self::I32(left), Self::I32(right)) => Some(left.cmp(right)),
+            (Self::I32(left), Self::I32(right))
+            | (Self::Dec32(left), Self::Dec32(right))
+            | (Self::Date32(left), Self::Date32(right)) => Some(left.cmp(right)),
             (Self::U256(left), Self::U256(right)) => Some(left.cmp(right)),
-            (Self::Dec(left), Self::Dec(right)) => {
-                Some((left[0] ^ 128, &left[1..]).cmp(&(right[0] ^ 128, &right[1..])))
+            (Self::Dec(left), Self::Dec(right)) | (Self::I256(left), Self::I256(right)) => {
+                Some(flip_sign(*left).cmp(&flip_sign(*right)))
             }
-            (Self::I64(left), Self::I64(right)) => Some(left.cmp(right)),
+            (Self::I64(left), Self::I64(right))
+            | (Self::Dec64(left), Self::Dec64(right))
+            | (Self::Timestamp64(left), Self::Timestamp64(right)) => Some(left.cmp(right)),
             (Self::U64(left), Self::U64(right)) => Some(left.cmp(right)),
+            (Self::U32(left), Self::U32(right)) => Some(left.cmp(right)),
+            (Self::U128(left), Self::U128(right)) => Some(left.cmp(right)),
+            (Self::I128(left), Self::I128(right)) | (Self::Dec128(left), Self::Dec128(right)) => {
+                Some(left.cmp(right))
+            }
+            (Self::F32(left), Self::F32(right)) => Some(left.cmp(right)),
+            (Self::F64(left), Self::F64(right)) => Some(left.cmp(right)),
             _ => None,
         }
     }
@@ -606,7 +920,9 @@ pub enum ArgumentFault {
     ValueTooLarge,
     /// An attribute cell carries a `Bytes` value.
     BytesNotIndexable,
-    /// A patch sets nothing and removes nothing.
+    /// Retired: never produced. An empty patch is a valid no-op (golem-db
+    /// semantics). The variant and its codec tag 7 remain so that receipts
+    /// recorded before the change still decode.
     EmptyPatch,
     /// The host path accepts typed record operations only.
     NotHostOperation,

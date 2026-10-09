@@ -108,34 +108,10 @@ fn common(
 }
 
 pub(crate) fn typed_value(value: &arkiv_db::Value) -> Value {
-    use arkiv_db::Value::*;
-    match value {
-        Bool(b) => json!(b),
-        I64(n) => json!(n.to_string()),
-        U64(n) => json!(n.to_string()),
-        I32(n) => json!(n.to_string()),
-        U256(n) => json!(alloy_primitives::U256::from_be_bytes(*n).to_string()),
-        Dec(n) => json!(super::metadata::decimal_text(n)),
-        Bytes32(n) | Key(n) => json!(hex(n)),
-        Addr(n) => json!(hex(n)),
-        Str(s) => json!(s.as_ref()),
-        Bytes(b) => json!(hex(b)),
-    }
+    crate::value_json::to_json(value)
 }
 pub(crate) fn tag_name(tag: TypeTag) -> &'static str {
-    match tag {
-        TypeTag::Bool => "bool",
-        TypeTag::I64 => "i64",
-        TypeTag::U64 => "u64",
-        TypeTag::Str => "str",
-        TypeTag::Bytes => "bytes",
-        TypeTag::I32 => "i32",
-        TypeTag::U256 => "u256",
-        TypeTag::Dec => "dec",
-        TypeTag::Bytes32 => "bytes32",
-        TypeTag::Addr => "addr",
-        TypeTag::Key => "key",
-    }
+    tag.name()
 }
 
 /// Every edge, witness position and decoded leaf comes from strict traversal.

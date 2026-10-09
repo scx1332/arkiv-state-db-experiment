@@ -46,8 +46,8 @@ use crate::{
     namespace::{NamespaceDescriptor, NamespaceId, NamespaceName, OwnerId, Revision},
     query::QueryFault,
     record::{
-        ArgumentFault, Cell, CellKind, CellName, Limits, NameFault, RecordId, RecordKey, TypeTag,
-        Value,
+        ArgumentFault, Cell, CellKind, CellName, Float32, Float64, Limits, NameFault, RecordId,
+        RecordKey, TypeTag, Value,
     },
 };
 
@@ -836,6 +836,7 @@ impl Decode for RecordId {
 // Typed values and cells.
 
 const fn type_tag(tag: TypeTag) -> u8 {
+    // Explicit ids, documented in docs/block-format.md ("Value types").
     match tag {
         TypeTag::Bool => TYPE_BOOL,
         TypeTag::I64 => TYPE_I64,
@@ -848,6 +849,20 @@ const fn type_tag(tag: TypeTag) -> u8 {
         TypeTag::Bytes32 => 9,
         TypeTag::Addr => 10,
         TypeTag::Key => 11,
+        TypeTag::Bytes4 => 12,
+        TypeTag::Bytes8 => 13,
+        TypeTag::Bytes16 => 14,
+        TypeTag::U32 => 15,
+        TypeTag::U128 => 16,
+        TypeTag::I128 => 17,
+        TypeTag::I256 => 18,
+        TypeTag::Dec32 => 19,
+        TypeTag::Dec64 => 20,
+        TypeTag::Dec128 => 21,
+        TypeTag::F32 => 22,
+        TypeTag::F64 => 23,
+        TypeTag::Date32 => 24,
+        TypeTag::Timestamp64 => 25,
     }
 }
 
@@ -860,46 +875,97 @@ impl Encode for TypeTag {
 
 impl Decode for TypeTag {
     fn decode_from(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        match decoder.u8()? {
-            TYPE_BOOL => Ok(Self::Bool),
-            TYPE_I64 => Ok(Self::I64),
-            TYPE_U64 => Ok(Self::U64),
-            TYPE_STR => Ok(Self::Str),
-            TYPE_BYTES => Ok(Self::Bytes),
-            6 if cfg!(feature = "arkiv-v2") => Ok(Self::I32),
-            7 if cfg!(feature = "arkiv-v2") => Ok(Self::U256),
-            8 if cfg!(feature = "arkiv-v2") => Ok(Self::Dec),
-            9 if cfg!(feature = "arkiv-v2") => Ok(Self::Bytes32),
-            10 if cfg!(feature = "arkiv-v2") => Ok(Self::Addr),
-            11 if cfg!(feature = "arkiv-v2") => Ok(Self::Key),
-
-            tag => Err(DecodeError::UnknownTag {
+        let tag = decoder.u8()?;
+        TypeTag::from_id(tag)
+            .filter(|decoded| type_tag(*decoded) == tag)
+            .ok_or(DecodeError::UnknownTag {
                 kind: "TypeTag",
                 tag,
-            }),
-        }
+            })
     }
 }
 
-/// `type id ‖ payload`: `Bool` one byte, `I64` and `U64` eight big-endian
-/// bytes (`I64` in two's complement, not the order-preserving term form),
-/// `Str` and `Bytes` length-prefixed. V2 scalars use their natural width:
-/// `I32` four bytes, `Addr` twenty, and `U256`/`Dec`/`Bytes32`/`Key` thirty-two.
-/// Signed storage bytes are two's complement, without the term-order bias.
+/// Decodes the payload of a fixed-width scalar with type id `tag`; `None`
+/// for `Str`, `Bytes` and unknown ids, which the caller handles.
+pub(crate) fn decode_fixed_scalar(
+    tag: u8,
+    decoder: &mut Decoder<'_>,
+) -> Option<Result<Value, DecodeError>> {
+    fn non_nan<T>(value: Option<T>) -> Result<T, DecodeError> {
+        value.ok_or(DecodeError::Invalid {
+            kind: "Value",
+            reason: "float is NaN or negative zero",
+        })
+    }
+    Some(match tag {
+        TYPE_BOOL => decoder.bool().map(Value::Bool),
+        TYPE_I64 => decoder.i64().map(Value::I64),
+        TYPE_U64 => decoder.u64().map(Value::U64),
+        6 => decoder.array().map(i32::from_be_bytes).map(Value::I32),
+        7 => decoder.array().map(Value::U256),
+        8 => decoder.array().map(Value::Dec),
+        9 => decoder.array().map(Value::Bytes32),
+        10 => decoder.array().map(Value::Addr),
+        11 => decoder.array().map(Value::Key),
+        12 => decoder.array().map(Value::Bytes4),
+        13 => decoder.array().map(Value::Bytes8),
+        14 => decoder.array().map(Value::Bytes16),
+        15 => decoder.array().map(u32::from_be_bytes).map(Value::U32),
+        16 => decoder.array().map(u128::from_be_bytes).map(Value::U128),
+        17 => decoder.array().map(i128::from_be_bytes).map(Value::I128),
+        18 => decoder.array().map(Value::I256),
+        19 => decoder.array().map(i32::from_be_bytes).map(Value::Dec32),
+        20 => decoder.array().map(i64::from_be_bytes).map(Value::Dec64),
+        21 => decoder.array().map(i128::from_be_bytes).map(Value::Dec128),
+        22 => decoder
+            .array()
+            .and_then(|bits| non_nan(Float32::from_bits(u32::from_be_bytes(bits))))
+            .map(Value::F32),
+        23 => decoder
+            .array()
+            .and_then(|bits| non_nan(Float64::from_bits(u64::from_be_bytes(bits))))
+            .map(Value::F64),
+        24 => decoder.array().map(i32::from_be_bytes).map(Value::Date32),
+        25 => decoder
+            .array()
+            .map(i64::from_be_bytes)
+            .map(Value::Timestamp64),
+        _ => return None,
+    })
+}
+
+/// `type id ‖ payload`: `Bool` one byte, `Str` and `Bytes` length-prefixed,
+/// every other type its natural fixed width ([`TypeTag::width`]) in
+/// big-endian: unsigned integers as-is, signed integers, decimals and the
+/// time types in plain two's complement (not the order-preserving term
+/// form), fixed-width bytes as-is, floats as their IEEE-754 bits (never NaN
+/// or negative zero).
 impl Encode for Value {
     fn encode_to(&self, encoder: &mut Encoder) {
         encoder.u8(type_tag(self.tag()));
         match self {
             Self::Bool(flag) => encoder.bool(*flag),
-            Self::I64(value) => encoder.i64(*value),
+            Self::I64(value) | Self::Dec64(value) | Self::Timestamp64(value) => encoder.i64(*value),
             Self::U64(value) => encoder.u64(*value),
             Self::Str(text) => encoder.str(text),
             Self::Bytes(bytes) => encoder.bytes(bytes),
-            Self::I32(value) => encoder.fixed(&value.to_be_bytes()),
-            Self::U256(value) | Self::Dec(value) | Self::Bytes32(value) | Self::Key(value) => {
-                encoder.fixed(value)
+            Self::I32(value) | Self::Dec32(value) | Self::Date32(value) => {
+                encoder.fixed(&value.to_be_bytes())
             }
+            Self::U256(value)
+            | Self::Dec(value)
+            | Self::Bytes32(value)
+            | Self::Key(value)
+            | Self::I256(value) => encoder.fixed(value),
             Self::Addr(value) => encoder.fixed(value),
+            Self::Bytes4(value) => encoder.fixed(value),
+            Self::Bytes8(value) => encoder.fixed(value),
+            Self::Bytes16(value) => encoder.fixed(value),
+            Self::U32(value) => encoder.u32(*value),
+            Self::U128(value) => encoder.fixed(&value.to_be_bytes()),
+            Self::I128(value) | Self::Dec128(value) => encoder.fixed(&value.to_be_bytes()),
+            Self::F32(value) => encoder.u32(value.to_bits()),
+            Self::F64(value) => encoder.u64(value.to_bits()),
         }
     }
 }
@@ -909,21 +975,10 @@ impl Decode for Value {
 
     fn decode_from(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
         match decoder.u8()? {
-            TYPE_BOOL => decoder.bool().map(Self::Bool),
-            TYPE_I64 => decoder.i64().map(Self::I64),
-            TYPE_U64 => decoder.u64().map(Self::U64),
             TYPE_STR => decoder.str().map(|text| Self::Str(Arc::from(text))),
             TYPE_BYTES => decoder.bytes().map(|bytes| Self::Bytes(Arc::from(bytes))),
-            6 if cfg!(feature = "arkiv-v2") => {
-                decoder.array().map(i32::from_be_bytes).map(Self::I32)
-            }
-            7 if cfg!(feature = "arkiv-v2") => decoder.array().map(Self::U256),
-            8 if cfg!(feature = "arkiv-v2") => decoder.array().map(Self::Dec),
-            9 if cfg!(feature = "arkiv-v2") => decoder.array().map(Self::Bytes32),
-            10 if cfg!(feature = "arkiv-v2") => decoder.array().map(Self::Addr),
-            11 if cfg!(feature = "arkiv-v2") => decoder.array().map(Self::Key),
-
-            tag => Err(DecodeError::UnknownTag { kind: "Value", tag }),
+            tag => decode_fixed_scalar(tag, decoder)
+                .unwrap_or(Err(DecodeError::UnknownTag { kind: "Value", tag })),
         }
     }
 }

@@ -318,16 +318,6 @@ fn version(d: &mut Decoder<'_>, kind: &'static str) -> Result<(), DecodeError> {
 fn bounded_value(d: &mut Decoder<'_>, max: usize) -> Result<Value, DecodeError> {
     // Check length before copying any string/bytes. Tags are codec-v1 tags.
     match d.u8()? {
-        1 => d.bool().map(Value::Bool),
-        2 => d.i64().map(Value::I64),
-        3 => d.u64().map(Value::U64),
-        6 if cfg!(feature = "arkiv-v2") => d.array().map(i32::from_be_bytes).map(Value::I32),
-        7 if cfg!(feature = "arkiv-v2") => d.array().map(Value::U256),
-        8 if cfg!(feature = "arkiv-v2") => d.array().map(Value::Dec),
-        9 if cfg!(feature = "arkiv-v2") => d.array().map(Value::Bytes32),
-        10 if cfg!(feature = "arkiv-v2") => d.array().map(Value::Addr),
-        11 if cfg!(feature = "arkiv-v2") => d.array().map(Value::Key),
-
         tag @ (4 | 5) => {
             let bytes = d.bytes()?;
             if bytes.len() > max {
@@ -340,7 +330,8 @@ fn bounded_value(d: &mut Decoder<'_>, max: usize) -> Result<Value, DecodeError> 
                 Ok(Value::Bytes(Arc::from(bytes)))
             }
         }
-        tag => Err(DecodeError::UnknownTag { kind: "Value", tag }),
+        tag => crate::codec::decode_fixed_scalar(tag, d)
+            .unwrap_or(Err(DecodeError::UnknownTag { kind: "Value", tag })),
     }
 }
 fn validate_request(

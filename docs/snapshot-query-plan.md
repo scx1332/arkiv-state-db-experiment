@@ -292,8 +292,10 @@ recorded):
   in submitted order `DuplicateCell`, a `Str`/`Bytes` value longer than
   `max_value_len` or an indexed value longer than 64 bytes → `ValueTooLarge`,
   an attribute holding `Bytes` →
-  `BytesNotIndexable`. `PatchRecord`: both lists empty → `EmptyPatch`;
-  `set.len() + remove.len() > max_cells` → `TooManyCells`; `set` validated
+  `BytesNotIndexable`. `PatchRecord`: both lists empty is valid (golem-db's
+  no-op: `NotFound` for a missing key, otherwise applied with DirectoryLookup,
+  PointRead and RecordPatch 1 charged and nothing written; `EmptyPatch` is
+  retired); `set.len() + remove.len() > max_cells` → `TooManyCells`; `set` validated
   like create cells; a duplicate in `remove` → `DuplicateCell`; a name in
   both lists → `SetAndRemoveOverlap`. Then the milestone-1 block admission
   (`ExceedsBlockBudget`).

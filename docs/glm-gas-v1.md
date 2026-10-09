@@ -85,6 +85,11 @@ Every transaction starts at 21,000 intrinsic gas. Important engine weights are:
 20,000 for record creation, 12,000 for patch, 10,000 for deletion, 250 per cell
 write, 4 per submitted cell byte, 2 per rewritten row byte, 500 per inserted
 posting, 300 per removed posting and 100 per logical authenticated-map update.
+An empty patch (golem-db's no-op) pays the directory and key lookups and the
+patch base weight only; it writes nothing, so it has no cell, row or map-update
+charges. Every scalar type is charged by its encoded width alone
+(`Value::encoded_len`: 1 to 32 bytes for the fixed-width types); no type has a
+type-specific price.
 The full price array lives in `crates/arkiv-node/src/gas.rs`. Invalid operations
 still consume their preceding work; gas is a capacity budget, not only a count
 of successfully written entities.

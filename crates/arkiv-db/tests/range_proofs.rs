@@ -949,3 +949,51 @@ fn range_scaling_experiment() {
         );
     }
 }
+
+/// Every golem-grid ordered type proves complete ranges in value order, in
+/// both profiles; other types in the same attribute never leak in.
+#[test]
+fn golem_grid_ordered_types_prove_complete_ranges() {
+    let f64v = |x: f64| Value::f64(x).unwrap();
+    let f32v = |x: f32| Value::f32(x).unwrap();
+    let mut neg = [0xff; 32];
+    neg[31] = 0xfe;
+    let families: Vec<Vec<Value>> = vec![
+        [f64::NEG_INFINITY, -2.5, -0.0, 1e-300, 3.0, f64::INFINITY]
+            .map(f64v)
+            .to_vec(),
+        [f32::MIN, -1.0, 0.0, 0.5, f32::MAX].map(f32v).to_vec(),
+        [i32::MIN, -1, 0, 7, i32::MAX].map(Value::Dec32).to_vec(),
+        [-5, 0, 5].map(Value::Dec64).to_vec(),
+        [i128::MIN, 0, i128::MAX].map(Value::Dec128).to_vec(),
+        [i128::MIN, -1, 1].map(Value::I128).to_vec(),
+        [neg, [0; 32], [0x7f; 32]].map(Value::I256).to_vec(),
+        [0, 9, u32::MAX].map(Value::U32).to_vec(),
+        [0, 9, u128::MAX].map(Value::U128).to_vec(),
+        [-719_162, 0, 20_000].map(Value::Date32).to_vec(),
+        [i64::MIN, 0, 1_700_000_000_000_000]
+            .map(Value::Timestamp64)
+            .to_vec(),
+    ];
+    let mut input: Vec<(Value, bool)> = families
+        .iter()
+        .flatten()
+        .map(|value| (value.clone(), true))
+        .collect();
+    input.push((Value::I64(0), true));
+    input.push((Value::Bytes4([0; 4]), true));
+    let (engine, rows) = fixture(input);
+    let snapshot = engine.head_snapshot();
+    for family in &families {
+        let lower = Included(family[1].clone());
+        let upper = Excluded(family[family.len() - 1].clone());
+        let r = request(&snapshot, lower.clone(), upper.clone());
+        let expected: Vec<Row> = rows
+            .iter()
+            .filter(|row| matches(&row.cells[0].1.value, &lower, &upper))
+            .cloned()
+            .collect();
+        assert_eq!(expected.len(), family.len() - 2, "{:?}", family[1]);
+        assert_eq!(verified(&r, &proof(&snapshot, &r)), expected);
+    }
+}

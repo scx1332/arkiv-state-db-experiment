@@ -404,7 +404,7 @@ fn type_tags_and_values() {
     golden(&TypeTag::U64, &[3]);
     golden(&TypeTag::Str, &[4]);
     golden(&TypeTag::Bytes, &[5]);
-    for tag in [0, if cfg!(feature = "arkiv-v2") { 12 } else { 6 }, 0xff] {
+    for tag in [0, 26, 0xff] {
         rejects::<TypeTag>(
             &[tag],
             DecodeError::UnknownTag {
@@ -432,8 +432,100 @@ fn type_tags_and_values() {
 
     rejects::<Value>(&[1, 2], DecodeError::InvalidBool(2));
     rejects::<Value>(&[4, 0, 0, 0, 1, 0xff], DecodeError::InvalidUtf8);
-    for tag in [0, if cfg!(feature = "arkiv-v2") { 12 } else { 6 }, 0x80] {
+    for tag in [0, 26, 0x80] {
         rejects::<Value>(&[tag, 0], DecodeError::UnknownTag { kind: "Value", tag });
+    }
+}
+
+/// Type ids 6–25 and their storage encodings: natural fixed width,
+/// big-endian, signed types in plain two's complement, floats as IEEE bits.
+/// Both profiles admit every id. Additive: ids 1–5 above are unchanged.
+#[test]
+fn extended_type_ids_and_values() {
+    let tags = [
+        (TypeTag::I32, 6),
+        (TypeTag::U256, 7),
+        (TypeTag::Dec, 8),
+        (TypeTag::Bytes32, 9),
+        (TypeTag::Addr, 10),
+        (TypeTag::Key, 11),
+        (TypeTag::Bytes4, 12),
+        (TypeTag::Bytes8, 13),
+        (TypeTag::Bytes16, 14),
+        (TypeTag::U32, 15),
+        (TypeTag::U128, 16),
+        (TypeTag::I128, 17),
+        (TypeTag::I256, 18),
+        (TypeTag::Dec32, 19),
+        (TypeTag::Dec64, 20),
+        (TypeTag::Dec128, 21),
+        (TypeTag::F32, 22),
+        (TypeTag::F64, 23),
+        (TypeTag::Date32, 24),
+        (TypeTag::Timestamp64, 25),
+    ];
+    for (tag, id) in tags {
+        golden(&tag, &[id]);
+        assert_eq!(tag.id(), id);
+    }
+
+    golden(&Value::I32(-2), &[6, 0xff, 0xff, 0xff, 0xfe]);
+    golden(&Value::Bytes4([1, 2, 3, 4]), &[12, 1, 2, 3, 4]);
+    golden(&Value::Bytes8([7; 8]), &cat(&[&[13], &[7; 8]]));
+    golden(&Value::Bytes16([9; 16]), &cat(&[&[14], &[9; 16]]));
+    golden(&Value::U32(258), &[15, 0, 0, 1, 2]);
+    golden(&Value::U128(258), &cat(&[&[16], &[0; 14], &[1, 2]]));
+    golden(&Value::I128(-2), &cat(&[&[17], &[0xff; 15], &[0xfe]]));
+    golden(&Value::I128(i128::MIN), &cat(&[&[17, 0x80], &[0; 15]]));
+    let mut minus_two = [0xff; 32];
+    minus_two[31] = 0xfe;
+    golden(&Value::I256(minus_two), &cat(&[&[18], &minus_two]));
+    // dec32 12.3450 is 123450 units of 10^-4.
+    golden(&Value::Dec32(123_450), &[19, 0, 1, 0xe2, 0x3a]);
+    golden(&Value::Dec32(-1), &[19, 0xff, 0xff, 0xff, 0xff]);
+    golden(
+        &Value::Dec64(-1_500_000),
+        &[20, 0xff, 0xff, 0xff, 0xff, 0xff, 0xe9, 0x1c, 0xa0],
+    );
+    golden(&Value::Dec128(1), &cat(&[&[21], &[0; 15], &[1]]));
+    golden(&Value::f32(1.0).unwrap(), &[22, 0x3f, 0x80, 0, 0]);
+    golden(&Value::f32(-2.0).unwrap(), &[22, 0xc0, 0, 0, 0]);
+    golden(&Value::f32(f32::INFINITY).unwrap(), &[22, 0x7f, 0x80, 0, 0]);
+    golden(&Value::f64(0.0).unwrap(), &[23, 0, 0, 0, 0, 0, 0, 0, 0]);
+    golden(
+        &Value::f64(-1.5).unwrap(),
+        &[23, 0xbf, 0xf8, 0, 0, 0, 0, 0, 0],
+    );
+    golden(&Value::Date32(-1), &[24, 0xff, 0xff, 0xff, 0xff]);
+    golden(&Value::Date32(19_000), &[24, 0, 0, 0x4a, 0x38]);
+    golden(
+        &Value::Timestamp64(1_000_000),
+        &[25, 0, 0, 0, 0, 0, 0x0f, 0x42, 0x40],
+    );
+
+    // Negative zero normalizes on construction; its bits and NaN never decode.
+    assert_eq!(Value::f64(-0.0), Value::f64(0.0));
+    assert_eq!(Value::f32(f32::NAN), None);
+    let invalid = DecodeError::Invalid {
+        kind: "Value",
+        reason: "float is NaN or negative zero",
+    };
+    rejects::<Value>(&[22, 0x80, 0, 0, 0], invalid);
+    rejects::<Value>(&[22, 0x7f, 0xc0, 0, 0], invalid);
+    rejects::<Value>(&[23, 0x80, 0, 0, 0, 0, 0, 0, 0], invalid);
+    rejects::<Value>(&[23, 0x7f, 0xf8, 0, 0, 0, 0, 0, 1], invalid);
+    // Fixed widths are exact.
+    for (tag, width) in [
+        (12u8, 4usize),
+        (15, 4),
+        (16, 16),
+        (18, 32),
+        (22, 4),
+        (25, 8),
+    ] {
+        let mut short = vec![tag];
+        short.extend(vec![0; width - 1]);
+        assert!(decode_exact::<Value>(&short).is_err(), "{tag}");
     }
 }
 
@@ -1005,10 +1097,7 @@ fn every_accepted_short_input_is_canonical() {
     // receipt kinds.
     assert_eq!(count::<bool>(&singles), 2);
     assert_eq!(count::<Option<bool>>(&singles), 1);
-    assert_eq!(
-        count::<TypeTag>(&singles),
-        if cfg!(feature = "arkiv-v2") { 11 } else { 5 }
-    );
+    assert_eq!(count::<TypeTag>(&singles), 25);
     assert_eq!(count::<CellKind>(&singles), 2);
     assert_eq!(count::<ArgumentFault>(&singles), 9);
     assert_eq!(count::<QueryFault>(&singles), 11);

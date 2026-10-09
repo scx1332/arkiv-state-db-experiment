@@ -130,8 +130,8 @@ fn expiry_pairs_are_checked_statically() {
     }
 }
 
-/// With an expiry a record gets one cell fewer, and a patch with only an
-/// expiry is not empty.
+/// With an expiry a record gets one cell fewer; an empty patch, with or
+/// without an expiry, is valid.
 #[test]
 fn operations_are_validated_as_they_will_execute() {
     let spec = spec();
@@ -150,12 +150,10 @@ fn operations_are_validated_as_they_will_execute() {
         check_tx(&spec, &one(create(1, b"k", cells(7), Some(until(5))))),
         Ok(())
     );
+    // An empty patch is golem-db's no-op, valid statically.
     assert_eq!(
         check_tx(&spec, &one(patch(1, b"k", vec![], vec![], None))),
-        Err(TxFault::Argument {
-            op: 0,
-            fault: ArgumentFault::EmptyPatch,
-        })
+        Ok(())
     );
     assert_eq!(
         check_tx(&spec, &one(patch(1, b"k", vec![], vec![], Some(until(5))))),

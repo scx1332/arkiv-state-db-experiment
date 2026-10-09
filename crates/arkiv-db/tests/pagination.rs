@@ -2022,18 +2022,15 @@ fn branch_cursor_continues_on_the_same_untouched_branch() {
             ALICE,
             WriteOp::PatchRecord {
                 namespace: cost_ns,
-                key: key("a"),
+                key: key("zz"),
                 set: Vec::new(),
                 remove: Vec::new(),
             },
             Budget::unlimited(),
         )
-        .expect_err("an empty patch is refused at admission");
-    assert_eq!(
-        empty_patch.reason,
-        Rejection::InvalidArgument(arkiv_db::ArgumentFault::EmptyPatch)
-    );
-    assert_eq!(empty_patch.receipt.spent, Cost::new(0));
+        .expect_err("an empty patch of an unbound key is not found");
+    assert_eq!(empty_patch.reason, Rejection::NotFound);
+    assert_eq!(empty_patch.receipt.spent, Cost::new(4));
     let not_host = branch
         .execute_host(
             WriteOp::CreateNamespace {
@@ -2049,8 +2046,8 @@ fn branch_cursor_continues_on_the_same_untouched_branch() {
     assert_eq!(not_host.receipt.spent, Cost::new(0));
     assert_eq!(
         branch.receipts().len(),
-        3,
-        "the create and the two charged rejections were recorded"
+        4,
+        "the create and the three charged rejections were recorded"
     );
 
     let second = second_page(&branch, cost_ns, &cursor).expect("the cursor is still bound");

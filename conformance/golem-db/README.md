@@ -100,20 +100,26 @@ Environment variables:
 Build with `--features arkiv-v2` to use the deployed v2 profile:
 
 - cell names up to 32 bytes;
-- i32, u256, dec256, bytes32 and address scalars;
 - indexed values up to 128 bytes.
 
-The load scenarios use only v1 types, so they run on either profile.
+Both profiles have every golem-db cell type (bool, str, bytes, bytes4/8/16/
+20/32, u32–u256, i32–i256, dec32–dec256, f32/f64, date32, timestamp64), so
+the load scenarios and the ported tests run on either profile.
 
 ## Ported golem-db tests
 
 ```sh
+cargo test -p golemdb-harness golem_tests -- --test-threads=1
 cargo test -p golemdb-harness --features arkiv-v2 golem_tests -- --test-threads=1
 ```
 
-Each test runs on both arkiv backends. The tests need `arkiv-v2`, because the
-fixture uses an `i32` cell. Expected result: 4 tests pass and 5 fail. The
-failures come only from these divergences:
+Each test runs on both arkiv backends. Expected result on either profile:
+6 tests pass and 5 fail. Four of the passing tests are ported from golem;
+two are adapter tests: `every_golem_cell_type_round_trips_as_attribute_and_field`
+(every golem type as attribute and field, read back and compared, including
+the encoded bytes, then retyped) and
+`empty_patch_is_a_no_op_or_not_found_without_an_adapter_read`. The failures
+come only from these divergences:
 
 - **golem-internal system records.** `#alloc` and its next record id, the
   `#recordKeys` binding and the `#roots` cell have no engine counterpart.
@@ -134,9 +140,12 @@ with its line number.
   branch stays open for reads. `commit` then calls `try_seal` and publishes
   the candidate. On the durable backend publishing means `prepare` then
   `commit`.
-- **Empty patches.** golem treats an empty patch as a no-op on an existing
-  record. The engine rejects it (`ArgumentFault::EmptyPatch`), so the adapter
-  emulates golem with an existence read. This repository keeps that
-  rejection as protocol semantics.
+- **Types.** Every golem cell type maps to an engine type with the same
+  value domain, order and term bytes. The engine's `Key` (an Arkiv entity
+  reference) has no golem counterpart and reads back as `bytes32`.
+- **Empty patches.** The engine implements golem's no-op itself (`NotFound`
+  for a missing record, otherwise applied with no state change), so the
+  adapter passes empty patches straight through. It reads the record only
+  for exact `BranchInfo::version` emulation.
 - **Not supported.** `SealInfo::index_root` is all zeros, and the
   immutable-data calls return `NotImplemented`, as in golem-db.

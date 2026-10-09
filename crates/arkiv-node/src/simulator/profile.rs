@@ -7,9 +7,20 @@ pub const PROOF_PROFILE: &str = if cfg!(feature = "arkiv-v2") {
     "eq-page-v1"
 };
 
+/// Every engine scalar type name, in type-id order. Generic namespaces of
+/// both profiles admit all of them; the Arkiv entity namespace admits only
+/// the SDK subset listed as `scalarTypes` of the v2 profile.
+fn generic_scalar_types() -> Vec<&'static str> {
+    arkiv_db::TypeTag::ALL
+        .iter()
+        .map(|tag| tag.name())
+        .collect()
+}
+
 pub fn capabilities() -> Value {
     if cfg!(feature = "arkiv-v2") {
         json!({
+            "genericScalarTypes":generic_scalar_types(),
             "profile":"arkiv-entity-v2", "layoutVersion":2, "codecVersion":2,
             "attributeNameBytes":32, "indexedStringBytes":128, "payloadBytes":131072,
             "scalarTypes":["bool","i32","u64","u256","dec","bytes32","str","addr","key"],
@@ -24,7 +35,7 @@ pub fn capabilities() -> Value {
     } else {
         json!({"profile":"generic-v1","layoutVersion":1,"codecVersion":1,
             "attributeNameBytes":20,"indexedStringBytes":64,
-            "scalarTypes":["bool","i64","u64","str"],
+            "scalarTypes":generic_scalar_types(),
             "queryLanguage":"single-typed-equality","signatures":false,
             "sdkRpcCompatible":false,"productionStateRoots":false})
     }

@@ -685,3 +685,125 @@ fn immutable_data_stubs_return_explicit_errors_without_state_changes() {
         check_eq!(db.head().unwrap(), CommitId::new(1));
     });
 }
+
+// ---- adapter-specific: golem's full cell type grid and empty patches ----
+
+/// One value of every golem cell type, with its type name.
+fn every_golem_type() -> Vec<(&'static str, CellValue)> {
+    let mut i256 = [0xff; 32];
+    i256[31] = 0xfe; // -2
+    let mut dec256 = [0; 32];
+    dec256[31] = 7;
+    vec![
+        ("bool", CellValue::from_bool(true)),
+        ("str", CellValue::from_str("golem")),
+        ("bytes", CellValue::from_bytes(&[0, 1, 2, 0xff])),
+        ("bytes4", CellValue::from_bytes4([4; 4])),
+        ("bytes8", CellValue::from_bytes8([8; 8])),
+        ("bytes16", CellValue::from_bytes16([16; 16])),
+        ("bytes20", CellValue::from_bytes20([20; 20])),
+        ("bytes32", CellValue::from_bytes32([32; 32])),
+        ("u32", CellValue::from_u32(u32::MAX)),
+        ("u64", CellValue::from_u64(u64::MAX - 1)),
+        ("u128", CellValue::from_u128(u128::MAX - 2)),
+        ("u256", CellValue::from_u256_be([0xee; 32])),
+        ("i32", CellValue::from_i32(i32::MIN)),
+        ("i64", CellValue::from_i64(-64)),
+        ("i128", CellValue::from_i128(i128::MIN + 1)),
+        ("i256", CellValue::from_i256_be(i256)),
+        ("dec32", CellValue::from_dec32_unscaled(-123_450)),
+        ("dec64", CellValue::from_dec64_unscaled(1_500_000)),
+        ("dec128", CellValue::from_dec128_unscaled(-1)),
+        ("dec256", CellValue::from_dec256_unscaled_be(dec256)),
+        ("f32", CellValue::from_f32(-1.5).unwrap()),
+        ("f64", CellValue::from_f64(f64::INFINITY).unwrap()),
+        ("date32", CellValue::from_date32(-719_162)),
+        ("timestamp64", CellValue::from_timestamp64(1_700_000_000_000_000)),
+    ]
+}
+
+#[test]
+fn every_golem_cell_type_round_trips_as_attribute_and_field() {
+    each_backend(|db| {
+        let db = db.as_ref();
+        let values = every_golem_type();
+        let mut op = RecordOp::create(KEY);
+        for (name, value) in &values {
+            if !matches!(value.cell_type(), CellType::Bytes) {
+                op = op
+                    .attribute(format!("a_{name}").as_str(), value.clone())
+                    .unwrap();
+            }
+            op = op.field(format!("f_{name}").as_str(), value.clone()).unwrap();
+        }
+        let branch = db.begin().unwrap();
+        db.create(branch, op).unwrap();
+        let pending = get(db, ReadTarget::Branch(branch));
+        db.commit(branch).unwrap();
+        let committed = get(db, ReadTarget::Head);
+        check_eq!(pending, committed);
+        for (name, value) in &values {
+            let field = committed.cells.get(format!("f_{name}").as_bytes());
+            check_eq!(field, Some(&value.clone().with_kind(CellKind::Field).unwrap()));
+            if matches!(value.cell_type(), CellType::Bytes) {
+                continue;
+            }
+            let attribute = committed.cells.get(format!("a_{name}").as_bytes());
+            check_eq!(
+                attribute,
+                Some(&value.clone().with_kind(CellKind::Attribute).unwrap())
+            );
+            check_eq!(
+                attribute.map(|cell| cell.encoded_bytes().to_vec()),
+                Some(
+                    value
+                        .clone()
+                        .with_kind(CellKind::Attribute)
+                        .unwrap()
+                        .encoded_bytes()
+                        .to_vec()
+                )
+            );
+        }
+        // Retyping a cell to every other golem type also round-trips.
+        for (_, value) in &values {
+            let branch = db.begin().unwrap();
+            db.patch(branch, RecordOp::patch(KEY).field("f_str", value.clone()).unwrap())
+                .unwrap();
+            db.commit(branch).unwrap();
+            let head = get(db, ReadTarget::Head);
+            check_eq!(
+                head.cells.get(b"f_str".as_slice()),
+                Some(&value.clone().with_kind(CellKind::Field).unwrap())
+            );
+        }
+    });
+}
+
+#[test]
+fn empty_patch_is_a_no_op_or_not_found_without_an_adapter_read() {
+    for exact_version in [true, false] {
+        let options = ArkivOptions {
+            exact_version,
+            ..options()
+        };
+        BACKEND.with(|b| *b.borrow_mut() = "arkiv-memory");
+        let db = ArkivDb::open_memory(limits(), options).unwrap();
+        let branch = db.begin().unwrap();
+        db.create(branch, input(KEY, 50)).unwrap();
+        db.commit(branch).unwrap();
+        let before = get(&db, ReadTarget::Head);
+        let branch = db.begin().unwrap();
+        let info = db.branch_info(branch).unwrap();
+        db.patch(branch, RecordOp::patch(KEY)).unwrap();
+        check_eq!(db.branch_info(branch).unwrap(), info);
+        check!(matches!(
+            db.patch(branch, RecordOp::patch(MISSING)),
+            Err(ApiError::NotFound)
+        ));
+        db.seal(branch).unwrap();
+        db.commit(branch).unwrap();
+        check_eq!(get(&db, ReadTarget::Head), before);
+    }
+    finish();
+}

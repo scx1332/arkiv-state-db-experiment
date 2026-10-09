@@ -33,19 +33,29 @@ fn values() -> Vec<Value> {
         Value::Bytes32([255; 32]),
         Value::Addr([255; 20]),
         Value::Key([255; 32]),
+        Value::Bytes4([255; 4]),
+        Value::Bytes8([255; 8]),
+        Value::Bytes16([255; 16]),
+        Value::U32(u32::MAX),
+        Value::U128(u128::MAX),
+        Value::I128(i128::MIN),
+        Value::I256([255; 32]),
+        Value::Dec32(-1),
+        Value::Dec64(i64::MAX),
+        Value::Dec128(-1),
+        Value::f32(-0.5).unwrap(),
+        Value::f64(f64::INFINITY).unwrap(),
+        Value::Date32(-1),
+        Value::Timestamp64(i64::MIN),
     ]
 }
 
 #[test]
-fn scalar_widths_tags_and_legacy_rejection() {
+fn scalar_widths_and_tags_are_admitted_by_both_profiles() {
     for v in values() {
         let wire = encode(&v);
         assert_eq!(wire.len(), 1 + v.encoded_len());
-        if !cfg!(feature = "arkiv-v2") {
-            assert!(decode_exact::<Value>(&wire).is_err());
-            assert!(decode_exact::<TypeTag>(&[v.tag().id()]).is_err());
-            continue;
-        }
+        assert_eq!(decode_exact::<TypeTag>(&[v.tag().id()]).unwrap(), v.tag());
         assert_eq!(decode_exact::<Value>(&wire).unwrap(), v);
         assert_eq!(
             Value::from_term_bytes(v.tag(), &v.term_bytes().unwrap()),
@@ -67,7 +77,7 @@ fn scalar_widths_tags_and_legacy_rejection() {
     );
     let mut tags: Vec<_> = values().iter().map(|v| v.tag().id()).collect();
     tags.dedup();
-    assert_eq!(tags, vec![6, 7, 8, 9, 10, 11]);
+    assert_eq!(tags, (6..=25).collect::<Vec<u8>>());
     assert_ne!(
         encode(&Value::U256([0; 32])),
         encode(&Value::Bytes32([0; 32]))
@@ -90,19 +100,16 @@ fn signed_and_unsigned_order_vectors() {
     let signed = [min, [255; 32], [0; 32], one, max];
     for pair in signed.windows(2) {
         assert!(Value::Dec(pair[0]).term_bytes() < Value::Dec(pair[1]).term_bytes());
-        if cfg!(feature = "arkiv-v2") {
-            assert_eq!(
-                Value::Dec(pair[0]).cmp_ordered(&Value::Dec(pair[1])),
-                Some(std::cmp::Ordering::Less)
-            );
-        }
+        assert_eq!(
+            Value::Dec(pair[0]).cmp_ordered(&Value::Dec(pair[1])),
+            Some(std::cmp::Ordering::Less)
+        );
     }
     for pair in [[0; 32], one, max, min, [255; 32]].windows(2) {
         assert!(Value::U256(pair[0]).term_bytes() < Value::U256(pair[1]).term_bytes());
     }
 }
 
-#[cfg(feature = "arkiv-v2")]
 #[test]
 fn all_scalars_prove_equality_and_reject_typed_substitution() {
     use arkiv_db::proof::{EqQuery, EqRequest, ProofLimits, SnapshotRef, verify_eq};
@@ -127,9 +134,9 @@ fn all_scalars_prove_equality_and_reject_typed_substitution() {
         Value::Bool(true),
         Value::U64(u64::MAX),
         Value::I64(i64::MIN),
-        Value::str(&"é".repeat(64)),
+        Value::str(&"é".repeat(Value::MAX_INDEXED_LEN / 2)),
     ]);
-    let attr = CellName::new(&"a".repeat(32)).unwrap();
+    let attr = CellName::new(&"a".repeat(CellName::MAX_LEN)).unwrap();
     for (n, value) in all.iter().enumerate() {
         branch
             .execute(
@@ -201,7 +208,7 @@ fn all_scalars_prove_equality_and_reject_typed_substitution() {
             );
         }
         let mut old = proof.clone();
-        old[..4].copy_from_slice(&1u32.to_be_bytes());
+        old[..4].copy_from_slice(&(arkiv_db::proof::PROOF_VERSION ^ 3).to_be_bytes());
         assert!(
             verify_eq(
                 &request,
@@ -257,8 +264,12 @@ fn scalar_and_string_admission_obeys_profile() {
             Value::str(&format!("{}x", "é".repeat(Value::MAX_INDEXED_LEN / 2))),
             false,
         ),
-        (Value::I32(1), cfg!(feature = "arkiv-v2")),
-        (Value::Bytes32([1; 32]), cfg!(feature = "arkiv-v2")),
+        (Value::I32(1), true),
+        (Value::Bytes32([1; 32]), true),
+        (Value::Bytes16([1; 16]), true),
+        (Value::f64(1.0).unwrap(), true),
+        (Value::Timestamp64(1), true),
+        (Value::bytes(&[1]), false),
     ] {
         ordinal += 1;
         let result = branch.execute(

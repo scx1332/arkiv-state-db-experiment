@@ -6,8 +6,8 @@
 //!   engine commit; golem-db commit N is engine snapshot N + 1;
 //! - `RecordKey` (32 bytes) -> engine `RecordKey` (1..=32 bytes);
 //! - attributes / fields -> engine `Cell::attribute` / `Cell::field`, typed
-//!   natively where the engine has the type (see [`to_value`]); other golem
-//!   types are rejected with `InvalidArgument`;
+//!   natively: every golem cell type has an engine type with the same value
+//!   domain, order and term bytes (see [`to_value`] and [`from_cell`]);
 //! - `BranchId` -> an adapter registry slot holding an engine `Branch`;
 //!   checkpoint/rollback frames are emulated on engine `Checkpoint`s with
 //!   golem's journal-frame rules;
@@ -463,53 +463,86 @@ fn rejection(rejected: arkiv_db::Rejected) -> ApiError {
     }
 }
 
-/// golem cell -> engine value. Natively typed where the engine has the
-/// type; the v2-only scalars are rejected by the engine itself under the
-/// default (v1) profile.
+/// golem cell -> engine value. Every golem type maps natively, in both
+/// engine profiles; the accessors cannot fail for the matching type.
 fn to_value(value: &CellValue) -> Result<Value> {
-    let unsupported = || {
-        ApiError::invalid_argument(format!(
-            "arkiv engine has no cell type equivalent to golem {:?}",
-            value.cell_type()
-        ))
-    };
+    let mismatch = || internal(format!("golem {:?} accessor failed", value.cell_type()));
     Ok(match value.cell_type() {
-        CellType::Bool => Value::Bool(value.as_bool().ok_or_else(unsupported)?),
-        CellType::Str => Value::str(value.as_str().ok_or_else(unsupported)?),
-        CellType::Bytes => Value::bytes(value.as_bytes().ok_or_else(unsupported)?),
-        CellType::Uint(Width::W8) => Value::U64(value.as_u64().ok_or_else(unsupported)?),
-        CellType::Int(Width::W8) => Value::I64(value.as_i64().ok_or_else(unsupported)?),
-        CellType::Int(Width::W4) => Value::I32(value.as_i32().ok_or_else(unsupported)?),
-        CellType::Uint(Width::W32) => Value::U256(value.as_u256_be().ok_or_else(unsupported)?),
-        CellType::Decimal(Width::W32) => {
-            Value::Dec(value.as_dec256_unscaled_be().ok_or_else(unsupported)?)
+        CellType::Bool => Value::Bool(value.as_bool().ok_or_else(mismatch)?),
+        CellType::Str => Value::str(value.as_str().ok_or_else(mismatch)?),
+        CellType::Bytes => Value::bytes(value.as_bytes().ok_or_else(mismatch)?),
+        CellType::Bytes20 => Value::Addr(value.as_bytes20().ok_or_else(mismatch)?),
+        CellType::FixedBytes(Width::W4) => Value::Bytes4(value.as_bytes4().ok_or_else(mismatch)?),
+        CellType::FixedBytes(Width::W8) => Value::Bytes8(value.as_bytes8().ok_or_else(mismatch)?),
+        CellType::FixedBytes(Width::W16) => {
+            Value::Bytes16(value.as_bytes16().ok_or_else(mismatch)?)
         }
         CellType::FixedBytes(Width::W32) => {
-            Value::Bytes32(value.as_bytes32().ok_or_else(unsupported)?)
+            Value::Bytes32(value.as_bytes32().ok_or_else(mismatch)?)
         }
-        CellType::Bytes20 => Value::Addr(value.as_bytes20().ok_or_else(unsupported)?),
-        CellType::FixedBytes(_)
-        | CellType::Uint(_)
-        | CellType::Int(_)
-        | CellType::Decimal(_)
-        | CellType::Float(FloatWidth::F32 | FloatWidth::F64)
-        | CellType::Date32
-        | CellType::Timestamp64 => return Err(unsupported()),
+        CellType::Uint(Width::W4) => Value::U32(value.as_u32().ok_or_else(mismatch)?),
+        CellType::Uint(Width::W8) => Value::U64(value.as_u64().ok_or_else(mismatch)?),
+        CellType::Uint(Width::W16) => Value::U128(value.as_u128().ok_or_else(mismatch)?),
+        CellType::Uint(Width::W32) => Value::U256(value.as_u256_be().ok_or_else(mismatch)?),
+        CellType::Int(Width::W4) => Value::I32(value.as_i32().ok_or_else(mismatch)?),
+        CellType::Int(Width::W8) => Value::I64(value.as_i64().ok_or_else(mismatch)?),
+        CellType::Int(Width::W16) => Value::I128(value.as_i128().ok_or_else(mismatch)?),
+        CellType::Int(Width::W32) => Value::I256(value.as_i256_be().ok_or_else(mismatch)?),
+        CellType::Decimal(Width::W4) => {
+            Value::Dec32(value.as_dec32_unscaled().ok_or_else(mismatch)?)
+        }
+        CellType::Decimal(Width::W8) => {
+            Value::Dec64(value.as_dec64_unscaled().ok_or_else(mismatch)?)
+        }
+        CellType::Decimal(Width::W16) => {
+            Value::Dec128(value.as_dec128_unscaled().ok_or_else(mismatch)?)
+        }
+        CellType::Decimal(Width::W32) => {
+            Value::Dec(value.as_dec256_unscaled_be().ok_or_else(mismatch)?)
+        }
+        // golem's codec already rejected NaN and negative zero.
+        CellType::Float(FloatWidth::F32) => {
+            Value::f32(value.as_f32().ok_or_else(mismatch)?).ok_or_else(mismatch)?
+        }
+        CellType::Float(FloatWidth::F64) => {
+            Value::f64(value.as_f64().ok_or_else(mismatch)?).ok_or_else(mismatch)?
+        }
+        CellType::Date32 => Value::Date32(value.as_date32().ok_or_else(mismatch)?),
+        CellType::Timestamp64 => Value::Timestamp64(value.as_timestamp64().ok_or_else(mismatch)?),
     })
 }
 
+/// Engine cell -> golem cell. The inverse of [`to_value`]; the engine's
+/// `Key` (an Arkiv entity reference) has no golem counterpart and reads back
+/// as golem `bytes32`.
 fn from_cell(cell: &Cell) -> Result<CellValue> {
     let value = match &cell.value {
         Value::Bool(v) => CellValue::from_bool(*v),
-        Value::I64(v) => CellValue::from_i64(*v),
-        Value::U64(v) => CellValue::from_u64(*v),
         Value::Str(v) => CellValue::from_str(v),
         Value::Bytes(v) => CellValue::from_bytes(v),
-        Value::I32(v) => CellValue::from_i32(*v),
-        Value::U256(v) => CellValue::from_u256_be(*v),
-        Value::Dec(v) => CellValue::from_dec256_unscaled_be(*v),
-        Value::Bytes32(v) | Value::Key(v) => CellValue::from_bytes32(*v),
         Value::Addr(v) => CellValue::from_bytes20(*v),
+        Value::Bytes4(v) => CellValue::from_bytes4(*v),
+        Value::Bytes8(v) => CellValue::from_bytes8(*v),
+        Value::Bytes16(v) => CellValue::from_bytes16(*v),
+        Value::Bytes32(v) | Value::Key(v) => CellValue::from_bytes32(*v),
+        Value::U32(v) => CellValue::from_u32(*v),
+        Value::U64(v) => CellValue::from_u64(*v),
+        Value::U128(v) => CellValue::from_u128(*v),
+        Value::U256(v) => CellValue::from_u256_be(*v),
+        Value::I32(v) => CellValue::from_i32(*v),
+        Value::I64(v) => CellValue::from_i64(*v),
+        Value::I128(v) => CellValue::from_i128(*v),
+        Value::I256(v) => CellValue::from_i256_be(*v),
+        Value::Dec32(v) => CellValue::from_dec32_unscaled(*v),
+        Value::Dec64(v) => CellValue::from_dec64_unscaled(*v),
+        Value::Dec128(v) => CellValue::from_dec128_unscaled(*v),
+        Value::Dec(v) => CellValue::from_dec256_unscaled_be(*v),
+        Value::F32(v) => CellValue::from_f32(v.get())
+            .map_err(|e| internal(format!("stored f32: {e}")))?,
+        Value::F64(v) => CellValue::from_f64(v.get())
+            .map_err(|e| internal(format!("stored f64: {e}")))?,
+        Value::Date32(v) => CellValue::from_date32(*v),
+        Value::Timestamp64(v) => CellValue::from_timestamp64(*v),
     };
     let kind = match cell.kind {
         ArkivKind::Attribute => CellKind::Attribute,
@@ -668,8 +701,10 @@ impl Api for ArkivDb {
             for (name, change) in operation.changes() {
                 checked.push((name, change));
             }
-            // golem resolves the record before validating limits.
-            let current = if self.options.exact_version || checked.is_empty() {
+            // golem resolves the record before validating limits. The engine
+            // itself treats an empty patch as golem's no-op (NotFound for a
+            // missing record), so only exact version counting reads here.
+            let current = if self.options.exact_version {
                 Some(
                     self.read(Source::Branch(engine_branch), key)?
                         .ok_or(ApiError::NotFound)?,
@@ -686,9 +721,9 @@ impl Api for ArkivDb {
             }
             let entries = match &current {
                 Some(row) => patch_changes(row, &set, &remove),
-                None => 1,
+                None => u64::from(!set.is_empty() || !remove.is_empty()),
             };
-            if entries == 0 {
+            if entries == 0 && current.is_some() {
                 return Ok(()); // golem: a no-op patch adds no journal entry
             }
             engine_branch
@@ -704,8 +739,10 @@ impl Api for ArkivDb {
                 )
                 .map_err(storage)?
                 .map_err(rejection)?;
-            *version += entries;
-            *rolled_back = false;
+            if entries > 0 {
+                *version += entries;
+                *rolled_back = false;
+            }
             Ok(())
         })
     }

@@ -62,7 +62,7 @@ pub fn resolve(
             }
             Value::str(s)
         }
-        "i32" if cfg!(feature = "arkiv-v2") => {
+        "i32" => {
             let text = r.value.as_str().ok_or(Error("InvalidRequest"))?;
             let n: i32 = text.parse().map_err(|_| Error("InvalidRequest"))?;
             if n.to_string() != text {
@@ -70,7 +70,7 @@ pub fn resolve(
             }
             Value::I32(n)
         }
-        "u256" if cfg!(feature = "arkiv-v2") => {
+        "u256" => {
             let text = r.value.as_str().ok_or(Error("InvalidRequest"))?;
             let n: alloy_primitives::U256 = text.parse().map_err(|_| Error("InvalidRequest"))?;
             if n.to_string() != text {
@@ -83,7 +83,7 @@ pub fn resolve(
             crate::arkiv::parse_decimal(r.value.as_str().ok_or(Error("InvalidRequest"))?)
                 .map_err(|_| Error("InvalidRequest"))?,
         ),
-        "bytes32" | "key" if cfg!(feature = "arkiv-v2") => {
+        "bytes32" | "key" => {
             let bytes: [u8; 32] = unhex(r.value.as_str().ok_or(Error("InvalidRequest"))?, 32)?
                 .try_into()
                 .map_err(|_| Error("InvalidRequest"))?;
@@ -93,11 +93,17 @@ pub fn resolve(
                 Value::Bytes32(bytes)
             }
         }
-        "addr" if cfg!(feature = "arkiv-v2") => Value::Addr(
+        "addr" => Value::Addr(
             unhex(r.value.as_str().ok_or(Error("InvalidRequest"))?, 20)?
                 .try_into()
                 .map_err(|_| Error("InvalidRequest"))?,
         ),
+        // The golem-grid scalars (and dec in the generic profile) use the
+        // shared JSON forms of value_json.
+        "dec" | "bytes4" | "bytes8" | "bytes16" | "u32" | "u128" | "i128" | "i256" | "dec32"
+        | "dec64" | "dec128" | "f32" | "f64" | "date32" | "timestamp64" => {
+            crate::value_json::from_json(&r.value_type, &r.value).ok_or(Error("InvalidRequest"))?
+        }
         _ => return Err(Error("UnsupportedProof")),
     };
     #[cfg(feature = "arkiv-v2")]

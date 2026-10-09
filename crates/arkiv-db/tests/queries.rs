@@ -262,6 +262,20 @@ fn type_of(value: &Value) -> TypeTag {
         Value::Bytes32(_) => TypeTag::Bytes32,
         Value::Addr(_) => TypeTag::Addr,
         Value::Key(_) => TypeTag::Key,
+        Value::Bytes4(_) => TypeTag::Bytes4,
+        Value::Bytes8(_) => TypeTag::Bytes8,
+        Value::Bytes16(_) => TypeTag::Bytes16,
+        Value::U32(_) => TypeTag::U32,
+        Value::U128(_) => TypeTag::U128,
+        Value::I128(_) => TypeTag::I128,
+        Value::I256(_) => TypeTag::I256,
+        Value::Dec32(_) => TypeTag::Dec32,
+        Value::Dec64(_) => TypeTag::Dec64,
+        Value::Dec128(_) => TypeTag::Dec128,
+        Value::F32(_) => TypeTag::F32,
+        Value::F64(_) => TypeTag::F64,
+        Value::Date32(_) => TypeTag::Date32,
+        Value::Timestamp64(_) => TypeTag::Timestamp64,
     }
 }
 

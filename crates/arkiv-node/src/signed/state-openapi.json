@@ -3510,7 +3510,7 @@
           "string",
           "boolean"
         ],
-        "description": "Booleans are JSON booleans. Numbers and decimals are text; byte, address and key values are 0x-prefixed hexadecimal; strings are plain text."
+        "description": "Booleans are JSON booleans. Integers, decimals and the time types are exact decimal text (date32 in days, timestamp64 in microseconds since the Unix epoch; decimals at their fixed scale: dec32 4 places, dec64 6, dec128 and dec 18); floats are shortest round-trip decimal text, inf or -inf (never NaN); byte, address and key values are 0x-prefixed lower-case hexadecimal; strings are plain text."
       },
       "ValueType": {
         "type": "string",
@@ -3525,8 +3525,23 @@
           "dec",
           "bytes32",
           "addr",
-          "key"
-        ]
+          "key",
+          "bytes4",
+          "bytes8",
+          "bytes16",
+          "u32",
+          "u128",
+          "i128",
+          "i256",
+          "dec32",
+          "dec64",
+          "dec128",
+          "f32",
+          "f64",
+          "date32",
+          "timestamp64"
+        ],
+        "description": "Engine scalar type name, in type-id order (ids 1-25). Generic namespaces admit every type; the Arkiv entity namespace admits only the SDK subset."
       },
       "TermLeaf": {
         "type": "object",

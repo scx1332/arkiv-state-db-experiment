@@ -369,11 +369,15 @@ holding up to `max_cells` named cells. A `CellName` follows a fixed ASCII
 grammar (a letter or `$` plus a letter first, then letters, digits, `_`, `-`,
 `.`, `:`; at most 20 bytes); `#` and `@` are unreachable, so engine-reserved
 names can never collide with user names. A cell is an attribute (indexed) or
-a field (stored only) holding a `Bool`, `I64`, `U64`, `Str` or `Bytes`
-value; `Bytes` is field-only. Kind and type are bound per record, not per
+a field (stored only) holding one of 25 scalar types (golem-db's full cell
+type grid: `Bool`, `Str`, `Bytes`, fixed bytes of 4/8/16/20/32 bytes,
+`u32`–`u256`, `i32`–`i256`, `dec32`–`dec256`, `f32`/`f64`, `date32`,
+`timestamp64`, plus `Key`; table in `docs/block-format.md`); `Bytes` is
+field-only. Kind and type are bound per record, not per
 name. The encodings are frozen in `record.rs`: term bytes (`Bool` `00`/`01`,
-`I64` big-endian with the sign bit flipped, `U64` big-endian, `Str` UTF-8)
-preserve the value order, so integer ranges and string prefixes are
+signed integers, decimals and times big-endian with the sign bit flipped,
+unsigned integers big-endian, floats in IEEE total order, `Str` UTF-8, fixed
+bytes as-is) preserve the value order, so numeric ranges and string prefixes are
 contiguous runs of the term map, whose keys carry the same bytes and are
 therefore committed in the state root.
 

@@ -145,11 +145,14 @@ fn fixture_price(class: OperationClass) -> u64 {
 /// 1 for `Bool`, 8 for the integers, the byte length for `Str` and `Bytes`.
 fn encoded_len(value: &Value) -> u64 {
     match value {
-        Value::I32(_) => 4,
+        Value::I32(_) | Value::Bytes4(_) | Value::U32(_) | Value::Dec32(_) => 4,
+        Value::F32(_) | Value::Date32(_) => 4,
         Value::Addr(_) => 20,
-        Value::U256(_) | Value::Dec(_) | Value::Bytes32(_) | Value::Key(_) => 32,
+        Value::U256(_) | Value::Dec(_) | Value::Bytes32(_) | Value::Key(_) | Value::I256(_) => 32,
+        Value::Bytes16(_) | Value::U128(_) | Value::I128(_) | Value::Dec128(_) => 16,
         Value::Bool(_) => 1,
-        Value::I64(_) | Value::U64(_) => 8,
+        Value::I64(_) | Value::U64(_) | Value::Bytes8(_) | Value::Dec64(_) => 8,
+        Value::F64(_) | Value::Timestamp64(_) => 8,
         Value::Str(text) => text.len() as u64,
         Value::Bytes(bytes) => bytes.len() as u64,
     }

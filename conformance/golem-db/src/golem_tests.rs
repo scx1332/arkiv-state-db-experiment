@@ -1,6 +1,8 @@
 //! golem-db's own API behavioral tests, ported to run through the arkiv
 //! adapter (`ArkivDb`). Sources:
 //!   golem-db/crates/integration-tests/tests/api/facade.rs
+//!   golem-db/crates/integration-tests/tests/api/facade_errors.rs
+//!   golem-db/crates/integration-tests/tests/api/opening.rs
 //!   golem-db/crates/integration-tests/tests/api/immutable_data.rs
 //!
 //! Porting rules:
@@ -14,9 +16,12 @@
 //!   continues, so one run lists every divergent assertion. `.unwrap()`s are
 //!   kept: an unexpected error still stops the test.
 //! - Assertions on golem-internal structure (system records `#alloc`,
-//!   `#recordKeys`, `#roots`; `Database::info()`) are kept where they can be
-//!   expressed through the Api, marked `// golem-internal`, and indexing that
-//!   would panic was turned into `.get()` so the check can fail softly.
+//!   `#recordKeys`, `#roots`) are kept where they can be expressed through
+//!   the Api, marked `// golem-internal`, and indexing that would panic was
+//!   turned into `.get()` so the check can fail softly.
+//! - golem's `Database::info()` / `genesis()` are `ArkivDb::info()` /
+//!   `genesis()`; golem's storage-fault stores are a `CrashDisk` under the
+//!   durable backend's redb store.
 
 use std::cell::RefCell;
 use std::sync::{Arc, Barrier};
@@ -24,7 +29,7 @@ use std::sync::{Arc, Barrier};
 use golemdb_api::*;
 use golemdb_cells::system;
 
-use crate::arkiv::{ArkivDb, ArkivOptions};
+use crate::arkiv::{self, ArkivDb, ArkivOptions};
 
 thread_local! {
     static FAILURES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -33,7 +38,10 @@ thread_local! {
 
 fn record_failure(line: u32, what: String) {
     let backend = BACKEND.with(|b| *b.borrow());
-    FAILURES.with(|f| f.borrow_mut().push(format!("[{backend}] line {line}: {what}")));
+    FAILURES.with(|f| {
+        f.borrow_mut()
+            .push(format!("[{backend}] line {line}: {what}"))
+    });
 }
 
 macro_rules! check {
@@ -50,7 +58,13 @@ macro_rules! check_eq {
         if a != b {
             record_failure(
                 line!(),
-                format!("{} == {}: left {:?}, right {:?}", stringify!($a), stringify!($b), a, b),
+                format!(
+                    "{} == {}: left {:?}, right {:?}",
+                    stringify!($a),
+                    stringify!($b),
+                    a,
+                    b
+                ),
             );
         }
     }};
@@ -85,13 +99,29 @@ fn genesis() -> Genesis {
     Genesis::new(HashAlgorithm::Keccak256, limits())
 }
 
+fn config() -> OpenConfig {
+    OpenConfig::new(genesis())
+}
+
 fn options() -> ArkivOptions {
     ArkivOptions {
-        exact_version: true,
         redb_cache: 8 << 20,
         object_cache: 8 << 20,
         object_cache_entries: 16_384,
     }
+}
+
+/// golem's `Database::open(dir, config)`: the durable backend.
+fn open(dir: &std::path::Path, config: &OpenConfig) -> OpenResult<ArkivDb> {
+    ArkivDb::open(dir, config, options())
+}
+
+/// golem's reopen of an existing database.
+fn reopen(dir: &std::path::Path, genesis: &Genesis) -> OpenResult<ArkivDb> {
+    open(
+        dir,
+        &OpenConfig::new(*genesis).with_mode(OpenMode::ExistingOnly),
+    )
 }
 
 fn input(key: RecordKey, price: i32) -> RecordOp<op::Create> {
@@ -104,13 +134,13 @@ fn input(key: RecordKey, price: i32) -> RecordOp<op::Create> {
 
 fn each_backend(contract: fn(Db)) {
     BACKEND.with(|b| *b.borrow_mut() = "arkiv-memory");
-    contract(Arc::new(ArkivDb::open_memory(&genesis(), options()).unwrap()));
+    contract(Arc::new(
+        ArkivDb::open_memory(&genesis(), options()).unwrap(),
+    ));
     BACKEND.with(|b| *b.borrow_mut() = "arkiv-redb");
     {
         let dir = tempfile::tempdir().unwrap();
-        contract(Arc::new(
-            ArkivDb::open_durable(dir.path(), &genesis(), options()).unwrap(),
-        ));
+        contract(Arc::new(open(dir.path(), &config()).unwrap()));
     }
     finish();
 }
@@ -157,7 +187,10 @@ fn crud_pending_reads_projections_and_recreation() {
         check_eq!(pending.key, KEY);
         check_eq!(pending.cells.len(), 3);
         check_eq!(
-            pending.cells.get(b"#key".as_slice()).and_then(|v| v.as_bytes32()),
+            pending
+                .cells
+                .get(b"#key".as_slice())
+                .and_then(|v| v.as_bytes32()),
             Some(KEY.0)
         );
         check!(pending.cells[b"price".as_slice()].is_indexable());
@@ -193,7 +226,10 @@ fn crud_pending_reads_projections_and_recreation() {
             )
             .unwrap();
         check_eq!(
-            bindings.cells.get(KEY.0.as_slice()).and_then(|v| v.as_u64()),
+            bindings
+                .cells
+                .get(KEY.0.as_slice())
+                .and_then(|v| v.as_u64()),
             Some(64)
         );
 
@@ -219,7 +255,7 @@ fn crud_pending_reads_projections_and_recreation() {
             get(api.as_ref(), ReadTarget::Commit(CommitId::new(1))),
             edited
         );
-        // not portable: db.info().commit_id == 0 (golem OpenInfo).
+        check_eq!(db.info().commit_id, CommitId::new(0)); // opening metadata is not a live head
         check_eq!(db.head().unwrap(), CommitId::new(1));
         // golem-db has no history: reading the older commit 0 must fail.
         let old = api.get(ReadTarget::Commit(CommitId::new(0)), RecordOp::get(KEY));
@@ -244,7 +280,10 @@ fn crud_pending_reads_projections_and_recreation() {
         ));
         let recreated = api.begin().unwrap();
         api.create(recreated, input(KEY, 100)).unwrap();
-        check_eq!(allocator(api.as_ref(), ReadTarget::Branch(recreated)), Some(66)); // golem-internal
+        check_eq!(
+            allocator(api.as_ref(), ReadTarget::Branch(recreated)),
+            Some(66)
+        ); // golem-internal
         api.commit(recreated).unwrap();
         check_eq!(
             get(api.as_ref(), ReadTarget::Head).cells[b"price".as_slice()].as_i32(),
@@ -450,18 +489,22 @@ fn separate_engines_do_not_share_branch_handles() {
 fn durable_facade_reopens_committed_state_and_discards_pending_work() {
     BACKEND.with(|b| *b.borrow_mut() = "arkiv-redb");
     let dir = tempfile::tempdir().unwrap();
-    let (sealed, pending) = {
-        let db = ArkivDb::open_durable(dir.path(), &genesis(), options()).unwrap();
+    let (sealed, pending, genesis_id) = {
+        let db = open(dir.path(), &config()).unwrap();
         let branch = db.begin().unwrap();
         db.create(branch, input(KEY, 50)).unwrap();
         let sealed = db.seal(branch).unwrap();
         db.commit(branch).unwrap();
         let pending = db.begin().unwrap();
         db.delete(pending, RecordOp::delete(KEY)).unwrap();
-        (sealed, pending)
+        (sealed, pending, db.info().genesis_id)
     };
-    let db = ArkivDb::reopen_durable(dir.path(), &genesis(), options()).unwrap();
-    // not portable: info().created / genesis_id / state_root / index_root.
+    let db = reopen(dir.path(), &genesis()).unwrap();
+    check!(!db.info().created);
+    check_eq!(db.info().genesis_id, genesis_id);
+    check_eq!(db.info().commit_id, sealed.commit_id);
+    check_eq!(db.info().state_root, sealed.state_root);
+    check_eq!(db.info().index_root, sealed.index_root);
     check_eq!(db.head().unwrap(), sealed.commit_id);
     check!(matches!(
         db.branch_info(pending),
@@ -493,7 +536,10 @@ fn empty_records_keep_identity_through_patch_rollback_commit_and_delete() {
         check_eq!(empty.key, KEY);
         check_eq!(empty.cells.len(), 1);
         check_eq!(
-            empty.cells.get(b"#key".as_slice()).and_then(|v| v.as_bytes32()),
+            empty
+                .cells
+                .get(b"#key".as_slice())
+                .and_then(|v| v.as_bytes32()),
             Some(KEY.0)
         );
         check_eq!(allocator(db, ReadTarget::Branch(branch)), Some(65)); // golem-internal
@@ -543,8 +589,9 @@ fn empty_records_keep_identity_through_patch_rollback_commit_and_delete() {
         check_eq!(get(db, ReadTarget::Branch(branch)), populated);
         db.patch(branch, RecordOp::patch(KEY).remove("price").unwrap())
             .unwrap();
-        let _seal = db.seal(branch).unwrap();
-        // not portable: seal.index_root == db.info().index_root (golem OpenInfo).
+        let seal = db.seal(branch).unwrap();
+        // Removing the last attribute empties the index.
+        check_eq!(seal.index_root, db.info().index_root);
         match db.get(ReadTarget::Branch(branch), RecordOp::get(KEY)) {
             Ok(record) => check_eq!(record, empty),
             Err(e) => record_failure(line!(), format!("read of a sealed branch: {e:?}")),
@@ -580,7 +627,7 @@ fn durable_reopens_empty_records_created_directly_or_by_removing_all_cells() {
     BACKEND.with(|b| *b.borrow_mut() = "arkiv-redb");
     let dir = tempfile::tempdir().unwrap();
     {
-        let db = ArkivDb::open_durable(dir.path(), &genesis(), options()).unwrap();
+        let db = open(dir.path(), &config()).unwrap();
         let branch = db.begin().unwrap();
         db.create(branch, RecordOp::create(KEY)).unwrap();
         db.create(branch, input(MISSING, 50)).unwrap();
@@ -597,12 +644,15 @@ fn durable_reopens_empty_records_created_directly_or_by_removing_all_cells() {
         .unwrap();
         db.commit(branch).unwrap();
     }
-    let db = ArkivDb::reopen_durable(dir.path(), &genesis(), options()).unwrap();
+    let db = reopen(dir.path(), &genesis()).unwrap();
     for key in [KEY, MISSING] {
         let record = db.get(ReadTarget::Head, RecordOp::get(key)).unwrap();
         check_eq!(record.cells.len(), 1);
         check_eq!(
-            record.cells.get(b"#key".as_slice()).and_then(|v| v.as_bytes32()),
+            record
+                .cells
+                .get(b"#key".as_slice())
+                .and_then(|v| v.as_bytes32()),
             Some(key.0)
         );
     }
@@ -724,7 +774,10 @@ fn every_golem_type() -> Vec<(&'static str, CellValue)> {
         ("f32", CellValue::from_f32(-1.5).unwrap()),
         ("f64", CellValue::from_f64(f64::INFINITY).unwrap()),
         ("date32", CellValue::from_date32(-719_162)),
-        ("timestamp64", CellValue::from_timestamp64(1_700_000_000_000_000)),
+        (
+            "timestamp64",
+            CellValue::from_timestamp64(1_700_000_000_000_000),
+        ),
     ]
 }
 
@@ -740,7 +793,9 @@ fn every_golem_cell_type_round_trips_as_attribute_and_field() {
                     .attribute(format!("a_{name}").as_str(), value.clone())
                     .unwrap();
             }
-            op = op.field(format!("f_{name}").as_str(), value.clone()).unwrap();
+            op = op
+                .field(format!("f_{name}").as_str(), value.clone())
+                .unwrap();
         }
         let branch = db.begin().unwrap();
         db.create(branch, op).unwrap();
@@ -750,7 +805,10 @@ fn every_golem_cell_type_round_trips_as_attribute_and_field() {
         check_eq!(pending, committed);
         for (name, value) in &values {
             let field = committed.cells.get(format!("f_{name}").as_bytes());
-            check_eq!(field, Some(&value.clone().with_kind(CellKind::Field).unwrap()));
+            check_eq!(
+                field,
+                Some(&value.clone().with_kind(CellKind::Field).unwrap())
+            );
             if matches!(value.cell_type(), CellType::Bytes) {
                 continue;
             }
@@ -774,8 +832,11 @@ fn every_golem_cell_type_round_trips_as_attribute_and_field() {
         // Retyping a cell to every other golem type also round-trips.
         for (_, value) in &values {
             let branch = db.begin().unwrap();
-            db.patch(branch, RecordOp::patch(KEY).field("f_str", value.clone()).unwrap())
-                .unwrap();
+            db.patch(
+                branch,
+                RecordOp::patch(KEY).field("f_str", value.clone()).unwrap(),
+            )
+            .unwrap();
             db.commit(branch).unwrap();
             let head = get(db, ReadTarget::Head);
             check_eq!(
@@ -788,29 +849,23 @@ fn every_golem_cell_type_round_trips_as_attribute_and_field() {
 
 #[test]
 fn empty_patch_is_a_no_op_or_not_found_without_an_adapter_read() {
-    for exact_version in [true, false] {
-        let options = ArkivOptions {
-            exact_version,
-            ..options()
-        };
-        BACKEND.with(|b| *b.borrow_mut() = "arkiv-memory");
-        let db = ArkivDb::open_memory(&genesis(), options).unwrap();
-        let branch = db.begin().unwrap();
-        db.create(branch, input(KEY, 50)).unwrap();
-        db.commit(branch).unwrap();
-        let before = get(&db, ReadTarget::Head);
-        let branch = db.begin().unwrap();
-        let info = db.branch_info(branch).unwrap();
-        db.patch(branch, RecordOp::patch(KEY)).unwrap();
-        check_eq!(db.branch_info(branch).unwrap(), info);
-        check!(matches!(
-            db.patch(branch, RecordOp::patch(MISSING)),
-            Err(ApiError::NotFound)
-        ));
-        db.seal(branch).unwrap();
-        db.commit(branch).unwrap();
-        check_eq!(get(&db, ReadTarget::Head), before);
-    }
+    BACKEND.with(|b| *b.borrow_mut() = "arkiv-memory");
+    let db = ArkivDb::open_memory(&genesis(), options()).unwrap();
+    let branch = db.begin().unwrap();
+    db.create(branch, input(KEY, 50)).unwrap();
+    db.commit(branch).unwrap();
+    let before = get(&db, ReadTarget::Head);
+    let branch = db.begin().unwrap();
+    let info = db.branch_info(branch).unwrap();
+    db.patch(branch, RecordOp::patch(KEY)).unwrap();
+    check_eq!(db.branch_info(branch).unwrap(), info);
+    check!(matches!(
+        db.patch(branch, RecordOp::patch(MISSING)),
+        Err(ApiError::NotFound)
+    ));
+    db.seal(branch).unwrap();
+    db.commit(branch).unwrap();
+    check_eq!(get(&db, ReadTarget::Head), before);
     finish();
 }
 
@@ -828,9 +883,13 @@ fn blake3_genesis_is_refused_at_open() {
     check!(ArkivDb::open_memory(&genesis(), options()).is_ok());
     BACKEND.with(|b| *b.borrow_mut() = "arkiv-redb");
     let dir = tempfile::tempdir().unwrap();
-    check!(refused(ArkivDb::open_durable(dir.path(), &blake3, options())));
-    check!(ArkivDb::open_durable(dir.path(), &genesis(), options()).is_ok());
-    check!(refused(ArkivDb::reopen_durable(dir.path(), &blake3, options())));
+    check!(refused(open(dir.path(), &OpenConfig::new(blake3))));
+    check!(!dir.path().join(arkiv::FILE).exists()); // refused before touching storage
+    check!(open(dir.path(), &config()).is_ok());
+    check!(refused(reopen(dir.path(), &blake3)));
+    // golem's genesis YAML selecting Blake3 parses, and is refused at open.
+    let yaml = Genesis::from_yaml(&YAML.replace("keccak-256", "blake3")).unwrap();
+    check!(refused(ArkivDb::open_memory(&yaml, options())));
     finish();
 }
 
@@ -898,25 +957,525 @@ fn genesis_cell_limits_are_enforced_by_the_engine() {
             .field("long", CellValue::from_bytes(&[0; 129]))
             .unwrap(),
     ] {
-        check!(engine_rejects(db.create(branch, bad).map(|_| ()), "too large"));
+        check!(engine_rejects(
+            db.create(branch, bad).map(|_| ()),
+            "too large"
+        ));
     }
     // A durable database keeps its limits: reopening with others fails.
     BACKEND.with(|b| *b.borrow_mut() = "arkiv-redb");
     let dir = tempfile::tempdir().unwrap();
-    drop(ArkivDb::open_durable(dir.path(), &tight, options()).unwrap());
-    check!(ArkivDb::reopen_durable(dir.path(), &tight, options()).is_ok());
-    check!(ArkivDb::reopen_durable(dir.path(), &genesis(), options()).is_err());
-    // A cell-name limit above the engine's 32-byte cap is refused at open.
-    let wide = Genesis::new(
-        HashAlgorithm::Keccak256,
+    drop(open(dir.path(), &OpenConfig::new(tight)).unwrap());
+    check!(reopen(dir.path(), &tight).is_ok());
+    check!(matches!(
+        reopen(dir.path(), &genesis()),
+        Err(OpenError::GenesisMismatch)
+    ));
+    // Limits above the engine's caps (32-byte names; golem indexes str
+    // attributes up to max_str_len, the engine up to 128 bytes) are refused
+    // at open rather than narrowed.
+    for wide in [
         CellLimits {
             max_cell_name_len: 33,
             ..limits()
         },
+        CellLimits {
+            max_str_len: 129,
+            ..limits()
+        },
+        CellLimits {
+            max_cell_name_len: 0,
+            ..limits()
+        },
+    ] {
+        check!(matches!(
+            ArkivDb::open_memory(&Genesis::new(HashAlgorithm::Keccak256, wide), options()),
+            Err(OpenError::InvalidConfig(_))
+        ));
+    }
+    // At the caps, both limits are usable.
+    let max = Genesis::new(
+        HashAlgorithm::Keccak256,
+        CellLimits {
+            max_cell_name_len: 32,
+            max_str_len: 128,
+            max_bytes_len: 128,
+        },
     );
+    let db = ArkivDb::open_memory(&max, options()).unwrap();
+    let branch = db.begin().unwrap();
+    check!(
+        db.create(
+            branch,
+            RecordOp::create(KEY)
+                .attribute(&"n".repeat(32), CellValue::from_str(&"v".repeat(128)))
+                .unwrap()
+        )
+        .is_ok()
+    );
+    finish();
+}
+
+// ---- opening.rs: golem's genesis YAML, OpenInfo and opening modes ----
+
+const YAML: &str = "hash_function: keccak-256\ncell_limits:\n  max_cell_name_len: 32\n  max_str_len: 64\n  max_bytes_len: 128\n";
+
+/// Port of `yaml_is_explicit_strict_and_has_canonical_identity` (the YAML
+/// parsing itself is golem's `Genesis::from_yaml`/`load`).
+#[test]
+fn yaml_genesis_opens_with_canonical_identity() {
+    BACKEND.with(|b| *b.borrow_mut() = "arkiv-memory");
+    let first = Genesis::from_yaml(YAML).unwrap();
+    let reordered = Genesis::from_yaml(
+        "# same deployment\ncell_limits: {max_bytes_len: 128, max_str_len: 64, max_cell_name_len: 32}\nhash_function: keccak-256\n",
+    )
+    .unwrap();
+    check_eq!(first, genesis());
+    check_eq!(first, reordered);
+    let (one, two) = (
+        *ArkivDb::open_memory(&first, options()).unwrap().info(),
+        *ArkivDb::open_memory(&reordered, options()).unwrap().info(),
+    );
+    check_eq!(one, two);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("genesis.yaml");
+    std::fs::write(&path, YAML).unwrap();
+    let db = ArkivDb::open_memory(&Genesis::load(&path).unwrap(), options()).unwrap();
+    check_eq!(db.genesis(), &first);
+    // golem's #params record reports the loaded limits.
+    let params = db
+        .get(
+            ReadTarget::Head,
+            RecordOp::get(RecordKey(system::PARAMS.key)),
+        )
+        .unwrap();
+    check_eq!(
+        params
+            .cells
+            .get(b"#maxStrLen".as_slice())
+            .and_then(|v| v.as_u32()),
+        Some(64)
+    );
+    finish();
+}
+
+/// Port of `lifecycle` / `mdbx_genesis_matches_memory_and_reopens_from_disk_after_commit`:
+/// opening reports OpenInfo, the memory and durable backends agree on it,
+/// and a reopen reports the committed head.
+#[test]
+fn open_info_matches_between_backends_and_follows_reopen() {
+    BACKEND.with(|b| *b.borrow_mut() = "arkiv-redb");
+    let memory = *ArkivDb::open_memory(&genesis(), options()).unwrap().info();
+    check!(memory.created);
+    check_eq!(memory.commit_id, CommitId::new(0));
+    check!(memory.state_root != [0; 32]);
+    let dir = tempfile::tempdir().unwrap();
+    let created = {
+        let db = open(dir.path(), &config()).unwrap();
+        check_eq!(db.info(), &memory);
+        check_eq!(db.genesis(), &genesis());
+        *db.info()
+    };
+    let reopened = reopen(dir.path(), &genesis()).unwrap();
+    check_eq!(
+        *reopened.info(),
+        OpenInfo {
+            created: false,
+            ..created
+        }
+    );
+    let branch = reopened.begin().unwrap();
+    reopened.create(branch, input(KEY, 50)).unwrap();
+    let sealed = reopened.seal(branch).unwrap();
+    check_eq!(reopened.commit(branch).unwrap(), CommitId::new(1));
+    drop(reopened);
+    // CreateIfMissing reopens an initialized database.
+    let db = open(dir.path(), &config()).unwrap();
+    check!(!db.info().created);
+    check_eq!(db.info().commit_id, CommitId::new(1));
+    check_eq!(db.info().state_root, sealed.state_root);
+    check_eq!(db.info().genesis_id, created.genesis_id);
+    check_eq!(
+        get(&db, ReadTarget::Head).cells[b"price".as_slice()].as_i32(),
+        Some(50)
+    );
+    finish();
+}
+
+/// Port of `modes`: golem's opening modes, and a genesis mismatch, which
+/// golem checks before the mode. Nothing changes the stored database.
+#[test]
+fn opening_modes_and_genesis_mismatch() {
+    BACKEND.with(|b| *b.borrow_mut() = "arkiv-redb");
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("absent");
     check!(matches!(
-        ArkivDb::open_memory(&wide, options()),
-        Err(OpenError::InvalidConfig(_))
+        open(&missing, &config().with_mode(OpenMode::ExistingOnly)),
+        Err(OpenError::NotInitialized)
     ));
+    check!(!missing.exists());
+    let created = *open(dir.path(), &config().with_mode(OpenMode::CreateNew))
+        .unwrap()
+        .info();
+    check!(created.created);
+    check!(matches!(
+        open(dir.path(), &config().with_mode(OpenMode::CreateNew)),
+        Err(OpenError::AlreadyInitialized)
+    ));
+    for change in 0..3 {
+        let mut different = config();
+        match change {
+            0 => different.genesis.cell_limits.max_cell_name_len -= 1,
+            1 => different.genesis.cell_limits.max_str_len += 1,
+            _ => different.genesis.cell_limits.max_bytes_len += 1,
+        }
+        check!(matches!(
+            open(dir.path(), &different),
+            Err(OpenError::GenesisMismatch)
+        ));
+        check!(matches!(
+            open(dir.path(), &different.with_mode(OpenMode::CreateNew)),
+            Err(OpenError::GenesisMismatch)
+        ));
+    }
+    let reopened = *reopen(dir.path(), &genesis()).unwrap().info();
+    check_eq!(
+        reopened,
+        OpenInfo {
+            created: false,
+            ..created
+        }
+    );
+    finish();
+}
+
+// ---- facade_errors.rs: storage failures, error mapping and retry ----
+
+use arkiv_db_redb::testing::{CrashDisk, DiskOp};
+use arkiv_db_redb::{RedbConfig, RedbStore};
+
+/// The durable backend on a simulated device, with every cache off so each
+/// read reaches the device.
+fn crash_db(disk: &CrashDisk, genesis: Genesis) -> ArkivDb {
+    let device = disk.clone();
+    let store =
+        RedbStore::with_backend(move || Ok(device.backend()), RedbConfig::with_cache_size(0))
+            .unwrap();
+    let options = ArkivOptions {
+        redb_cache: 0,
+        object_cache: 0,
+        object_cache_entries: 0,
+    };
+    ArkivDb::open_store(
+        Arc::new(store),
+        "crash-disk".into(),
+        &OpenConfig::new(genesis),
+        options,
+    )
+    .unwrap()
+}
+
+/// golem's `diagnostic`: an `Internal` error whose source chain keeps the
+/// storage failure (here the store's own I/O error).
+fn diagnostic(line: u32, error: ApiError) {
+    use std::error::Error;
+    let kept = matches!(error, ApiError::Internal { .. })
+        && error
+            .source()
+            .and_then(|s| s.downcast_ref::<arkiv_db::StorageError>())
+            .is_some_and(|s| s.kind == arkiv_db_storage::versioned::StorageErrorKind::Io);
+    if !kept {
+        record_failure(
+            line,
+            format!("expected Internal(storage I/O), got {error:?}"),
+        );
+    }
+}
+
+/// Port of `failure_contract`: failed reads and writes are `Internal` with
+/// the storage error as source, leave the branch as it was, and a failed
+/// commit keeps its seal and can be retried.
+#[test]
+fn storage_failures_keep_the_branch_and_a_failed_commit_can_be_retried() {
+    BACKEND.with(|b| *b.borrow_mut() = "arkiv-crashdisk");
+    let disk = CrashDisk::new();
+    let db = crash_db(&disk, genesis());
+    // A committed record, so the failing reads must reach the device.
+    let setup = db.begin().unwrap();
+    db.create(setup, input(MISSING, 1)).unwrap();
+    db.commit(setup).unwrap();
+    let branch = db.begin().unwrap();
+    let other = db.begin().unwrap();
+    db.create(
+        branch,
+        RecordOp::create(KEY)
+            .attribute("price", CellValue::from_i32(50))
+            .unwrap(),
+    )
+    .unwrap();
+    db.create(other, input(RecordKey([7; 32]), 7)).unwrap();
+    let pending = db
+        .get(ReadTarget::Branch(branch), RecordOp::get(KEY))
+        .unwrap();
+    let info = db.branch_info(branch).unwrap();
+
+    disk.fail_all(DiskOp::Read, std::io::ErrorKind::Other);
+    diagnostic(
+        line!(),
+        db.get(ReadTarget::Head, RecordOp::get(MISSING))
+            .unwrap_err(),
+    );
+    diagnostic(
+        line!(),
+        db.patch(branch, RecordOp::patch(MISSING).remove("price").unwrap())
+            .unwrap_err(),
+    );
+    // not portable: golem's head() reads storage; the adapter's is in memory.
+    disk.clear_faults();
+    check_eq!(db.branch_info(branch).unwrap(), info);
+    check_eq!(
+        db.get(ReadTarget::Branch(branch), RecordOp::get(KEY))
+            .unwrap(),
+        pending
+    );
+
+    disk.fail_all(DiskOp::Write, std::io::ErrorKind::Other);
+    diagnostic(line!(), db.commit(branch).unwrap_err());
+    check_eq!(db.head().unwrap(), CommitId::new(1));
+    check!(db.branch_info(branch).unwrap().sealed);
+    let sealed = db.seal(branch).unwrap();
+    disk.clear_faults();
+    check_eq!(db.commit(branch).unwrap(), sealed.commit_id);
+    check_eq!(
+        db.get(ReadTarget::Head, RecordOp::get(KEY)).unwrap(),
+        pending
+    );
+    // The branch begun before the failures was untouched by them; it only
+    // lost the race.
+    check!(matches!(db.commit(other), Err(ApiError::Conflict)));
+    finish();
+}
+
+/// Port of `full_mdbx_store_preserves_head_tables_and_sealed_branch`.
+#[test]
+fn full_store_preserves_head_and_sealed_branch() {
+    BACKEND.with(|b| *b.borrow_mut() = "arkiv-crashdisk");
+    let disk = CrashDisk::new();
+    let big = Genesis::new(
+        HashAlgorithm::Keccak256,
+        CellLimits {
+            max_cell_name_len: 32,
+            max_str_len: 64,
+            max_bytes_len: 2 * 1024 * 1024,
+        },
+    );
+    let db = crash_db(&disk, big);
+    disk.set_quota(Some(disk.visible_image().len() as u64 + (1 << 20)));
+    let branch = db.begin().unwrap();
+    db.create(
+        branch,
+        RecordOp::create(KEY)
+            .field("payload", CellValue::from_bytes(&vec![1; 2 * 1024 * 1024]))
+            .unwrap(),
+    )
+    .unwrap();
+    let sealed = db.seal(branch).unwrap();
+    for _ in 0..2 {
+        let result = db.commit(branch);
+        check!(matches!(result, Err(ApiError::StoreFull)));
+        check_eq!(db.head().unwrap(), CommitId::GENESIS);
+        check_eq!(db.seal(branch).unwrap(), sealed);
+        check!(db.branch_info(branch).unwrap().sealed);
+        match db.get(ReadTarget::Branch(branch), RecordOp::get(KEY)) {
+            Ok(record) => check_eq!(
+                record.cells[b"payload".as_slice()]
+                    .as_bytes()
+                    .map(|b| b.len()),
+                Some(2 * 1024 * 1024)
+            ),
+            Err(e) => record_failure(line!(), format!("read of the sealed branch: {e:?}")),
+        }
+        check!(matches!(
+            db.get(ReadTarget::Head, RecordOp::get(KEY)),
+            Err(ApiError::NotFound)
+        ));
+    }
+    db.discard(branch).unwrap();
+    let branch = db.begin().unwrap();
+    db.create(
+        branch,
+        RecordOp::create(KEY)
+            .field("payload", CellValue::from_bytes(b"small"))
+            .unwrap(),
+    )
+    .unwrap();
+    check_eq!(db.commit(branch).ok(), Some(CommitId::new(1)));
+    finish();
+}
+
+// ---- adapter-specific: BranchInfo::version against golem-db itself ----
+
+fn kind(result: &Result<()>) -> &'static str {
+    match result {
+        Ok(()) => "Ok",
+        Err(ApiError::NotFound) => "NotFound",
+        Err(ApiError::AlreadyExists) => "AlreadyExists",
+        Err(ApiError::NoFrameToRollback) => "NoFrameToRollback",
+        Err(ApiError::InvalidArgument { .. }) => "InvalidArgument",
+        Err(ApiError::Sealed) => "Sealed",
+        Err(ApiError::HandleInvalid) => "HandleInvalid",
+        Err(_) => "other",
+    }
+}
+
+/// The same seeded random scripts of writes, checkpoints and rollbacks run
+/// on golem-db's own memory `Database` and on the adapter; every call's
+/// outcome and `BranchInfo` (golem's undo-entry `version`) must match after
+/// every step, and the committed records must be equal.
+#[test]
+fn branch_version_and_outcomes_match_golem_db_on_random_scripts() {
+    use rand::{Rng, SeedableRng};
+    let keys = [KEY, MISSING, RecordKey([0x44; 32])];
+    let names = ["price", "description", "x"];
+    let values = [
+        CellValue::from_i32(1),
+        CellValue::from_i32(2),
+        CellValue::from_str("product"),
+    ];
+    for seed in 0..40u64 {
+        let golem = Database::open_memory(&genesis()).unwrap();
+        let memory = ArkivDb::open_memory(&genesis(), options()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let durable = open(dir.path(), &config()).unwrap();
+        let apis: [(&'static str, &dyn Api); 3] = [
+            ("golem-db", &golem),
+            ("arkiv-memory", &memory),
+            ("arkiv-redb", &durable),
+        ];
+        // Committed records, so writes also hit records of the base.
+        for (_, api) in apis {
+            let branch = api.begin().unwrap();
+            api.create(branch, input(KEY, 1)).unwrap();
+            api.create(branch, RecordOp::create(MISSING)).unwrap();
+            api.commit(branch).unwrap();
+        }
+        let branches: Vec<BranchId> = apis.iter().map(|(_, api)| api.begin().unwrap()).collect();
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        for step in 0..60 {
+            let action = rng.random_range(0..8);
+            let key = keys[rng.random_range(0..keys.len())];
+            let name = names[rng.random_range(0..names.len())];
+            let value = values[rng.random_range(0..values.len())].clone();
+            let attribute = rng.random_bool(0.5);
+            let run = |api: &dyn Api, branch: BranchId| -> Result<()> {
+                match action {
+                    0 => {
+                        let op = if attribute {
+                            RecordOp::create(key).attribute(name, value.clone())
+                        } else {
+                            RecordOp::create(key).field(name, value.clone())
+                        };
+                        api.create(branch, op.unwrap()).map(drop)
+                    }
+                    1 | 2 => {
+                        let op = if attribute {
+                            RecordOp::patch(key).attribute(name, value.clone())
+                        } else {
+                            RecordOp::patch(key).field(name, value.clone())
+                        };
+                        api.patch(branch, op.unwrap())
+                    }
+                    3 => api.patch(branch, RecordOp::patch(key).remove(name).unwrap()),
+                    4 => api.patch(branch, RecordOp::patch(key)),
+                    5 => api.delete(branch, RecordOp::delete(key)),
+                    6 => api.checkpoint(branch),
+                    _ => api.rollback(branch),
+                }
+            };
+            let observed: Vec<(&str, Option<u64>)> = apis
+                .iter()
+                .zip(&branches)
+                .map(|((_, api), &branch)| {
+                    let outcome = run(*api, branch);
+                    let version = api.branch_info(branch).ok().map(|info| info.version);
+                    (kind(&outcome), version)
+                })
+                .collect();
+            for (at, (name, _)) in apis.iter().enumerate().skip(1) {
+                if observed[at] != observed[0] {
+                    record_failure(
+                        line!(),
+                        format!(
+                            "seed {seed} step {step} action {action}: {name} {:?}, golem-db {:?}",
+                            observed[at], observed[0]
+                        ),
+                    );
+                }
+            }
+        }
+        for ((_, api), &branch) in apis.iter().zip(&branches) {
+            api.commit(branch).unwrap();
+        }
+        for key in keys {
+            let read = |api: &dyn Api| api.get(ReadTarget::Head, RecordOp::get(key)).ok();
+            let expected = read(&golem);
+            for (name, api) in &apis[1..] {
+                if read(*api) != expected {
+                    record_failure(
+                        line!(),
+                        format!("seed {seed}: {name} committed {key:?} differs"),
+                    );
+                }
+            }
+        }
+    }
+    finish();
+}
+
+// ---- adapter-specific: the harness's table_log ----
+
+#[test]
+fn table_stats_report_redb_tables_and_engine_counts() {
+    let is_row = |lines: &[String], name: &str| {
+        lines
+            .iter()
+            .find(|line| line.split(',').next() == Some(name))
+            .cloned()
+    };
+    BACKEND.with(|b| *b.borrow_mut() = "arkiv-redb");
+    let dir = tempfile::tempdir().unwrap();
+    let durable = open(dir.path(), &config()).unwrap();
+    BACKEND.with(|b| *b.borrow_mut() = "arkiv-memory");
+    let memory = ArkivDb::open_memory(&genesis(), options()).unwrap();
+    for db in [&durable, &memory] {
+        let branch = db.begin().unwrap();
+        db.create(branch, input(KEY, 50)).unwrap();
+        db.commit(branch).unwrap();
+    }
+    let lines = durable.table_stats().unwrap();
+    // table,entries,depth,pages,mib
+    check!(lines.iter().all(|line| line.split(',').count() == 5));
+    check!(is_row(&lines, "objects:namespace").is_some());
+    check!(is_row(&lines, "records").is_some());
+    check!(is_row(&lines, "file").is_some_and(|line| !line.ends_with(",0,0.000")));
+    check!(is_row(&lines, "object-cache").is_some());
+    check_eq!(
+        is_row(&lines, "live:records"),
+        Some("live:records,1,,,".to_string())
+    );
+    check_eq!(
+        is_row(&lines, "snapshots"),
+        Some("snapshots,3,,,".to_string())
+    );
+    let lines = memory.table_stats().unwrap();
+    check_eq!(
+        is_row(&lines, "live:records"),
+        Some("live:records,1,,,".to_string())
+    );
+    check_eq!(
+        is_row(&lines, "snapshots"),
+        Some("snapshots,3,,,".to_string())
+    );
+    check!(is_row(&lines, "file").is_none());
     finish();
 }

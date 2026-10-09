@@ -2,7 +2,7 @@ diff --git a/crates/harness/Cargo.toml b/crates/harness/Cargo.toml
 index fbfd44f..9188242 100644
 --- a/crates/harness/Cargo.toml
 +++ b/crates/harness/Cargo.toml
-@@ -7,6 +7,15 @@ license.workspace = true
+@@ -7,6 +7,15 @@
  
  [dependencies]
  golemdb-api = { path = "../../golem-db/crates/api" }
@@ -18,7 +18,7 @@ index fbfd44f..9188242 100644
  anyhow = "1"
  hdrhistogram = "7"
  # Same version as golem-db's storage; only reads per-table stats (see tables.rs).
-@@ -16,3 +25,6 @@ rand_chacha = "0.9"
+@@ -16,3 +25,6 @@
  rand_distr = "0.5"
  serde = { version = "1", features = ["derive"] }
  toml = "0.9"
@@ -26,78 +26,133 @@ index fbfd44f..9188242 100644
 +[dev-dependencies]
 +tempfile = "3"
 diff --git a/crates/harness/src/main.rs b/crates/harness/src/main.rs
-index c84a17b..98c6d2e 100644
+index c84a17b..4bd4d3e 100644
 --- a/crates/harness/src/main.rs
 +++ b/crates/harness/src/main.rs
-@@ -1,11 +1,14 @@
+@@ -1,7 +1,10 @@
  //! Load tests for Golem DB. Usage: golemdb-harness <scenario.toml | dir>...
  
 +mod arkiv;
  mod config;
  mod generate;
++#[cfg(test)]
++mod golem_tests;
  mod profile;
  mod stats;
  mod tables;
- mod workloads;
-+#[cfg(test)]
-+mod golem_tests;
- 
- use std::path::{Path, PathBuf};
- use std::process::Command;
-@@ -70,9 +73,39 @@ fn run(scenario: &Scenario) -> Result<String> {
+@@ -62,17 +65,60 @@
+     let _ = std::fs::remove_dir_all(dir);
+     std::fs::create_dir_all(dir)?;
+     nocow(dir)?;
+-    let config = OpenConfig::new(Genesis::new(
+-        scenario.database.hash,
+-        scenario.database.limits,
+-    ));
++    let mut genesis = Genesis::new(scenario.database.hash, scenario.database.limits);
++    // golem's genesis YAML, for every backend, instead of the scenario's.
++    if let Ok(path) = std::env::var("GOLEMDB_GENESIS") {
++        genesis = Genesis::load(&path).with_context(|| path.clone())?;
++    }
++    let config = OpenConfig::new(genesis);
+     let options = MdbxOptions {
          max_map_size: (scenario.database.max_map_size_gib << 30) as usize,
          ..Default::default()
      };
 -    let db: Db = Arc::new(Database::open_with_options(dir, &config, options)?);
 +    let backend = std::env::var("GOLEMDB_BACKEND").unwrap_or_else(|_| "golemdb".into());
-+    let (db, backend_note): (Db, String) = match backend.as_str() {
-+        "golemdb" => (
-+            Arc::new(Database::open_with_options(dir, &config, options)?),
-+            "golem-db (MDBX)".into(),
-+        ),
-+        "arkiv" | "arkiv-memory" => {
-+            let mut opts = arkiv::ArkivOptions {
-+                exact_version: false,
-+                ..Default::default()
-+            };
-+            if let Ok(mib) = std::env::var("ARKIV_REDB_CACHE_MIB") {
-+                opts.redb_cache = mib.parse::<usize>()? << 20;
++    // The `table_log` source: MDBX table statistics, or the arkiv backend's own.
++    let (db, backend_note, table_stats): (Db, String, workloads::TableStats) =
++        match backend.as_str() {
++            "golemdb" => {
++                let db: Db = Arc::new(Database::open_with_options(dir, &config, options)?);
++                let dir = dir.to_path_buf();
++                (
++                    db,
++                    "golem-db (MDBX)".into(),
++                    Box::new(move || tables::snapshot(&dir)),
++                )
 +            }
-+            if let Ok(mib) = std::env::var("ARKIV_OBJECT_CACHE_MIB") {
-+                opts.object_cache = mib.parse::<usize>()? << 20;
++            "arkiv" | "arkiv-memory" => {
++                let mut opts = arkiv::ArkivOptions::default();
++                if let Ok(mib) = std::env::var("ARKIV_REDB_CACHE_MIB") {
++                    opts.redb_cache = mib.parse::<usize>()? << 20;
++                }
++                if let Ok(mib) = std::env::var("ARKIV_OBJECT_CACHE_MIB") {
++                    opts.object_cache = mib.parse::<usize>()? << 20;
++                }
++                if let Ok(n) = std::env::var("ARKIV_OBJECT_CACHE_ENTRIES") {
++                    opts.object_cache_entries = n.parse()?;
++                }
++                let arkiv = Arc::new(if backend == "arkiv" {
++                    arkiv::ArkivDb::open(dir, &config, opts)?
++                } else {
++                    arkiv::ArkivDb::open_memory(&config.genesis, opts)?
++                });
++                let info = arkiv.info();
++                let note = format!(
++                    "{}; genesis id {:02x?}.., limits {:?}",
++                    arkiv.description,
++                    &info.genesis_id[..4],
++                    arkiv.genesis().cell_limits
++                );
++                let db: Db = arkiv.clone();
++                (db, note, Box::new(move || Ok(arkiv.table_stats()?)))
 +            }
-+            if let Ok(n) = std::env::var("ARKIV_OBJECT_CACHE_ENTRIES") {
-+                opts.object_cache_entries = n.parse()?;
-+            }
-+            let db = if backend == "arkiv" {
-+                arkiv::ArkivDb::open_durable(dir, &config.genesis, opts)?
-+            } else {
-+                arkiv::ArkivDb::open_memory(&config.genesis, opts)?
-+            };
-+            let note = db.description.clone();
-+            (Arc::new(db), note)
-+        }
-+        other => bail!("GOLEMDB_BACKEND must be golemdb, arkiv or arkiv-memory, not {other:?}"),
-+    };
++            other => bail!("GOLEMDB_BACKEND must be golemdb, arkiv or arkiv-memory, not {other:?}"),
++        };
  
      println!("{}", scenario.name);
 +    println!("  backend: {backend_note}");
      if !scenario.description.is_empty() {
          println!("  {}", scenario.description);
      }
+@@ -85,7 +131,9 @@
+         );
+     }
+     let outcome = match &scenario.workload {
+-        Workload::Blocks { blocks, mix } => workloads::blocks(&db, scenario, blocks, mix)?,
++        Workload::Blocks { blocks, mix } => {
++            workloads::blocks(&db, scenario, blocks, mix, &table_stats)?
++        }
+         Workload::Writers {
+             writers,
+             ops_per_branch,
+@@ -100,6 +148,7 @@
+             mix,
+         )?,
+     };
++    drop(table_stats);
+     drop(db);
+ 
+     let stats = &outcome.stats;
 diff --git a/crates/harness/src/workloads.rs b/crates/harness/src/workloads.rs
-index 1277f1a..490a934 100644
+index 1277f1a..799660f 100644
 --- a/crates/harness/src/workloads.rs
 +++ b/crates/harness/src/workloads.rs
-@@ -189,7 +189,10 @@ pub fn blocks(db: &Db, scenario: &Scenario, blocks: &[Blocks], mix: &Mix) -> Res
-         &scenario.commit_log,
-         "commit,ops,seal_ms,commit_ms,branch_ms,db_mib,profiled",
-     )?;
--    let mut table_log = csv(&scenario.table_log, &format!("commit,{}", tables::HEADER))?;
-+    // MDBX table statistics only exist for the golem-db backend.
-+    let mdbx = std::env::var("GOLEMDB_BACKEND").map_or(true, |b| b == "golemdb");
-+    let table_log_path = if mdbx { scenario.table_log.clone() } else { None };
-+    let mut table_log = csv(&table_log_path, &format!("commit,{}", tables::HEADER))?;
-     let mut last_tables = Vec::new();
-     let db_dir = Path::new(&scenario.database.path);
-     let mut commit_no = 0;
+@@ -178,7 +178,16 @@
+     Ok(start.elapsed())
+ }
+ 
+-pub fn blocks(db: &Db, scenario: &Scenario, blocks: &[Blocks], mix: &Mix) -> Result<Outcome> {
++/// Per-table statistics for `table_log`: CSV lines after `tables::HEADER`.
++pub type TableStats = Box<dyn Fn() -> Result<Vec<String>>>;
++
++pub fn blocks(
++    db: &Db,
++    scenario: &Scenario,
++    blocks: &[Blocks],
++    mix: &Mix,
++    table_stats: &TableStats,
++) -> Result<Outcome> {
+     let mut stats = Stats::default();
+     let mut generator = Generator::new(&scenario.shape, scenario.seed, 0)?;
+     let mut pool = Pool::new(scenario.seed, 0);
+@@ -254,7 +263,7 @@
+                 file.flush()?;
+             }
+             if let Some(file) = &mut table_log {
+-                last_tables = tables::snapshot(db_dir)?;
++                last_tables = table_stats()?;
+                 for line in &last_tables {
+                     writeln!(file, "{commit_no},{line}")?;
+                 }

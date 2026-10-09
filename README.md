@@ -4,8 +4,8 @@ A database built incrementally in Rust. The storage contracts and the memory
 backends use only the standard library; the engine crate uses
 `alloy-primitives` for `keccak256` and keeps its state in the `arkiv-db-trie`
 Merkle Patricia map (vendored `alloy-trie`, `alloy-rlp`), the node library
-(`arkiv-node`) adds Ed25519 development authentication, an Arkiv-v2 signed
-single-proposer profile using Alloy/k256, and bounded HTTP
+(`arkiv-node`) adds Ed25519 development authentication, a signed
+single-proposer chain for the Arkiv v2 SDK entity model using Alloy/k256, and bounded HTTP
 process orchestration (axum/tokio/reqwest), and the redb adapter
 (`arkiv-db-redb`) depends on redb, which uses `libc`.
 The trie layer vendors Reth's generic components and the Alloy Patricia
@@ -16,7 +16,7 @@ The explicit `arkiv-proposer` binary accepts signed native transactions,
 independently replays them on full followers and authenticates proof roots on
 light followers. It retains transaction bodies in a separate `history.redb`;
 `node.redb` keeps engine state, headers, sanitized metadata and body references.
-Existing unsigned simulator runs remain separate. See the
+The unsigned simulator is a separate binary with its own stores. See the
 [signed profile guide](docs/signed-proposer-v1.md) for local commands, limits,
 storage recovery and validation evidence. There is no consensus, finality or
 pruning implementation.
@@ -143,8 +143,8 @@ are now implemented in memory as the **block engine** (`Engine`):
   (pending versus included, conflicts on reuse) and `replay` of recorded
   blocks from genesis complete it; see the
   [block format](docs/block-format.md#part-2-block-format-version-1).
-  Legacy protocol-1 replay remains supported. The continuous demo activates
-  protocol-2 genesis and terminal state roots and retains signed bodies.
+  Every header, the genesis header included, commits to its terminal state
+  root; the continuous demo retains signed bodies.
 - **Continuous full/light demo.** `arkiv-demo` runs a producer, independently
   executing full followers and header-only light followers as separate
   processes. Complete bounded `eq-page-v1` proofs authenticate all matching
@@ -153,12 +153,11 @@ are now implemented in memory as the **block engine** (`Engine`):
   [run instructions](docs/full-light-demo-run.md), the
   [trust contract](docs/full-light-demo.md) and
   [proof charge rules](docs/eq-proof-charges.md). Dedicated signed endpoints also
-  expose [`range-complete-v1`](docs/range-proofs.md): one typed numeric attribute,
+  expose [`range-complete-v1`](docs/range-proofs.md): one typed attribute of any indexable type,
   inclusive/exclusive bounds, index-only selection and a complete result with no
   pagination (initial caps: 64 terms and 64 rows; oversized requests fail closed).
   `POST /signed/v1/query/range/verified` on a light node accepts, for example,
   `{"height":"42","namespace":"1","attribute":"score","valueType":"u64","lower":{"value":"10","inclusive":true},"upper":{"value":"20","inclusive":false}}`.
-  No state migration is needed; equality proofs and the text-query API are unchanged.
 - **Durable engine storage (N3c).** `durable::DurableEngine` persists the
   actual engine through the versioned store/redb adapter: atomic genesis,
   manifests and head, incremental trie objects, lazy historical snapshots,
@@ -180,7 +179,7 @@ fees, restart recovery, TOML genesis prefills, and an
 [HTTP/WebSocket SDK compatibility adapter](docs/sdk-compatibility.md). Production
 consensus and broader complete query proofs remain open. The ordinary `Engine`
 and `arkiv-demo` remain volatile; the separate simulator and signed proposer are durable. The proof core composes the trie point proofs
-needed for complete equality pages and bounded complete numeric ranges; the rest
+needed for complete equality pages and bounded complete ranges; the rest
 of N3d and N5 remain open.
 Within the query subset there is no attribute sorting, no descending order
 and no offset paging (record-id order and keyset cursors only); keys are
@@ -209,7 +208,7 @@ slice in `arkiv-simulator`: node state, indexes, receipts, bodies, inclusion
 identities, metadata and head commit atomically. Both engine and node reopen
 without replay. This separate host profile preserves the engine-only storage
 profile. Durable signing and external Ethereum transaction admission are
-implemented in the separate `arkiv-proposer` profile. The volatile signed demo
+implemented in the separate `arkiv-proposer` binary. The volatile signed demo
 restart rules above do not apply to either durable host.
 The rest of point proofs (N3d), broader complete query proofs
 retain their existing acceptance gates. See the
@@ -396,7 +395,9 @@ and host expiry in the block where the records expire.
 Local packages are unpublished. The lockfile is checked in so dependency changes
 are visible in review. Work proceeds in small commits on `main`.
 
-Native signed chains can opt into [GLM balances and fee burning](docs/glm-accounts-v1.md) with `--gas-profile glm-v2 --allocations-file allocations.json`. Existing `glm-v1` chains keep gas-only semantics and require a fresh genesis to activate balances.
+Every native signed chain runs the `glm-v2` gas profile: GLM pricing with
+[funded accounts and fee burning](docs/glm-accounts-v1.md). Create a producer
+from `--allocations-file allocations.json` or from a genesis `--bundle`.
 
 The signed proposer accepts the existing Arkiv SDK over JSON-RPC at `/`; see
 [compatibility, limits and validation](docs/sdk-compatibility.md). New chains can

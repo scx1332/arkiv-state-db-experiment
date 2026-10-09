@@ -38,9 +38,6 @@ impl Decode for TrustConfig {
 }
 impl TrustConfig {
     pub fn validate(&self) -> Result<ChainSpec> {
-        if self.genesis.protocol_version != 2 {
-            return Err(DemoError::UnsupportedVersion);
-        }
         let spec = ChainSpec::new(self.genesis.clone()).map_err(|_| DemoError::InvalidHeader)?;
         if spec.genesis_hash() != self.genesis_hash {
             return Err(DemoError::InvalidHeader);
@@ -68,18 +65,11 @@ impl Decode for SignedHeader {
     const MIN_ENCODED_LEN: usize = 4 + 32 + 156 + 64;
     fn decode_from(d: &mut Decoder<'_>) -> std::result::Result<Self, DecodeError> {
         version(d, "SignedHeaderV1")?;
-        let result = Self {
+        Ok(Self {
             genesis_hash: d.get()?,
             header: d.get()?,
             signature: d.get()?,
-        };
-        if result.header.version() != 2 {
-            return Err(DecodeError::UnsupportedVersion {
-                kind: "demo header",
-                version: result.header.version(),
-            });
-        }
-        Ok(result)
+        })
     }
 }
 pub fn signing_message(genesis_hash: B256, header: &Header) -> B256 {
@@ -100,9 +90,7 @@ impl SignedHeader {
         }
     }
     pub fn authenticate(&self, trust: &TrustConfig) -> Result<()> {
-        if self.genesis_hash != trust.genesis_hash
-            || self.header.chain_id != trust.genesis.chain_id
-            || self.header.version() != 2
+        if self.genesis_hash != trust.genesis_hash || self.header.chain_id != trust.genesis.chain_id
         {
             return Err(DemoError::InvalidHeader);
         }

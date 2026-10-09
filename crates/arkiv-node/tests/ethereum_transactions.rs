@@ -1,34 +1,14 @@
 //! Independent viem 2.x signed Ethereum fixtures; never resigned by the native host.
-#![cfg(feature = "arkiv-v2")]
 use alloy_primitives::{U256, keccak256};
 use arkiv_db::{CellName, Value, encode};
 use arkiv_node::{
     TxOp,
-    accounts::AccountConfig,
     arkiv::ArkivOperation,
-    gas,
     signed::{crypto::Signer, ethereum, protocol::*},
 };
+mod signed_support;
 fn genesis() -> SignedGenesis {
-    let signer = Signer::from_bytes([2; 32]).unwrap();
-    let mut g = arkiv_node::demo::workload::genesis(9300, 1000);
-    g.admins.clear();
-    g.params.max_admin_per_block = 0;
-    g.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;
-    g.params.max_block_input_bytes = INPUT_CAP;
-    g.pricing = gas::schedule();
-    g.params.block_budget = 100_000_000;
-    g.params.user_budget = 90_000_000;
-    SignedGenesis::new(g, [7; 16], *signer.address().as_bytes(), 1000)
-        .unwrap()
-        .with_accounts(
-            AccountConfig::new(vec![(
-                signer.address(),
-                U256::from(10_000_000_000_000_000_000u64),
-            )])
-            .unwrap(),
-        )
-        .unwrap()
+    signed_support::genesis(9300, 1000, [7; 16], 2, 1000, &[2])
 }
 fn bytes(s: &str) -> Vec<u8> {
     alloy_primitives::hex::decode(s).unwrap()
@@ -177,21 +157,7 @@ fn ethereum_original_auth_survives_mining_and_independent_full_replay() {
     use arkiv_node::signed::{history::History, host::Host};
     use std::sync::Arc;
     let proposer = Signer::from_bytes([1; 32]).unwrap();
-    let mut g = genesis();
-    g.proposer = *proposer.address().as_bytes();
-    g.accounts = Some(
-        AccountConfig::new(vec![
-            (
-                proposer.address(),
-                U256::from(10_000_000_000_000_000_000u64),
-            ),
-            (
-                Signer::from_bytes([2; 32]).unwrap().address(),
-                U256::from(10_000_000_000_000_000_000u64),
-            ),
-        ])
-        .unwrap(),
-    );
+    let g = signed_support::genesis(9300, 1000, [7; 16], 1, 1000, &[2]);
     let make_host = |producer: bool| {
         Host::create(
             Arc::new(MemoryVersionedStore::new()),

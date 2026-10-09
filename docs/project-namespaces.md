@@ -229,7 +229,7 @@ the namespace's own state and the instance limits, and the uncharged steps
 between them (a term lookup before its insert, a row load after a key lookup,
 a patch's cell algebra, a run's heap merge, the union over groups, admission
 validation) are each covered by an adjacent charge and bounded by
-`max_cells`, `max_value_len`, `max_groups` and `max_literals`. Because the
+`max_cells`, the cell limits, `max_groups` and `max_literals`. Because the
 term map is per namespace, an identical attribute term in another namespace
 has its own posting: it changes neither the charges nor the `record_nodes`
 and `index_nodes` of an unchanged operation, which is what the extended
@@ -283,8 +283,8 @@ inputs of the namespace's map roots; every field is bound through the
 codec's unambiguous encodings under one domain-separated digest. A catalog
 leaf is checked against its key when read (a leaf describing another
 namespace is corrupt). `roots.rs` checks every map root and the state root
-against an independent construction; header v2 (the root in the block
-hash) is a later node step. A query proof authenticates
+against an independent construction; every block header carries the state
+root, so the block hash commits to it. A query proof authenticates
 the namespace entry under the block root, then the complete query answer
 under that entry's data/index roots. It need not enumerate other namespaces.
 The verifier checks the namespace ID as well as chain, block, query, ordering

@@ -68,7 +68,7 @@ bytes show at most 32 bytes, with `valueTruncated` and original `byteLength`.
 Complete bytes remain available in the raw node. Raw record values stay opaque.
 
 Bounds are structural: maximum path steps are twice the term key width (328 for
-Arkiv v2; 176 for legacy), with each selected map enforcing its smaller key width.
+the 164-byte term key), with each selected map enforcing its smaller key width.
 A request traverses at most that root-relative path, the bounded catalog lookup,
 and, for postings, one bounded term lookup. Empty/invalid paths never trigger a
 scan. Node RLP plus leaf value are limited to 384 KiB before hex amplification;

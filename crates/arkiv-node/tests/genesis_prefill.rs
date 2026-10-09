@@ -1,4 +1,3 @@
-#![cfg(feature = "arkiv-v2")]
 use alloy_primitives::U256;
 use arkiv_db::{
     Budget, CellName, Projection, RecordKey, SnapshotId, Value, decode_exact, durable::Options,
@@ -23,26 +22,23 @@ use std::sync::Arc;
 fn signer(n: u8) -> Signer {
     Signer::from_bytes([n; 32]).unwrap()
 }
+/// The unprefilled base, validated by `build_genesis` once the prefill is
+/// attached. The proposer intentionally has no allocation: a prefill chain
+/// has no bootstrap transaction to pay for.
 fn base() -> SignedGenesis {
-    let mut native = arkiv_node::demo::workload::genesis(9450, 1000);
-    native.admins.clear();
-    native.params.max_admin_per_block = 0;
-    native.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;
-    native.params.max_block_input_bytes = INPUT_CAP;
-    native.pricing = arkiv_node::gas::schedule();
-    native.params.block_budget = 100_000_000;
-    native.params.user_budget = 90_000_000;
-    native.params.max_lifetime = 6_307_200;
-    let mut g = SignedGenesis::new(native, [7; 16], *signer(1).address().as_bytes(), 1000).unwrap();
-    // The proposer intentionally has no allocation: v4 has no bootstrap fee.
-    g.accounts = Some(
-        AccountConfig::new(vec![(
+    SignedGenesis {
+        genesis: default_native_genesis(9450, 1000),
+        run_id: [7; 16],
+        proposer: *signer(1).address().as_bytes(),
+        block_period_ms: 1000,
+        limits: SignedLimits::default(),
+        accounts: AccountConfig::new(vec![(
             signer(2).address(),
             U256::from(1_000_000_000_000_000_000u64),
         )])
         .unwrap(),
-    );
-    g
+        prefill: None,
+    }
 }
 fn limits() -> PrefillLimits {
     PrefillLimits {
@@ -113,7 +109,7 @@ fn canonical_stream_and_launch_are_order_independent_and_strict() {
     rows[1].attributes.reverse();
     assert_eq!(encode_stream(&rows).unwrap(), stream);
     assert_eq!(build(&rows), g);
-    assert_eq!(&encode(&g)[..4], &4u32.to_be_bytes());
+    assert_eq!(&encode(&g)[..4], &VERSION.to_be_bytes());
     assert_eq!(decode_exact::<SignedGenesis>(&encode(&g)).unwrap(), g);
     for cut in [0, 8, 12, 19, 20, stream.len() - 1] {
         assert!(decode_stream(&stream[..cut]).is_err());
@@ -131,7 +127,7 @@ fn canonical_stream_and_launch_are_order_independent_and_strict() {
     badg.prefill.as_mut().unwrap().burned_wei += U256::from(1);
     assert!(verify_genesis(&badg, &stream).is_err());
     let mut bytes = encode(&g);
-    bytes[..4].copy_from_slice(&3u32.to_be_bytes());
+    bytes[..4].copy_from_slice(&2u32.to_be_bytes());
     assert!(decode_exact::<SignedGenesis>(&bytes).is_err());
     let mut changed = base();
     changed.run_id[0] ^= 1;
@@ -171,7 +167,7 @@ fn invalid_nonces_system_cells_capacity_and_sponsor_fail() {
     let g = build(&rows);
     let debit = g.prefill.as_ref().unwrap().burned_wei;
     let mut exact = base();
-    exact.accounts = Some(AccountConfig::new(vec![(signer(2).address(), debit)]).unwrap());
+    exact.accounts = AccountConfig::new(vec![(signer(2).address(), debit)]).unwrap();
     assert!(
         build_genesis(
             exact.clone(),
@@ -182,7 +178,7 @@ fn invalid_nonces_system_cells_capacity_and_sponsor_fail() {
         .is_ok()
     );
     exact.accounts =
-        Some(AccountConfig::new(vec![(signer(2).address(), debit - U256::from(1))]).unwrap());
+        AccountConfig::new(vec![(signer(2).address(), debit - U256::from(1))]).unwrap();
     assert!(build_genesis(exact, limits(), *signer(2).address().as_bytes(), &rows).is_err());
     let mut cap = limits();
     cap.max_canonical_bytes = 20;
@@ -231,7 +227,7 @@ fn empty_prefill_has_namespace_and_ordinary_block_one() {
     );
     assert_eq!(
         g.hash().to_string(),
-        "0x071ed2c996ad871264f57d2ca3daf3b943915b70a0fbb5c3783e1b9fda7186b8"
+        "0x6d278d0154ee270c5b4a7e4404fec9f1619e4b4c36196b7fb7c074c9d7328cad"
     );
     assert_eq!(
         p.stream_hash.to_string(),

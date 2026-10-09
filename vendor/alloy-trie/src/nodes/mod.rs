@@ -124,7 +124,9 @@ impl Decodable for TrieNode {
                 };
                 Ok(node)
             }
-            _ => Err(alloy_rlp::Error::Custom("invalid number of items in the list")),
+            _ => Err(alloy_rlp::Error::Custom(
+                "invalid number of items in the list",
+            )),
         }
     }
 }

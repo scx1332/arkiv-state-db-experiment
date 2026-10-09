@@ -31,7 +31,8 @@ pub const LIMITS: Limits = Limits {
     max_bytes_len: 64,
     max_page: 4,
     max_groups: 8,
-    max_literals: 8,    ..Limits::DEFAULT
+    max_literals: 8,
+    ..Limits::DEFAULT
 };
 
 /// Parameters for the fixtures. Under `PriceSchedule::FIXTURE` and

@@ -34,14 +34,14 @@ are printed only after successful verification and exact comparison.
 
 | Command | Behavior |
 | --- | --- |
-| `query` | Namespace 1, `Eq(group, U64(1))`, latest accepted light height, three rows |
+| `query` | Namespace 2 (`alpha`), `Eq(group, U64(1))`, latest accepted light height, three rows |
 | `query 3` | Pin block 3; both initial records are present |
 | `query 8` | Observe the recreated-key record after deletion |
 | `query 13` then `query 14` | Compare the expiring row immediately before and after expiry |
-| `query 10 1 str 1 1` | Typed string equality after a U64-to-Str patch |
-| `query 18 2 u64 1 3` | Query the second namespace |
+| `query 10 2 str 1 1` | Typed string equality after a U64-to-Str patch |
+| `query 18 3 u64 1 3` | Query the second generic namespace (`beta`) |
 | `query 18 999 u64 1 3` | A proven `NamespaceNotFound`, distinct from an empty term |
-| `query latest 1 u64 999 3` | A successful proven empty Eq result |
+| `query latest 2 u64 999 3` | A successful proven empty Eq result |
 | `next 1 producer` | Continue the prior verified page at the same block, changing page size and proof endpoint |
 | `next 64 full` | Continue against the full server at that same pinned block |
 | `pause full` / `resume full` | Pause/resume independent block execution |
@@ -53,6 +53,8 @@ are printed only after successful verification and exact comparison.
 | `status` | Refresh the terminal view |
 | `quit` | Stop every process launched by this invocation |
 
+Block 1 creates the reserved Arkiv entity namespace 1 (`entities`, unused by
+this workload) and the generic namespaces 2 (`alpha`) and 3 (`beta`).
 Queries support exactly one typed Eq predicate on `group` in this terminal
 view. Types are `bool`, `i64`, `u64` and `str`. The verified engine profile
 supports any valid attribute name through RPC. Projection is always id,
@@ -122,7 +124,7 @@ trie code to derive expectations. It verifies:
   page sizes 1, 3 and 64. Full local reads and verified rows exactly equal
   the model, including all cells and recreated record ids.
 - Type changes, rollback, deletion and both sides of expiry; separate
-  absent-term and absent-namespace outcomes; namespace 2 after transfers.
+  absent-term and absent-namespace outcomes; namespace 3 after transfers.
 - Proof endpoint switching on page walks, and unchanged pages pinned to
   block 200 while a newer block is produced.
 - Corrupted roots, truncated proofs, a removed posting id with otherwise

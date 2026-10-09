@@ -1039,7 +1039,6 @@ mod tests {
         dirty[1] = b'a';
         dirty[32] = 1;
         assert_eq!(RecordKey::decode(dirty), None);
-
     }
 
     #[test]

@@ -118,13 +118,19 @@ impl<K: AsRef<AddedRemovedKeys>> HashBuilder<K> {
 
     /// Take and return retained proof nodes.
     pub fn take_proof_nodes(&mut self) -> ProofNodes {
-        self.proof_retainer.take().map(ProofRetainer::into_proof_nodes).unwrap_or_default()
+        self.proof_retainer
+            .take()
+            .map(ProofRetainer::into_proof_nodes)
+            .unwrap_or_default()
     }
 
     /// The number of total updates accrued.
     /// Returns `0` if [Self::with_updates] was not called.
     pub fn updates_len(&self) -> usize {
-        self.updated_branch_nodes.as_ref().map(|u| u.len()).unwrap_or(0)
+        self.updated_branch_nodes
+            .as_ref()
+            .map(|u| u.len())
+            .unwrap_or(0)
     }
 
     /// Print the current stack of the Hash Builder.
@@ -143,7 +149,12 @@ impl<K: AsRef<AddedRemovedKeys>> HashBuilder<K> {
     ///
     /// Panics if the new key does not come after the current key.
     pub fn add_leaf(&mut self, key: Nibbles, value: &[u8]) {
-        assert!(key > self.key, "add_leaf key {:?} self.key {:?}", key, self.key);
+        assert!(
+            key > self.key,
+            "add_leaf key {:?} self.key {:?}",
+            key,
+            self.key
+        );
         self.add_leaf_unchecked(key, value);
     }
 
@@ -152,7 +163,12 @@ impl<K: AsRef<AddedRemovedKeys>> HashBuilder<K> {
     /// performance-critical usage that guarantees keys are inserted
     /// in sorted order.
     pub fn add_leaf_unchecked(&mut self, key: Nibbles, value: &[u8]) {
-        debug_assert!(key > self.key, "add_leaf_unchecked key {:?} self.key {:?}", key, self.key);
+        debug_assert!(
+            key > self.key,
+            "add_leaf_unchecked key {:?} self.key {:?}",
+            key,
+            self.key
+        );
         if !self.key.is_empty() {
             self.update(&key);
         }
@@ -211,7 +227,11 @@ impl<K: AsRef<AddedRemovedKeys>> HashBuilder<K> {
 
     fn current_root(&self) -> B256 {
         if let Some(node_ref) = self.stack.last() {
-            if let Some(hash) = node_ref.as_hash() { hash } else { keccak256(node_ref) }
+            if let Some(hash) = node_ref.as_hash() {
+                hash
+            } else {
+                keccak256(node_ref)
+            }
         } else {
             EMPTY_ROOT_HASH
         }
@@ -238,7 +258,12 @@ impl<K: AsRef<AddedRemovedKeys>> HashBuilder<K> {
 
             let common_prefix_len = succeeding.common_prefix_length(&current);
             let len = cmp::max(preceding_len, common_prefix_len);
-            assert!(len < current.len(), "len {} current.len {}", len, current.len());
+            assert!(
+                len < current.len(),
+                "len {} current.len {}",
+                len,
+                current.len()
+            );
 
             trace!(
                 target: "trie::hash_builder",
@@ -318,7 +343,10 @@ impl<K: AsRef<AddedRemovedKeys>> HashBuilder<K> {
 
             if build_extensions && !short_node_key.is_empty() {
                 self.update_masks(&current, len_from);
-                let stack_last = self.stack.pop().expect("there should be at least one stack item");
+                let stack_last = self
+                    .stack
+                    .pop()
+                    .expect("there should be at least one stack item");
                 let extension_node = ExtensionNodeRef::new(&short_node_key, &stack_last);
 
                 self.rlp_buf.clear();
@@ -451,7 +479,10 @@ impl<K: AsRef<AddedRemovedKeys>> HashBuilder<K> {
                     children,
                     (len == 0).then(|| self.current_root()),
                 );
-                self.updated_branch_nodes.as_mut().unwrap().insert(common_prefix, node);
+                self.updated_branch_nodes
+                    .as_mut()
+                    .unwrap()
+                    .insert(common_prefix, node);
             }
         }
     }
@@ -602,7 +633,9 @@ mod tests {
 
         let (_, updates) = hb.split();
 
-        let update = updates.get(&Nibbles::from_nibbles_unchecked(hex!("01"))).unwrap();
+        let update = updates
+            .get(&Nibbles::from_nibbles_unchecked(hex!("01")))
+            .unwrap();
         // Nibbles 0, 1, 2, 3 have children
         assert_eq!(update.state_mask, TrieMask::new(0b1111));
         // None of the children are stored in the database
@@ -660,8 +693,14 @@ mod tests {
         // Manually create the branch node that should be there after the first 2 leaves are added.
         // Skip the 0th element given in this example they have a common prefix and will
         // collapse to a Branch node.
-        let leaf1 = LeafNode::new(Nibbles::unpack(&raw_input[0].0[1..]), raw_input[0].1.clone());
-        let leaf2 = LeafNode::new(Nibbles::unpack(&raw_input[1].0[1..]), raw_input[1].1.clone());
+        let leaf1 = LeafNode::new(
+            Nibbles::unpack(&raw_input[0].0[1..]),
+            raw_input[0].1.clone(),
+        );
+        let leaf2 = LeafNode::new(
+            Nibbles::unpack(&raw_input[1].0[1..]),
+            raw_input[1].1.clone(),
+        );
         let mut branch: [&dyn Encodable; 17] = [b""; 17];
         // We set this to `4` and `7` because that matches the 2nd element of the corresponding
         // leaves. We set this to `7` because the 2nd element of Leaf 1 is `7`.
@@ -673,7 +712,11 @@ mod tests {
 
         let mut hb2 = HashBuilder::default();
         // Insert the branch with the `0x6` shared prefix.
-        hb2.add_branch(Nibbles::from_nibbles_unchecked([0x6]), branch_node_hash, false);
+        hb2.add_branch(
+            Nibbles::from_nibbles_unchecked([0x6]),
+            branch_node_hash,
+            false,
+        );
 
         assert_eq!(hb.root(), expected);
         assert_eq!(hb2.root(), expected);

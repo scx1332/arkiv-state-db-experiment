@@ -793,13 +793,7 @@ fn partial_initialization_records_are_not_treated_as_a_fresh_store() {
     let store = Arc::new(Corruptible::default());
     store.records.lock().unwrap().insert(
         (Table::Meta, b"engine/profile".to_vec()),
-        Some(
-            [
-                b"ARKENG01".as_slice(),
-                &1_u32.to_be_bytes(),
-            ]
-            .concat(),
-        ),
+        Some([b"ARKENG01".as_slice(), &1_u32.to_be_bytes()].concat()),
     );
     assert_eq!(
         storage_kind(

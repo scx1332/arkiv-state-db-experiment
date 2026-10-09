@@ -89,7 +89,10 @@ impl FromIterator<Nibbles> for ProofRetainer {
 impl ProofRetainer {
     /// Create new retainer with target nibbles.
     pub fn new(targets: Vec<Nibbles>) -> Self {
-        Self { targets, ..Default::default() }
+        Self {
+            targets,
+            ..Default::default()
+        }
     }
 }
 
@@ -215,8 +218,9 @@ impl<K: AsRef<AddedRemovedKeys>> ProofRetainer<K> {
                 // non-target children of target extensions.
                 //
                 let is_prefix_added = added_removed_keys.as_ref().is_prefix_added(path);
-                let extension_child_is_nontarget =
-                    self.added_removed_tracking.extension_child_is_nontarget(path, short_key);
+                let extension_child_is_nontarget = self
+                    .added_removed_tracking
+                    .extension_child_is_nontarget(path, short_key);
                 trace!(
                     target: "trie::proof_retainer",
                     ?path,

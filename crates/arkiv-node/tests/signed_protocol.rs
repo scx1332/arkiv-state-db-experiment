@@ -1,11 +1,11 @@
-//! Signed-profile security checks with real independent keys and explicit preimages.
-#![cfg(feature = "arkiv-v2")]
+//! Signed-chain security checks with real independent keys and explicit preimages.
 use alloy_primitives::{Keccak256, Signature, U256};
 use arkiv_db::{
     B256, CellName, Decode, Encode, NamespaceName, OwnerId, Value, decode_exact, encode,
 };
 use arkiv_node::{
     BlockOutcomes, Expiry, TxEnvelope, TxOp,
+    accounts::AccountConfig,
     arkiv::ArkivOperation,
     signed::{
         crypto::{Signer, recover},
@@ -18,13 +18,22 @@ fn signer(n: u8) -> Signer {
     key[31] = n;
     Signer::from_bytes(key).unwrap()
 }
+fn glm() -> U256 {
+    U256::from(1_000_000_000_000_000_000u64)
+}
 fn genesis() -> SignedGenesis {
-    let mut native = arkiv_node::demo::workload::genesis(7, 1_000);
-    native.admins.clear();
-    native.params.max_admin_per_block = 0;
-    native.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;
-    native.params.max_block_input_bytes = INPUT_CAP;
-    SignedGenesis::new(native, [0x42; 16], *signer(1).address().as_bytes(), 250).unwrap()
+    SignedGenesis::new(
+        default_native_genesis(7, 1_000),
+        [0x42; 16],
+        *signer(1).address().as_bytes(),
+        250,
+        AccountConfig::new(vec![
+            (signer(1).address(), glm()),
+            (signer(2).address(), glm()),
+        ])
+        .unwrap(),
+    )
+    .unwrap()
 }
 fn envelope(who: &Signer) -> TxEnvelope {
     TxEnvelope {
@@ -88,6 +97,15 @@ fn preimages_are_explicit_and_golden() {
     for cap in [TX_CAP, INPUT_CAP, BODY_CAP] {
         genesis_bytes.extend(cap.to_be_bytes());
     }
+    genesis_bytes.extend(1_000_000_000u64.to_be_bytes());
+    genesis_bytes.extend(2u32.to_be_bytes());
+    let mut funded = [signer(1).address(), signer(2).address()];
+    funded.sort();
+    for actor in funded {
+        genesis_bytes.extend(actor.as_bytes());
+        genesis_bytes.extend(glm().to_be_bytes::<32>());
+    }
+    genesis_bytes.push(0);
     assert_eq!(encode(&g), genesis_bytes);
     assert_eq!(
         g.header().inputs_digest,
@@ -148,31 +166,31 @@ fn preimages_are_explicit_and_golden() {
     // Explicit byte-layout vectors pinned across dependency changes.
     assert_eq!(
         hex(g.hash().as_slice()),
-        "c955298852db3ecec01cd496e451c506284b2706c8c6839a8a6aedb52843e969"
+        "c6cc291b947fddd329ba638f780c6e0b8f565a5b273551d7bafbafc2b2101308"
     );
     assert_eq!(
         hex(tx.intent_digest().as_slice()),
-        "7196d0c858ec08a2e090f3d4a53ec95d222254857a7699c193cba2fa6f152b00"
+        "7e6f2ab5383bb3d2d389cb3be02b1829140178668761c05b7296ff26aee21267"
     );
     assert_eq!(
         hex(tx.hash().as_slice()),
-        "fee11eae14d0696d4a0f464d3f1f899d9b7664aeb8aaea5901f74602997ae973"
+        "aa5e9ae8cde17b41687333f1ed6ac7941a8826138d23adb722fe0579f8ad5e54"
     );
     assert_eq!(
         hex(inputs.digest().as_slice()),
-        "a22678509ba6b7df6edf2b5a63a723c8bf879547080c06e031e716ccc54d736c"
+        "910af02b7577487aef82f2810cca0e78b59b235f5ccf76b3d0eeb4d341c17625"
     );
     assert_eq!(
         hex(header.intent_digest().as_slice()),
-        "050fed67a4df76985dcfacb3e8245e84517196da7d79d750a6b1b9ec8d0c9f27"
+        "ec740a8c262bd540d75ffa52435c85bc00a066df094adf9e55593459240fc8ab"
     );
     assert_eq!(
         hex(&tx.signature),
-        "6726cb7f997f73d332cabf2073be73fc17d84139ea95927d1deb1334d6dcc957204030e954591d1ac83e5fa13435d2f23f77186e3648e792364ee74babdfd7db01"
+        "07aff3b57619a67bad49b06e2792ac3089bc662bbc35daf5880cd4ed4fc7d05019119525d82999debe5cf53f475adf0ca90452f849fe23080ec8ba277d1cd1d201"
     );
     assert_eq!(
         hex(&header.signature),
-        "c08db6102542a22c2f6ce4b76a79840edd2ab7e89a0aa93c7555baa22ba327bf5c07aeb923280bf2ae6a6947ae39cbbfd7a2c1d99e0be02eb824d46e1cf3892901"
+        "77a2a4eff46a6042db5ced3e0b58675d039394c1b47614ebb9e38552c625fde628dc5e451d97481ad7b8bb5a0a3c4953f2d5c560db0248d8873bb32a6948153800"
     );
 }
 
@@ -448,7 +466,7 @@ fn bootstrap_and_unsigned_admin_rules_fail_closed() {
     bad.genesis.params.max_admin_per_block = 1;
     assert!(bad.validate().is_err());
     let mut bad = g.clone();
-    bad.genesis.protocol_version = 1;
+    bad.genesis.protocol_version = arkiv_node::PROTOCOL_VERSION + 1;
     assert!(bad.validate().is_err());
     let mut bad = g.clone();
     bad.block_period_ms = 0;
@@ -489,10 +507,7 @@ fn header_certificates_authenticate_all_native_fields_and_genesis() {
     h.header.outcomes_digest = B256::ZERO;
     changes.push(h);
     let mut h = cert.clone();
-    h.header.state_root = Some(B256::ZERO);
-    changes.push(h);
-    let mut h = cert.clone();
-    h.header.state_root = None;
+    h.header.state_root = B256::ZERO;
     changes.push(h);
     for h in changes {
         assert!(h.authenticate(&g).is_err());

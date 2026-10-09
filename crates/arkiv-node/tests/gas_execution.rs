@@ -1,4 +1,3 @@
-#![cfg(feature = "arkiv-v2")]
 use arkiv_db::{Budget, CellName, Projection, RecordKey, Value, durable::Options};
 use arkiv_db_memory::MemoryVersionedStore;
 use arkiv_node::{
@@ -9,24 +8,16 @@ use arkiv_node::{
         crypto::Signer,
         history::History,
         host::Host,
-        protocol::{INPUT_CAP, SIGNED_TX_OVERHEAD, SignedGenesis, SignedHeader, SignedTx, TX_CAP},
+        protocol::{SignedGenesis, SignedHeader, SignedTx},
     },
 };
 use std::sync::Arc;
+mod signed_support;
 fn signer() -> Signer {
     Signer::from_bytes([1; 32]).unwrap()
 }
 fn genesis() -> SignedGenesis {
-    let mut g = arkiv_node::demo::workload::genesis(9200, 1000);
-    g.admins.clear();
-    g.params.max_admin_per_block = 0;
-    g.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;
-    g.params.max_block_input_bytes = INPUT_CAP;
-    g.pricing = gas::schedule();
-    g.params.block_budget = 100_000_000;
-    g.params.user_budget = 90_000_000;
-    g.params.max_lifetime = 6_307_200;
-    SignedGenesis::new(g, [8; 16], *signer().address().as_bytes(), 5000).unwrap()
+    signed_support::genesis(9200, 1000, [8; 16], 1, 5000, &[1, 2])
 }
 fn host(producer: bool) -> Host {
     let g = genesis();
@@ -287,13 +278,15 @@ fn lifecycle_growth_extension_shrink_and_delete() {
 }
 
 #[test]
-fn gas_genesis_wire_version_cannot_be_downgraded() {
+fn signed_genesis_rejects_other_wire_versions() {
     let g = genesis();
     let mut bytes = arkiv_db::encode(&g);
-    assert_eq!(&bytes[..4], &2u32.to_be_bytes());
+    assert_eq!(&bytes[..4], &1u32.to_be_bytes());
     assert_eq!(arkiv_db::decode_exact::<SignedGenesis>(&bytes).unwrap(), g);
-    bytes[..4].copy_from_slice(&1u32.to_be_bytes());
-    assert!(arkiv_db::decode_exact::<SignedGenesis>(&bytes).is_err());
+    for version in [0u32, 2, 3, 4] {
+        bytes[..4].copy_from_slice(&version.to_be_bytes());
+        assert!(arkiv_db::decode_exact::<SignedGenesis>(&bytes).is_err());
+    }
 }
 #[test]
 fn durable_reopen_light_proof_and_reserved_expiry_sweep() {
@@ -346,7 +339,7 @@ fn durable_reopen_light_proof_and_reserved_expiry_sweep() {
             genesis_hash: g.hash(),
             height: 2,
             block_hash: before.hash(),
-            state_root: before.state_root.unwrap(),
+            state_root: before.state_root,
         },
         query: EqQuery {
             namespace: arkiv::entity_namespace(),
@@ -460,7 +453,7 @@ fn named_namespace_entities_preserve_rent_authority_proofs_and_expiry() {
             genesis_hash: p.genesis.hash(),
             height: 3,
             block_hash: p.head.hash(),
-            state_root: p.head.state_root.unwrap(),
+            state_root: p.head.state_root,
         },
         query: EqQuery {
             namespace: ns,

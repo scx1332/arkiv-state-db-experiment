@@ -1,5 +1,4 @@
-//! Run: cargo run -p arkiv-node --features arkiv-v2 --example gas_calibration
-#[cfg(feature = "arkiv-v2")]
+//! Run: cargo run -p arkiv-node --example gas_calibration
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use arkiv_db::{
         Budget, CellName, Engine, Limits, NamespaceName, OwnerId, Projection, RecordKey, Value,
@@ -101,8 +100,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("{}", serde_json::to_string_pretty(&results)?);
     Ok(())
-}
-#[cfg(not(feature = "arkiv-v2"))]
-fn main() {
-    eprintln!("requires --features arkiv-v2");
 }

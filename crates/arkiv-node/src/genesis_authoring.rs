@@ -680,7 +680,7 @@ fn profile_native(profile: &Profile, chain: &Chain) -> Result<Genesis> {
     let p = &profile.chain_params;
     Ok(Genesis {
         format_version: crate::block::FORMAT_VERSION,
-        protocol_version: crate::block::DEMO_PROTOCOL_VERSION,
+        protocol_version: crate::block::PROTOCOL_VERSION,
         chain_id: number(&chain.id)?,
         timestamp_ms: timestamp(&chain.start_time)?,
         limits: Limits {
@@ -833,18 +833,19 @@ fn compile(path: &Path) -> Result<Compiled> {
         return Err("initial allocation supply mismatch".into());
     }
     let native = profile_native(&profile, &manifest.chain)?;
-    let mut base = SignedGenesis::new(
-        native,
-        fixed_hex(&manifest.chain.run_id)?,
-        address(&manifest.chain.proposer, &aliases)?,
-        number(&manifest.chain.block_period_ms)?,
-    )
-    .map_err(err)?;
-    base.accounts = Some(accounts);
-    base.limits = SignedLimits {
-        max_tx_bytes: profile.signed_limits.max_tx_bytes,
-        max_input_bytes: profile.signed_limits.max_input_bytes,
-        max_body_bytes: profile.signed_limits.max_body_bytes,
+    // Validated by `build_genesis` once the prefill is attached.
+    let base = SignedGenesis {
+        genesis: native,
+        run_id: fixed_hex(&manifest.chain.run_id)?,
+        proposer: address(&manifest.chain.proposer, &aliases)?,
+        block_period_ms: number(&manifest.chain.block_period_ms)?,
+        limits: SignedLimits {
+            max_tx_bytes: profile.signed_limits.max_tx_bytes,
+            max_input_bytes: profile.signed_limits.max_input_bytes,
+            max_body_bytes: profile.signed_limits.max_body_bytes,
+        },
+        accounts,
+        prefill: None,
     };
     let prefill = manifest.prefill;
     expect(&prefill.builder, "arkiv-prefill-v1", "builder")?;
@@ -1128,7 +1129,6 @@ pub fn verify(bundle_dir: &Path) -> Result<AuthoringReport> {
         proposer: String::new(),
     };
     let mut native = profile_native(profile, &placeholder)?;
-    native.protocol_version = genesis.genesis.protocol_version;
     native.timestamp_ms = genesis.genesis.timestamp_ms;
     let wire = &profile.signed_limits;
     if native != genesis.genesis
@@ -1219,7 +1219,7 @@ mod tests {
     fn compiled_preset_expansion_is_frozen() {
         assert_eq!(
             sha256(PRESET.as_bytes()),
-            "98d827bbdea09ac4fcedd884ee0c5dffea379d4b6e9ae942269c6decaf52a64a"
+            "a796e17bd1747864933bd262b2fc5af1b7a6c49aec0cc9fcf41e502e64da27ea"
         );
     }
 

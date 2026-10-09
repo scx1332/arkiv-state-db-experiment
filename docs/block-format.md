@@ -84,7 +84,7 @@ value is always one the Rust constructors could have built:
 - a `PriceSchedule` class count equal to `OperationClass::ALL.len()` (31
   under counting-rule version 3);
 - the version fields of the block format (part 2): a format, protocol or
-  header version this build does not support is `UnsupportedVersion`.
+  header version other than 1 is `UnsupportedVersion`.
 
 Decoders do **not** apply the engine's admission rules: value and cell
 limits (`Limits`: name, `Str`, `Bytes` and indexed-string lengths),
@@ -253,8 +253,9 @@ Golden vectors: `crates/arkiv-db/tests/codec.rs` (`type_tags_and_values`)
 for the encoding, `crates/arkiv-db/tests/golem_types.rs`
 (`term_bytes_are_golem_stored_forms`) against golem's own vectors, and
 `crates/arkiv-db/tests/ordered_ranges.rs` for the order of the byte-ordered
-types. The Arkiv SDK boundary of the v2 entity namespace
-(`arkiv/schema.rs`, signed JSON-RPC) admits only SDK types.
+types. The Arkiv entity namespace (`arkiv/schema.rs`, signed JSON-RPC)
+admits only the ten Arkiv SDK types (`bool`, `i32`, `u64`, `u256`, `dec`,
+`bytes32`, `bytes` as payload, `str`, `addr`, `key`).
 
 `CellKind`: 1 `Attribute`, 2 `Field`.
 
@@ -281,6 +282,7 @@ types. The Arkiv SDK boundary of the v2 entity namespace
 | 5 | `RecordCreated` | `id: RecordId` |
 | 6 | `RecordPatched` | `id` |
 | 7 | `RecordDeleted` | `id` |
+| 8 | `BalanceTransferred` | `to: OwnerId ‖ amount: 32 bytes, big-endian` |
 
 `ArgumentFault`: 1 `KeyTooLong`, 2 `TooManyCells`, 3 `DuplicateCell`,
 4 `SetAndRemoveOverlap`, 5 `ValueTooLarge`, 6 `BytesNotIndexable`,
@@ -368,14 +370,13 @@ root since node step N3b; see `docs/architecture.md`):
 
 | Domain | Hashes | Step |
 | --- | --- | --- |
-| `arkiv/header/v1` | encoded version-1 header: the block hash | N0b-3 (in use) |
-| `arkiv/header/v2` | encoded version-2 header (with the state root) | layout in N0b-3, used from N3b |
-| `arkiv/inputs/v1` | encoded block inputs | N0b-3 (in use) |
-| `arkiv/outcomes/v1` | encoded block outcomes | N0b-3 (in use) |
-| `arkiv/tx/v1` | encoded transaction envelope | N0b-3 (in use) |
-| `arkiv/admin/v1` | encoded admin input | N0b-3 (in use) |
-| `arkiv/genesis/v1` | encoded genesis | N0b-3 (in use) |
-| `arkiv/state/v1` | encoded state header: the state root | N3b (reserved) |
+| `arkiv/header/v1` | encoded header (with the state root): the block hash | in use |
+| `arkiv/inputs/v1` | encoded block inputs | in use |
+| `arkiv/outcomes/v1` | encoded block outcomes | in use |
+| `arkiv/tx/v1` | encoded transaction envelope | in use |
+| `arkiv/admin/v1` | encoded admin input | in use |
+| `arkiv/genesis/v1` | encoded genesis | in use |
+| `arkiv/state/v1` | encoded state header: the state root | in use |
 
 Only canonical codec bytes are hashed.
 
@@ -402,35 +403,27 @@ bound, `ChainSpec`), `validate` (static validation, successor rule),
 `select` (selection and its replay check), `identity` (request identities,
 pending and inclusion indexes), `exec` (`execute_block`) and `replay`
 (`MemoryChain`, `replay`). The [full/light demo](full-light-demo.md) adds
-the volatile process/RPC, protocol-2 root-bearing genesis and terminal
-headers, and pinned signed envelopes. Protocol-1 fixtures and replay remain
-unchanged. Durable node storage (N4) remains open.
+the volatile process/RPC and pinned signed envelopes; the simulator and the
+signed proposer add durable node storage.
 
-### Versions and compatibility
+### Versions
 
 - **Block format version** `FORMAT_VERSION = 1` covers every layout and
-  tag table of this part. The genesis records it; a genesis with another
-  format version is refused (`UnsupportedVersion { kind: "block format" }`
-  when decoding, `GenesisError::UnsupportedFormat` from `ChainSpec::new`).
-- **Protocol version** selects the header version and the execution
-  rules. This build executes legacy protocol 1 (header version 1, no
-  state root) and protocol 2 (header version 2 with terminal state root).
-  Other protocols are refused (`UnsupportedVersion { kind: "protocol" }`,
-  `GenesisError::UnsupportedProtocol`). The demo creates only protocol-2
-  genesis; protocol-1 fixtures and replay stay byte-identical.
-- **Header version** is not a free field: a header is version 2 exactly
-  when it carries a state root. The header decoder knows both layouts and
-  refuses any other version (`UnsupportedVersion { kind: "header" }`);
-  the successor rule requires the chain's protocol's header version, so a
-  protocol-1 chain refuses a version-2 header and vice versa.
+  tag table of this part. The genesis records it and every header starts
+  with it; another format version is refused (`UnsupportedVersion { kind:
+  "block format" }` or `{ kind: "header" }` when decoding,
+  `GenesisError::UnsupportedFormat` from `ChainSpec::new`).
+- **Protocol version** `PROTOCOL_VERSION = 1` names the execution rules of
+  this document. The genesis records it; another protocol is refused
+  (`UnsupportedVersion { kind: "protocol" }`,
+  `GenesisError::UnsupportedProtocol`).
+- Every header carries its block's terminal state root; there is one
+  header layout.
 - Tags start at 1 (except the two request scopes, fixed at `00`/`01`), are
   never reused and never derived from Rust discriminants; unknown tags are
   refused. A new variant gets a new tag. Any change to an existing layout
   needs a new format version and, for hashed objects, a new digest domain;
-  old bytes are migrated explicitly, never reinterpreted.
-- `DecodeError::UnsupportedVersion` was added to the codec for these
-  version fields. It is an error variant, not a layout change: codec
-  version 1 is unchanged.
+  bytes of another version are never reinterpreted.
 
 ### Layouts
 
@@ -441,8 +434,7 @@ is 32 raw bytes, `OwnerId` 20, `RequestId` (a request id) 32.
 | --- | --- | --- |
 | `ChainParams` | `block_budget u64 ‖ user_budget u64 ‖ expiry_per_block u32 ‖ max_admin_per_block u32 ‖ max_txs_per_block u32 ‖ max_ops_per_tx u32 ‖ max_ops_per_block u32 ‖ max_tx_bytes u32 ‖ max_block_input_bytes u32 ‖ max_lifetime u64` | 52 |
 | `Genesis` | `format_version u32 ‖ protocol_version u32 ‖ chain_id u64 ‖ timestamp_ms u64 ‖ limits: Limits ‖ pricing: PriceSchedule ‖ params: ChainParams ‖ admins: Vec<OwnerId>` | 408 + 20 per admin |
-| `Header` (version 1) | `version u32 (1) ‖ chain_id u64 ‖ height u64 ‖ parent_hash ‖ timestamp_ms u64 ‖ inputs_digest ‖ outcomes_digest` | 124 |
-| `Header` (version 2) | the version-1 fields with `version` 2, then `‖ state_root` | 156 |
+| `Header` | `format_version u32 (1) ‖ chain_id u64 ‖ height u64 ‖ parent_hash ‖ timestamp_ms u64 ‖ inputs_digest ‖ outcomes_digest ‖ state_root` | 156 |
 | `BlockInputs` | `admin: Vec<AdminInput> ‖ txs: Vec<TxEnvelope>` | 8 when empty |
 | `AdminInput` | `actor ‖ request_id ‖ action: AdminAction` | 309 |
 | `AdminAction` | tag ‖ fields (table below) | 257 |
@@ -456,9 +448,9 @@ is 32 raw bytes, `OwnerId` 20, `RequestId` (a request id) 32.
 | `TxOutcome` | `status: TxStatus ‖ ops: Vec<OpOutcome> ‖ spent u64` | 13+ |
 | `TxStatus` | `01`, or `02 ‖ op_index u32` | 1 or 5 |
 | `OpOutcome` | tag ‖ fields (table below) | 1+ |
-| `HostFault` | tag, then the `ExpiryFault` for `ExpiryInvalid` | 1–2 |
+| `HostFault` | tag, then the `ExpiryFault`, `ArkivFault` or `AccountFault` | 1–2 |
 | `ExpiryFault` | tag | 1 |
-| `Block` | `header ‖ inputs ‖ outcomes` | 152+ |
+| `Block` | `header ‖ inputs ‖ outcomes` | 184+ |
 | `Scope` | `00` transaction, `01` admin | 1 |
 | `RequestIdentity` | `scope ‖ chain_id u64 ‖ actor ‖ request_id` | 61 |
 | `Inclusion` | `height u64 ‖ scope ‖ index u32 ‖ digest` | 45 |
@@ -472,7 +464,7 @@ exist for the durable inclusion records of step N4.
 `AdminAction`: 1 `SetPricing(PriceSchedule)`.
 
 `TxOp` (the engine `WriteOp` tags and layouts, plus the expiry of record
-creations and patches):
+creations and patches, an Arkiv entity operation and a native transfer):
 
 | Tag | Variant | Fields |
 | --- | --- | --- |
@@ -483,11 +475,19 @@ creations and patches):
 | 5 | `CreateRecord` | `namespace ‖ key: RecordKey ‖ cells: Vec<(CellName, Cell)> ‖ expiry: Option<Expiry>` |
 | 6 | `PatchRecord` | `namespace ‖ key ‖ set: Vec<(CellName, Cell)> ‖ remove: Vec<CellName> ‖ expiry: Option<Expiry>` |
 | 7 | `DeleteRecord` | `namespace ‖ key` |
+| 8 | `Arkiv` | `namespace ‖ operation: ArkivOperation` |
+| 9 | `Transfer` | `to: OwnerId ‖ amount: 32 bytes, big-endian` |
+
+`ArkivOperation` (`crates/arkiv-node/src/arkiv`): 1 `Create { salt: 16
+bytes ‖ flags u8 ‖ expiry: Expiry ‖ attributes: Vec<(CellName, Value)> }`,
+2 `Patch { key ‖ set: Vec<(CellName, Value)> ‖ remove: Vec<CellName> }`,
+3 `ExtendExpiry { key ‖ expiry }`, 4 `TransferOwnership { key ‖ owner: 20
+bytes }`, 5 `Delete { key }`.
 
 `AdminOutcome`: 1 `Applied`, 2 `Rejected` followed by the `AdminRejection`.
 `AdminRejection`: 1 `ReservationViolated`, 2 `ReservationOverflow`,
-3 `StaleSchedule { current: u32 }`, 4 `GasProfileLocked` (the opt-in GLM gas
-profile cannot be entered or changed through admin repricing).
+3 `StaleSchedule { current: u32 }`, 4 `GasProfileLocked` (a chain's GLM
+gas schedule cannot be entered or changed through admin repricing).
 
 `TxStatus`: 1 `Committed`, 2 `Failed { op_index: u32 }`.
 
@@ -501,16 +501,19 @@ profile cannot be entered or changed through admin repricing).
 | 4 | `AdmissionRejected` | `reason: Rejection` |
 | 5 | `HostRejected` | `fault: HostFault` |
 | 6 | `NotExecuted` | |
+| 7 | `AccountRejected` | `fault: AccountFault ‖ receipt` |
 
 `HostFault`: 1 `ExpiryCapacityFull`, 2 `ExpiryInvalid` followed by the
-`ExpiryFault`, 3 `ExpiryShortened`. `ExpiryFault`: 1 `Overflow`,
+`ExpiryFault`, 3 `ExpiryShortened`, 4 `Arkiv` followed by the `ArkivFault`
+(one byte, 1 `Name` … 15 `UnsupportedGasOperation`), 5 `Account` followed by
+the `AccountFault` (1 `InsufficientBalance`, 2 `Overflow`, 3 `Unsupported`). `ExpiryFault`: 1 `Overflow`,
 2 `DeadOnArrival`, 3 `TooFar`. `Scope`: `00` transaction, `01` admin.
 
 ### Hashes and the genesis block
 
 | Hash | Preimage |
 | --- | --- |
-| block hash | `digest("arkiv/header/v<version>", encode(header))` |
+| block hash | `digest("arkiv/header/v1", encode(header))` |
 | `inputs_digest` | `digest("arkiv/inputs/v1", encode(inputs))` |
 | `outcomes_digest` | `digest("arkiv/outcomes/v1", encode(outcomes))` |
 | transaction digest | `digest("arkiv/tx/v1", encode(envelope))` |
@@ -520,10 +523,14 @@ profile cannot be entered or changed through admin repricing).
 The genesis block is height 0 with parent hash `00…00`, the genesis
 timestamp, the genesis digest as its `inputs_digest`, the digest of empty
 outcomes (`00000000 ‖ 00000000 ‖ 00000000 ‖ 0000000000000000`) as its
-`outcomes_digest`, and (protocol 1) no state root. The genesis hash, the
-chain's identity, is that header's block hash; it commits to the whole
-genesis. A block hash commits to the header, and through its digests to
-the block's inputs and outcomes; the state root joins it in protocol 2.
+`outcomes_digest`, and the root of the empty initial state (no namespaces,
+empty host map, the genesis pricing) as its `state_root`, computed without
+an engine. The genesis hash, the chain's identity, is that header's block
+hash; it commits to the whole genesis. A block hash commits to the header,
+and through its digests and state root to the block's inputs, outcomes and
+terminal state. A signed chain with a height-zero prefill replaces the
+genesis state root by the prefilled state's root (see
+`docs/genesis-bundle-v1.md`).
 Nothing else is hashed: no Debug output, JSON, snapshot ids or physical
 state.
 
@@ -587,11 +594,10 @@ the block's remaining budget is at least its own budget.
 ### Successor rule
 
 A block at `height` with `timestamp_ms` follows `parent` when: the
-parent's chain id is the genesis chain id; the parent uses the protocol's
-header version; `height = parent.height + 1` (checked; the last height has
+parent's chain id is the genesis chain id; `height = parent.height + 1` (checked; the last height has
 no successor); and `timestamp_ms ≥ parent.timestamp_ms` (equal is
-allowed). A recorded header must also carry the genesis chain id, the
-protocol's header version and `parent_hash = parent`'s block hash. The
+allowed). A recorded header must also carry the genesis chain id and
+`parent_hash = parent`'s block hash. The
 timestamp is chosen by the producer and recorded; execution never reads
 it.
 
@@ -679,8 +685,8 @@ executor calls only the engine's fallible `try_` API
      outcome. `OpOutcome::AdmissionRejected` exists in the format but is
      never produced by this executor.
 5. **Seal.** `outcomes.spent` is the branch's spend and must equal the sum
-   of the deletions' and transactions' spends. The header is version 1
-   (protocol 1), with the parent's block hash and the two digests.
+   of the deletions' and transactions' spends. The header carries the
+   parent's block hash, the two digests and the candidate's state root.
 
 `ExecError` means no block: `Storage` (the storage beneath the state
 failed; an availability error, never a rejection or an empty read),
@@ -712,6 +718,17 @@ included by an earlier block.
 
 User requests reach neither `execute_host`, `set_pricing` nor the host
 map, and cannot write or remove `$` cells.
+
+Namespace 1 is the Arkiv entity namespace on every chain and is
+host-controlled: a generic operation (`Put`, `Delete`, record or namespace
+operations) addressed to it is refused (`OpFault::HostOwnedCell`). An
+`Arkiv` operation must pass the entity rules' static checks
+(`ArkivOperation::validate`) and its expiry the expiry checks above; on a
+chain without GLM pricing it may only address namespace 1, and under GLM
+pricing it may address any namespace, while generic record operations are
+disabled there (only `CreateNamespace` executes; the rest are
+`HostRejected(Arkiv(UnsupportedGasOperation))`). `Transfer` passes static
+validation and executes only on chains with accounts (signed chains).
 
 ### Selection
 
@@ -760,8 +777,7 @@ outcomes, or a different header.
 
 Choices the brief left open, taken as the simplest that meets it:
 
-- The header version is derived from the presence of the state root, so
-  the two cannot disagree.
+- There is one header layout; it always carries the state root.
 - `SetPricing` with a schedule id that does not exceed the current one is
   `AdminOutcome::Rejected(StaleSchedule { current })`; the reservation
   check also rejects a schedule whose sweep bound or expiry pre-read cost
@@ -808,7 +824,7 @@ hand-derived or come from an independent oracle; see the
 [test strategy](testing.md#node-library-tests-node-step-n0b-3).
 
 - `block_format.rs`: golden vectors for every type of this part (every
-  `TxOp` and `OpOutcome` variant, both header versions, genesis, inputs,
+  `TxOp` and `OpOutcome` variant, the header, genesis, inputs,
   outcomes, blocks, request identities and inclusions), assembled by hand
   from the layouts above; each decodes back, re-encodes identically and is
   refused with a trailing byte and at every truncation. Every digest and

@@ -299,8 +299,9 @@ pub fn execute_operation(
     budget: Budget,
 ) -> Result<OpOutcome, ExecError> {
     // GLM disables generic record mutations in every namespace, so all of
-    // them can safely use Arkiv ownership and rent. Legacy chains still allow
-    // generic writes outside namespace one and must retain that boundary.
+    // them can safely use Arkiv ownership and rent. Chains without GLM
+    // pricing allow generic writes outside namespace one, so entities stay
+    // confined to it there.
     if namespace != entity_namespace() && !crate::gas::is_active(branch.pricing()) {
         return Ok(rejected(ArkivFault::Namespace));
     }

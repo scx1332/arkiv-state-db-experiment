@@ -25,21 +25,17 @@
 //! an empty read. The signed demo remains an independent volatile profile.
 
 pub mod accounts;
-#[cfg(feature = "arkiv-v2")]
 pub mod arkiv;
 pub mod block;
 pub mod demo;
 pub mod exec;
 pub mod gas;
-#[cfg(feature = "arkiv-v2")]
-pub mod genesis_bundle;
-#[cfg(feature = "arkiv-v2")]
 pub mod genesis_authoring;
+pub mod genesis_bundle;
 pub mod identity;
 pub mod params;
 pub mod replay;
 pub mod select;
-#[cfg(feature = "arkiv-v2")]
 pub mod signed;
 pub mod simulator;
 pub mod validate;

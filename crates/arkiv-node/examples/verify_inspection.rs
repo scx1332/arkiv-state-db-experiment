@@ -161,7 +161,8 @@ mod tests {
             |response, selection| verify(response, genesis.clone(), header.clone(), selection);
         assert_eq!(
             verify_response(response.clone(), selection.clone()).unwrap()["postingCount"],
-            5
+            // Three of the fixture's five group-1 entities are live at height 20.
+            3
         );
         let mut damaged = response.clone();
         let mut proof = proof;

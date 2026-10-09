@@ -1,6 +1,3 @@
-#![cfg(not(feature = "arkiv-v2"))]
-// These retained fixtures pin the legacy generic/signed protocol.
-// Arkiv v2 has separate host, profile and crash acceptance suites.
 //! Real sockets: private controls/body access, caps, full replay and local proof badge.
 use arkiv_db::durable::Options;
 use arkiv_db_memory::MemoryVersionedStore;
@@ -261,7 +258,7 @@ async fn full_and_light_use_disjoint_endpoints_control_auth_and_chunked_limit() 
             break;
         }
     }
-    assert_eq!(count, 5);
+    assert_eq!(count, 3);
     assert_eq!(bodies.load(Ordering::SeqCst), 0);
     let mut follower = host();
     follower.role = "full";
@@ -555,12 +552,14 @@ async fn inspection_returns_exact_verified_witness_and_historical_results_with_b
     let client = reqwest::Client::new();
     let mut first = Value::Null;
     for (height, ty, value, count) in [
-        (20, "u64", "1", 5),
+        // The entity fixture creates five group-1 entities at height 2,
+        // deletes one at 8 and expires one at 14.
+        (20, "u64", "1", 3),
         (20, "u64", "999999", 0),
-        (10, "str", "1", 1),
-        (11, "str", "1", 0),
-        (13, "u64", "1", 2),
-        (14, "u64", "1", 1),
+        (2, "u64", "1", 5),
+        (10, "str", "1", 0),
+        (13, "u64", "1", 4),
+        (14, "u64", "1", 3),
     ] {
         let mut q = query();
         q["height"] = json!(height.to_string());
@@ -627,7 +626,7 @@ async fn inspection_returns_exact_verified_witness_and_historical_results_with_b
                 inspection["postingSet"]["reconstructedRoot"]
             );
         }
-        if height == 20 && count == 5 {
+        if height == 20 && count == 3 {
             first = page;
         }
     }
@@ -648,13 +647,13 @@ async fn inspection_returns_exact_verified_witness_and_historical_results_with_b
         response.json::<Value>().await.unwrap(),
         json!({"error":"CursorMismatch"})
     );
-    let legacy = request(&client, &local.url, "query/verified", &query())
+    let plain = request(&client, &local.url, "query/verified", &query())
         .await
         .json::<Value>()
         .await
         .unwrap();
-    assert!(legacy.get("inspection").is_none());
-    assert!(legacy.get("canonicalProof").is_none());
+    assert!(plain.get("inspection").is_none());
+    assert!(plain.get("canonicalProof").is_none());
     let _permits = rt
         .reads
         .clone()

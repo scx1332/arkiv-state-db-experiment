@@ -6,10 +6,6 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
-[features]
-default = []
-arkiv-v2 = []
-
 [dependencies]
 alloy-primitives = { workspace = true, features = ["k256"] }
 alloy-rlp.workspace = true
@@ -39,8 +35,3 @@ alloy-trie.workspace = true
 
 [lints]
 workspace = true
-
-[[bin]]
-name = "arkiv-proposer"
-path = "src/bin/arkiv-proposer.rs"
-required-features = ["arkiv-v2"]

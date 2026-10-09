@@ -3435,14 +3435,7 @@
             "$ref": "#/components/schemas/Hash"
           },
           "stateRoot": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Hash"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/Hash"
           }
         },
         "required": [
@@ -4035,15 +4028,8 @@
             "pattern": "^0x[0-9a-fA-F]{64}$"
           },
           "stateRoot": {
-            "anyOf": [
-              {
-                "type": "string",
-                "pattern": "^0x[0-9a-fA-F]{64}$"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "type": "string",
+            "pattern": "^0x[0-9a-fA-F]{64}$"
           }
         },
         "required": [
@@ -4132,9 +4118,7 @@
             }
           },
           "capabilities": {
-            "type": "object",
-            "description": "Versioned runtime capability report, including gas and sdkRpcProfile. Inspect this report before using optional features.",
-            "additionalProperties": true
+            "$ref": "#/components/schemas/NodeCapabilities"
           }
         },
         "required": [
@@ -5067,16 +5051,31 @@
           "valueType": {
             "enum": [
               "bool",
-              "u64",
               "str",
-              "i32",
-              "u256",
-              "dec",
-              "bytes32",
               "addr",
+              "bytes4",
+              "bytes8",
+              "bytes16",
+              "bytes32",
+              "u32",
+              "u64",
+              "u128",
+              "u256",
+              "i32",
+              "i64",
+              "i128",
+              "i256",
+              "dec32",
+              "dec64",
+              "dec128",
+              "dec",
+              "f32",
+              "f64",
+              "date32",
+              "timestamp64",
               "key"
             ],
-            "description": "Arkiv v2 indexed value types. Legacy builds additionally support i64 instead of v2-only types."
+            "description": "Any indexed (attribute) value type. In the Arkiv entity namespace (1) only the SDK types bool, i32, u64, u256, dec, bytes32, str, addr and key apply."
           },
           "value": {
             "oneOf": [
@@ -5182,7 +5181,7 @@
               "timestamp64",
               "key"
             ],
-            "description": "Any indexed (attribute) value type; i64 only on a node built without arkiv-v2. Ranges follow the stored value bytes: numeric order for integers, decimals, floats and time types; false < true; unsigned bytewise order for fixed-width bytes, addr and key; UTF-8 byte order for str (a proper prefix sorts first)."
+            "description": "Any indexed (attribute) value type. Ranges follow the stored value bytes: numeric order for integers, decimals, floats and time types; false < true; unsigned bytewise order for fixed-width bytes, addr and key; UTF-8 byte order for str (a proper prefix sorts first)."
           },
           "lower": {
             "anyOf": [
@@ -5456,16 +5455,31 @@
               "valueType": {
                 "enum": [
                   "bool",
-                  "u64",
                   "str",
-                  "i32",
-                  "u256",
-                  "dec",
-                  "bytes32",
                   "addr",
+                  "bytes4",
+                  "bytes8",
+                  "bytes16",
+                  "bytes32",
+                  "u32",
+                  "u64",
+                  "u128",
+                  "u256",
+                  "i32",
+                  "i64",
+                  "i128",
+                  "i256",
+                  "dec32",
+                  "dec64",
+                  "dec128",
+                  "dec",
+                  "f32",
+                  "f64",
+                  "date32",
+                  "timestamp64",
                   "key"
                 ],
-                "description": "Arkiv v2 indexed value types. Legacy builds additionally support i64 instead of v2-only types."
+                "description": "Any indexed (attribute) value type. In the Arkiv entity namespace (1) only the SDK types bool, i32, u64, u256, dec, bytes32, str, addr and key apply."
               },
               "value": {
                 "oneOf": [
@@ -8698,6 +8712,161 @@
           "method"
         ],
         "title": "arkiv_getBlockTiming"
+      },
+      "NodeCapabilities": {
+        "type": "object",
+        "description": "Runtime capability report. Simulator and signed nodes share the data and proof fields; signed nodes add gas, sdkRpcProfile and genesisPrefill.",
+        "properties": {
+          "profile": {
+            "type": "string",
+            "const": "arkiv-entity-v2",
+            "description": "Arkiv entity rules served by this node."
+          },
+          "layoutVersion": {
+            "type": "integer"
+          },
+          "codecVersion": {
+            "type": "integer"
+          },
+          "valueTypes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every engine value type, in type-id order. bytes is field-only (never indexed)."
+          },
+          "limits": {
+            "type": "object",
+            "description": "Engine limits fixed by the chain's genesis.",
+            "properties": {
+              "cellsPerRecord": {
+                "type": "integer"
+              },
+              "cellNameBytes": {
+                "type": "integer",
+                "description": "Longest attribute (cell) name in bytes."
+              },
+              "indexedValueBytes": {
+                "type": "integer",
+                "description": "Longest indexed str value in bytes."
+              },
+              "strBytes": {
+                "type": "integer"
+              },
+              "bytesBytes": {
+                "type": "integer"
+              },
+              "pageRows": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cellsPerRecord",
+              "cellNameBytes",
+              "indexedValueBytes",
+              "strBytes",
+              "bytesBytes",
+              "pageRows"
+            ]
+          },
+          "entityNamespace": {
+            "type": "object",
+            "description": "Rules of the host-controlled Arkiv entity namespace.",
+            "properties": {
+              "namespace": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]*)$"
+              },
+              "valueTypes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Arkiv SDK attribute types (bytes only as $payload)."
+              },
+              "payloadBytes": {
+                "type": "integer"
+              },
+              "systemEquality": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "systemProjection": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "currentSdkQueryExceptions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "expiryPolicy": {
+                "type": "string"
+              },
+              "equalExpiryExtension": {
+                "type": "string"
+              }
+            }
+          },
+          "signatures": {
+            "type": "boolean"
+          },
+          "productionStateRoots": {
+            "type": "boolean"
+          },
+          "sdkRpcCompatible": {
+            "type": "boolean"
+          },
+          "proofTrust": {
+            "type": "string"
+          },
+          "genesisPrefill": {
+            "type": "boolean",
+            "description": "Signed nodes: whether the genesis carries a height-zero entity prefill."
+          },
+          "gas": {
+            "type": "object",
+            "description": "Signed nodes: the glm-v2 gas profile (GLM pricing, funded accounts, burnt fees).",
+            "properties": {
+              "profile": {
+                "type": "string",
+                "const": "glm-v2"
+              },
+              "feesDebited": {
+                "type": "boolean",
+                "const": true
+              },
+              "feePolicy": {
+                "type": "string",
+                "const": "burn"
+              }
+            },
+            "additionalProperties": true
+          },
+          "sdkRpcProfile": {
+            "type": "object",
+            "description": "Signed nodes: the Arkiv SDK JSON-RPC surface.",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "profile",
+          "layoutVersion",
+          "codecVersion",
+          "valueTypes",
+          "limits",
+          "entityNamespace",
+          "signatures",
+          "productionStateRoots",
+          "sdkRpcCompatible",
+          "proofTrust"
+        ],
+        "additionalProperties": true
       }
     },
     "securitySchemes": {

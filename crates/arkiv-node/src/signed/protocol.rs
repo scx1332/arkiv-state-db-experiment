@@ -1,4 +1,5 @@
-//! Canonical native signed envelopes. Version fields never reinterpret legacy bytes.
+//! Canonical native signed envelopes. Every layout starts with a version
+//! field, and decoders accept only the versions defined here.
 use std::collections::BTreeSet;
 
 use super::{
@@ -14,6 +15,9 @@ use arkiv_db::{
 };
 
 pub const VERSION: u32 = 1;
+/// Layout version of a [`SignedTx`] that carries its original Ethereum
+/// transaction.
+pub const ETHEREUM_TX_VERSION: u32 = 2;
 pub const SIGNED_TX_OVERHEAD: u32 = 4 + 32 + 8 + 65;
 pub const TX_CAP: u32 = 256 * 1024;
 pub const INPUT_CAP: u32 = 768 * 1024;
@@ -77,6 +81,10 @@ impl Decode for SignedLimits {
     }
 }
 
+/// The signed chain's identity: the native genesis, the single proposer,
+/// the block period, the signed wire limits, the GLM account allocations and
+/// an optional height-zero entity prefill. Signed chains always run the
+/// `glm-v2` gas profile ([`GAS_PROFILE`]): GLM pricing with funded accounts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignedGenesis {
     pub genesis: Genesis,
@@ -84,8 +92,26 @@ pub struct SignedGenesis {
     pub proposer: [u8; 20],
     pub block_period_ms: u64,
     pub limits: SignedLimits,
-    pub accounts: Option<crate::accounts::AccountConfig>,
+    pub accounts: crate::accounts::AccountConfig,
     pub prefill: Option<crate::genesis_bundle::PrefillLaunch>,
+}
+/// The gas profile of every signed chain: GLM pricing, balances and burnt fees.
+pub const GAS_PROFILE: &str = "glm-v2";
+
+/// The native genesis of a signed chain created without a genesis bundle:
+/// the development workload limits under GLM pricing, without admins, with
+/// the signed wire caps.
+pub fn default_native_genesis(chain_id: u64, timestamp_ms: u64) -> Genesis {
+    let mut native = crate::demo::workload::genesis(chain_id, timestamp_ms);
+    native.admins.clear();
+    native.pricing = crate::gas::schedule();
+    native.params.max_admin_per_block = 0;
+    native.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;
+    native.params.max_block_input_bytes = INPUT_CAP;
+    native.params.block_budget = crate::gas::DEFAULT_BLOCK_GAS_LIMIT;
+    native.params.user_budget = 90_000_000;
+    native.params.max_lifetime = 6_307_200;
+    native
 }
 impl SignedGenesis {
     pub fn new(
@@ -93,6 +119,7 @@ impl SignedGenesis {
         run_id: [u8; 16],
         proposer: [u8; 20],
         block_period_ms: u64,
+        accounts: crate::accounts::AccountConfig,
     ) -> Result<Self> {
         let value = Self {
             genesis,
@@ -100,50 +127,30 @@ impl SignedGenesis {
             proposer,
             block_period_ms,
             limits: SignedLimits::default(),
-            accounts: None,
+            accounts,
             prefill: None,
         };
         value.validate()?;
         Ok(value)
     }
-    pub fn with_accounts(mut self, accounts: crate::accounts::AccountConfig) -> Result<Self> {
-        self.accounts = Some(accounts);
-        self.validate()?;
-        Ok(self)
-    }
-    pub fn profile(&self) -> &'static str {
-        if self.prefill.is_some() {
-            "glm-v2-prefill-v1"
-        } else if self.accounts.is_some() {
-            "glm-v2"
-        } else if crate::gas::is_active(&self.genesis.pricing) {
-            "glm-v1"
-        } else {
-            "legacy"
-        }
-    }
     pub fn validate(&self) -> Result<()> {
-        if let Some(accounts) = &self.accounts {
-            accounts
-                .validate()
-                .map_err(|_| Error("InvalidAccountGenesis"))?;
-            if !crate::gas::is_active(&self.genesis.pricing)
-                || (self.prefill.is_none()
-                    && accounts.initial_balance(OwnerId::new(self.proposer))
-                        < crate::accounts::fee(self.genesis.params.user_budget))
-            {
-                return Err(Error("UnfundedBootstrap"));
-            }
+        self.accounts
+            .validate()
+            .map_err(|_| Error("InvalidAccountGenesis"))?;
+        if !crate::gas::is_active(&self.genesis.pricing) {
+            return Err(Error("InvalidGasSchedule"));
+        }
+        // Without a prefill the proposer creates the entity namespace in
+        // block 1 and must be able to pay for it.
+        if self.prefill.is_none()
+            && self.accounts.initial_balance(OwnerId::new(self.proposer))
+                < crate::accounts::fee(self.genesis.params.user_budget)
+        {
+            return Err(Error("UnfundedBootstrap"));
         }
         let p = self.genesis.params;
         let l = self.limits;
-        if self.genesis.protocol_version
-            != if self.prefill.is_some() {
-                crate::block::PREFILL_PROTOCOL_VERSION
-            } else {
-                crate::block::DEMO_PROTOCOL_VERSION
-            }
-            || !self.genesis.admins.is_empty()
+        if !self.genesis.admins.is_empty()
             || p.max_admin_per_block != 0
             || self.block_period_ms == 0
             || p.max_txs_per_block > MAX_TXS
@@ -189,19 +196,11 @@ impl SignedGenesis {
     }
     pub fn header(&self) -> Header {
         Header {
-            inputs_digest: digest(
-                if self.prefill.is_some() {
-                    crate::genesis_bundle::GENESIS_DOMAIN
-                } else {
-                    GENESIS_DOMAIN
-                },
-                &encode(self),
-            ),
+            inputs_digest: digest(GENESIS_DOMAIN, &encode(self)),
             state_root: self
                 .prefill
                 .as_ref()
-                .map(|p| p.state.root())
-                .or(self.genesis.header().state_root),
+                .map_or(self.genesis.header().state_root, |p| p.state.root()),
             ..self.genesis.header()
         }
     }
@@ -217,56 +216,36 @@ impl SignedGenesis {
 }
 impl Encode for SignedGenesis {
     fn encode_to(&self, e: &mut Encoder) {
-        // Fail closed in older binaries before they interpret the new gas semantics.
-        e.u32(if self.prefill.is_some() {
-            4
-        } else if self.accounts.is_some() {
-            3
-        } else if crate::gas::is_active(&self.genesis.pricing) {
-            2
-        } else {
-            VERSION
-        });
+        e.u32(VERSION);
         e.put(&self.genesis);
         e.fixed(&self.run_id);
         e.fixed(&self.proposer);
         e.u64(self.block_period_ms);
         e.put(&self.limits);
-        if let Some(accounts) = &self.accounts {
-            e.put(accounts);
-        }
-        if let Some(prefill) = &self.prefill {
-            e.put(prefill);
-        }
+        e.put(&self.accounts);
+        e.put(&self.prefill);
     }
 }
 impl Decode for SignedGenesis {
-    const MIN_ENCODED_LEN: usize = 4 + Genesis::MIN_ENCODED_LEN + 16 + 20 + 8 + 12;
+    const MIN_ENCODED_LEN: usize = 4
+        + Genesis::MIN_ENCODED_LEN
+        + 16
+        + 20
+        + 8
+        + 12
+        + crate::accounts::AccountConfig::MIN_ENCODED_LEN
+        + 1;
     fn decode_from(d: &mut Decoder<'_>) -> std::result::Result<Self, DecodeError> {
-        let wire_version = d.u32()?;
-        if !(1..=4).contains(&wire_version) {
-            return Err(invalid("SignedGenesis", "version"));
-        }
+        version(d, "SignedGenesis")?;
         let value = Self {
             genesis: d.get()?,
             run_id: d.array()?,
             proposer: d.array()?,
             block_period_ms: d.u64()?,
             limits: d.get()?,
-            accounts: if wire_version >= 3 {
-                Some(d.get()?)
-            } else {
-                None
-            },
-            prefill: if wire_version == 4 {
-                Some(d.get()?)
-            } else {
-                None
-            },
+            accounts: d.get()?,
+            prefill: d.get()?,
         };
-        if (wire_version >= 2) != crate::gas::is_active(&value.genesis.pricing) {
-            return Err(invalid("SignedGenesis", "gas profile version mismatch"));
-        }
         value
             .validate()
             .map_err(|e| invalid("SignedGenesis", e.0))?;
@@ -280,7 +259,10 @@ pub struct SignedTx {
     pub nonce: u64,
     pub tx: TxEnvelope,
     pub signature: [u8; 65],
-    /// Original Ethereum authentication, version 2; native version 1 stays byte-identical.
+    /// The original Ethereum transaction when the transaction was submitted
+    /// through Ethereum JSON-RPC: encoded as [`ETHEREUM_TX_VERSION`] and
+    /// authenticated by that transaction's signature instead of the native
+    /// intent signature.
     pub ethereum_raw: Option<Vec<u8>>,
 }
 impl SignedTx {
@@ -328,31 +310,18 @@ impl SignedTx {
     }
     pub fn validate(&self, genesis: &SignedGenesis) -> Result<()> {
         let spec = genesis.spec()?;
-        if genesis.accounts.is_none()
-            && self
-                .tx
-                .ops
-                .iter()
-                .any(|op| matches!(op, TxOp::Transfer { .. }))
-        {
-            return Err(Error("UnsupportedAccountOperation"));
-        }
         if self.genesis_hash != genesis.hash() || self.tx.chain_id != genesis.genesis.chain_id {
             return Err(Error("IdentityMismatch"));
         }
-        if crate::gas::is_active(&genesis.genesis.pricing)
-            && self.tx.tx_budget < crate::gas::TX_INTRINSIC_GAS
-        {
+        if self.tx.tx_budget < crate::gas::TX_INTRINSIC_GAS {
             return Err(Error("GasLimitBelowIntrinsic"));
         }
-        if crate::gas::is_active(&genesis.genesis.pricing)
-            && self.tx.ops.iter().any(|op| {
-                !matches!(
-                    op,
-                    TxOp::Arkiv { .. } | TxOp::Transfer { .. } | TxOp::CreateNamespace { .. }
-                )
-            })
-        {
+        if self.tx.ops.iter().any(|op| {
+            !matches!(
+                op,
+                TxOp::Arkiv { .. } | TxOp::Transfer { .. } | TxOp::CreateNamespace { .. }
+            )
+        }) {
             return Err(Error("UnsupportedGasOperation"));
         }
         if self.nonce == u64::MAX {
@@ -396,7 +365,7 @@ impl SignedTx {
 impl Encode for SignedTx {
     fn encode_to(&self, e: &mut Encoder) {
         if let Some(raw) = &self.ethereum_raw {
-            e.u32(2);
+            e.u32(ETHEREUM_TX_VERSION);
             e.put(&self.genesis_hash);
             e.u64(self.nonce);
             e.put(&self.tx);
@@ -413,7 +382,7 @@ impl Decode for SignedTx {
     fn decode_from(d: &mut Decoder<'_>) -> std::result::Result<Self, DecodeError> {
         let before = d.remaining();
         let wire = d.u32()?;
-        if wire != VERSION && wire != 2 {
+        if wire != VERSION && wire != ETHEREUM_TX_VERSION {
             return Err(DecodeError::UnsupportedVersion {
                 kind: "SignedTx",
                 version: wire,
@@ -424,7 +393,7 @@ impl Decode for SignedTx {
             nonce: d.u64()?,
             tx: d.get()?,
             signature: d.array()?,
-            ethereum_raw: if wire == 2 {
+            ethereum_raw: if wire == ETHEREUM_TX_VERSION {
                 Some(d.bytes()?.to_vec())
             } else {
                 None
@@ -534,8 +503,7 @@ impl SignedHeader {
         if self.genesis_hash != genesis.hash() || self.header.chain_id != genesis.genesis.chain_id {
             return Err(Error("IdentityMismatch"));
         }
-        if self.header.state_root.is_none()
-            || self.header.timestamp_ms != genesis.timestamp(self.header.height)?
+        if self.header.timestamp_ms != genesis.timestamp(self.header.height)?
             || (self.header.height == 0 && self.header != genesis.header())
         {
             return Err(Error("InvalidHeader"));
@@ -564,9 +532,6 @@ impl Decode for SignedHeader {
             signature: d.array()?,
         };
         validate_signature(&value.signature).map_err(|e| invalid("SignedHeader", e.0))?;
-        if value.header.state_root.is_none() {
-            return Err(invalid("SignedHeader", "missing state root"));
-        }
         Ok(value)
     }
 }

@@ -1,6 +1,3 @@
-#![cfg(not(feature = "arkiv-v2"))]
-// These retained fixtures pin the legacy generic/signed protocol.
-// Arkiv v2 has separate host, profile and crash acceptance suites.
 //! Deterministic block fixtures: each is produced on a memory chain, checked
 //! against hand-derived outcomes, replayed on a fresh engine to identical
 //! bytes, and pinned by golden block hashes.
@@ -18,6 +15,10 @@
 //! header, input or outcome changes them), not correctness, which comes
 //! from the hand-derived outcomes here and from the independent oracle of
 //! `block_model.rs`.
+//!
+//! Namespace 1 is the Arkiv entity namespace, which generic operations may
+//! not write: every fixture creates it (`entities`) first, so the generic
+//! namespaces are 2 and up.
 
 mod support;
 
@@ -174,11 +175,12 @@ fn multi_operation_transaction() {
         1,
         10_000,
         vec![
+            create_namespace("entities"),
             create_namespace("alpha"),
-            put(1, b"k1", b"hello"),
-            create(1, b"r1", vec![("color", attr(Value::str("red")))], None),
+            put(2, b"k1", b"hello"),
+            create(2, b"r1", vec![("color", attr(Value::str("red")))], None),
             create(
-                1,
+                2,
                 b"r2",
                 vec![
                     ("color", attr(Value::str("red"))),
@@ -186,11 +188,11 @@ fn multi_operation_transaction() {
                 ],
                 Some(until(10)),
             ),
-            patch(1, b"r1", vec![("size", attr(Value::U64(7)))], vec![], None),
+            patch(2, b"r1", vec![("size", attr(Value::U64(7)))], vec![], None),
         ],
     )]));
-    // CreateNamespace: DirectoryLookup 1 + {NamespaceCreate 50 + RootUpdate
-    // 2} = 53.
+    // Each CreateNamespace (entities, then alpha): DirectoryLookup 1 +
+    // {NamespaceCreate 50 + RootUpdate 2} = 53.
     // Put k1 (2 bytes) = hello (5): 1 + {10 + 2·2 + 5 + 2·2} = 24.
     // CreateRecord r1 {color: "red"}: b = 5 + 3 = 8, n = 2 + 8 = 10;
     // 1 + PointRead 3 + {20 + 4 + 8 + 10 + 6} + two new terms 2·40 = 132.
@@ -202,9 +204,10 @@ fn multi_operation_transaction() {
     // n = 2 + 8 + 12 = 22; 1 + 3 + {10 + 4 + 12 + 0 + 22 + 4} + two new
     // terms 2·40 = 136.
     let expected = outcomes(vec![committed(
-        553,
+        606,
         vec![
             applied(Effect::NamespaceCreated(ns(1)), 53),
+            applied(Effect::NamespaceCreated(ns(2)), 53),
             applied(Effect::Put { replaced: false }, 24),
             applied(Effect::RecordCreated { id: id(1) }, 132),
             applied(Effect::RecordCreated { id: id(2) }, 208),
@@ -212,10 +215,10 @@ fn multi_operation_transaction() {
         ],
     )]);
     assert_eq!(block.outcomes, expected);
-    assert_eq!(block.outcomes.spent, 553);
+    assert_eq!(block.outcomes.spent, 606);
     let snapshot = fixture.snapshot(1);
-    assert_eq!(raw(&snapshot, 1, b"k1"), Some(b"hello".to_vec()));
-    let r1 = record(&snapshot, 1, b"r1").expect("r1 is live");
+    assert_eq!(raw(&snapshot, 2, b"k1"), Some(b"hello".to_vec()));
+    let r1 = record(&snapshot, 2, b"r1").expect("r1 is live");
     assert_eq!(
         r1.cells,
         vec![
@@ -223,7 +226,7 @@ fn multi_operation_transaction() {
             (name("size"), attr(Value::U64(7))),
         ]
     );
-    let r2 = record(&snapshot, 1, b"r2").expect("r2 is live");
+    let r2 = record(&snapshot, 2, b"r2").expect("r2 is live");
     assert_eq!(
         r2.cells,
         vec![
@@ -232,18 +235,18 @@ fn multi_operation_transaction() {
             (name("note"), field(Value::str("hi"))),
         ]
     );
-    // The due schedule: one record of namespace 1 at height 10.
+    // The due schedule: one record of namespace 2 at height 10.
     assert_eq!(
         host_entries(&snapshot),
         vec![
-            (due_key(10, 1), 1u64.to_be_bytes().to_vec()),
+            (due_key(10, 2), 1u64.to_be_bytes().to_vec()),
             (total_key(10), 1u64.to_be_bytes().to_vec()),
         ]
     );
     fixture.finish(&[GOLDEN_MULTI_OP]);
 }
 
-const GOLDEN_MULTI_OP: &str = "faa58a38a395898d633adc5f66e22ac58c787d82d4dfe264390c741715a524b8";
+const GOLDEN_MULTI_OP: &str = "306193a6bb897fa5adddd0aba9fa1f575c2e0bea0ebd49eb1470ef51725db7b8";
 
 /// A transaction failing mid-way is rolled back with its receipts kept,
 /// its later operations not executed, and the block continues; exact and
@@ -255,7 +258,7 @@ fn failing_transaction_rolls_back() {
         ALICE,
         1,
         1_000,
-        vec![create_namespace("alpha")],
+        vec![create_namespace("entities"), create_namespace("alpha")],
     )]));
     let blue = || vec![("color", attr(Value::str("blue")))];
     let block = fixture.produce(txs(vec![
@@ -264,14 +267,14 @@ fn failing_transaction_rolls_back() {
             2,
             1_000,
             vec![
-                create(1, b"r1", blue(), None),
-                create(1, b"r1", blue(), None),
-                put(1, b"k", b"v"),
+                create(2, b"r1", blue(), None),
+                create(2, b"r1", blue(), None),
+                put(2, b"k", b"v"),
             ],
         ),
-        tx(ALICE, 3, 134, vec![create(1, b"r1", blue(), None)]),
-        tx(ALICE, 4, 73, vec![create(1, b"r2", blue(), None)]),
-        tx(ALICE, 5, 74, vec![create(1, b"r2", blue(), None)]),
+        tx(ALICE, 3, 134, vec![create(2, b"r1", blue(), None)]),
+        tx(ALICE, 4, 73, vec![create(2, b"r2", blue(), None)]),
+        tx(ALICE, 5, 74, vec![create(2, b"r2", blue(), None)]),
     ]));
     // Create r1 {color: "blue"}: b = 5 + 4 = 9, n = 11; 1 + 3 + {20 + 4 +
     // 9 + 11 + 6} + two new terms 2·40 = 134. The second create of r1:
@@ -300,14 +303,14 @@ fn failing_transaction_rolls_back() {
     assert_eq!(block.outcomes, expected);
     assert_eq!(block.outcomes.spent, 138 + 134 + 64 + 74);
     let snapshot = fixture.snapshot(2);
-    assert_eq!(record(&snapshot, 1, b"r1").map(|row| row.id), Some(id(1)));
-    assert_eq!(record(&snapshot, 1, b"r2").map(|row| row.id), Some(id(2)));
-    assert_eq!(raw(&snapshot, 1, b"k"), None);
+    assert_eq!(record(&snapshot, 2, b"r1").map(|row| row.id), Some(id(1)));
+    assert_eq!(record(&snapshot, 2, b"r2").map(|row| row.id), Some(id(2)));
+    assert_eq!(raw(&snapshot, 2, b"k"), None);
     fixture.finish(&[GOLDEN_ROLLBACK_1, GOLDEN_ROLLBACK_2]);
 }
 
-const GOLDEN_ROLLBACK_1: &str = "17d70ed184d45de7a3748d3e34550394634f24aa047e17372e2a2a3a003a8c1b";
-const GOLDEN_ROLLBACK_2: &str = "dd528f3b13f86fdd2f811a926d609e700c392f2f79b36e3dbf93b2fae04d3610";
+const GOLDEN_ROLLBACK_1: &str = "3481980a59360ebd4118229909be069c7a81147704d87181d2abb63494fbd79d";
+const GOLDEN_ROLLBACK_2: &str = "bacf0ed24a5f52dcc20511b88351fa62ad93449c40841b80be58f5ece3c8672a";
 
 /// A transfer takes effect for the next transaction of the same block:
 /// the old owner is refused, the new owner writes; a stale revision is
@@ -320,7 +323,7 @@ fn same_block_ownership_transfer() {
         ALICE,
         1,
         1_000,
-        vec![create_namespace("alpha")],
+        vec![create_namespace("entities"), create_namespace("alpha")],
     )]));
     let block = fixture.produce(txs(vec![
         tx(
@@ -328,19 +331,19 @@ fn same_block_ownership_transfer() {
             2,
             1_000,
             vec![TxOp::TransferNamespace {
-                namespace: ns(1),
+                namespace: ns(2),
                 expected_revision: Revision(0),
                 new_owner: BOB,
             }],
         ),
-        tx(ALICE, 3, 1_000, vec![put(1, b"k", b"v")]),
-        tx(BOB, 1, 1_000, vec![put(1, b"k", b"v")]),
+        tx(ALICE, 3, 1_000, vec![put(2, b"k", b"v")]),
+        tx(BOB, 1, 1_000, vec![put(2, b"k", b"v")]),
         tx(
             BOB,
             2,
             1_000,
             vec![TxOp::TransferNamespace {
-                namespace: ns(1),
+                namespace: ns(2),
                 expected_revision: Revision(0),
                 new_owner: ALICE,
             }],
@@ -375,16 +378,16 @@ fn same_block_ownership_transfer() {
         ),
     ]);
     assert_eq!(block.outcomes, expected);
-    let before = descriptor(&fixture.snapshot(1), 1).expect("namespace 1");
-    let after = descriptor(&fixture.snapshot(2), 1).expect("namespace 1");
+    let before = descriptor(&fixture.snapshot(1), 2).expect("namespace 2");
+    let after = descriptor(&fixture.snapshot(2), 2).expect("namespace 2");
     assert_eq!((before.owner, before.revision), (ALICE, Revision(0)));
     assert_eq!((after.owner, after.revision), (BOB, Revision(1)));
-    assert_eq!(raw(&fixture.snapshot(2), 1, b"k"), Some(b"v".to_vec()));
+    assert_eq!(raw(&fixture.snapshot(2), 2, b"k"), Some(b"v".to_vec()));
     fixture.finish(&[GOLDEN_TRANSFER_1, GOLDEN_TRANSFER_2]);
 }
 
-const GOLDEN_TRANSFER_1: &str = "17d70ed184d45de7a3748d3e34550394634f24aa047e17372e2a2a3a003a8c1b";
-const GOLDEN_TRANSFER_2: &str = "45e974b117ed8074b3b5f39845349db05318ecac583fd9ed7bc724fc76d829ad";
+const GOLDEN_TRANSFER_1: &str = "3481980a59360ebd4118229909be069c7a81147704d87181d2abb63494fbd79d";
+const GOLDEN_TRANSFER_2: &str = "fc54249601a24c8dbeef9e9249a0b206d46525b8118c3f034626fa0d1f0b7b94";
 
 /// Records expiring at height 3 are present at height 2 and deleted in
 /// block 3, before any user transaction: block 3's transactions already
@@ -400,10 +403,11 @@ fn expiry_at_the_boundary() {
         1,
         10_000,
         vec![
+            create_namespace("entities"),
             create_namespace("alpha"),
-            create(1, b"e1", tag(), Some(until(3))),
+            create(2, b"e1", tag(), Some(until(3))),
             create(
-                1,
+                2,
                 b"e2",
                 tag(),
                 Some(Expiry {
@@ -411,7 +415,7 @@ fn expiry_at_the_boundary() {
                     min_lifetime: 2,
                 }),
             ),
-            create(1, b"e3", tag(), Some(until(4))),
+            create(2, b"e3", tag(), Some(until(4))),
         ],
     )]));
     // Each record {tag: true, $expiresAt}: b = (3 + 1) + 18 = 22, c = 2,
@@ -422,9 +426,10 @@ fn expiry_at_the_boundary() {
     assert_eq!(
         block.outcomes,
         outcomes(vec![committed(
-            575,
+            628,
             vec![
                 applied(Effect::NamespaceCreated(ns(1)), 53),
+                applied(Effect::NamespaceCreated(ns(2)), 53),
                 applied(Effect::RecordCreated { id: id(1) }, 244),
                 applied(Effect::RecordCreated { id: id(2) }, 124),
                 applied(Effect::RecordCreated { id: id(3) }, 154),
@@ -435,9 +440,9 @@ fn expiry_at_the_boundary() {
     let one = u64::to_be_bytes(1).to_vec();
     fixture.empty();
     let at_two = fixture.snapshot(2);
-    assert!(record(&at_two, 1, b"e1").is_some());
-    assert!(record(&at_two, 1, b"e2").is_some());
-    assert_eq!(host(&at_two, &due_key(3, 1)), Some(two.clone()));
+    assert!(record(&at_two, 2, b"e1").is_some());
+    assert!(record(&at_two, 2, b"e2").is_some());
+    assert_eq!(host(&at_two, &due_key(3, 2)), Some(two.clone()));
     assert_eq!(host(&at_two, &total_key(3)), Some(two));
     // Block 3 sweeps first, so its transactions see e1 and e2 gone: a
     // patch of e1 is NotFound and a creation of e2 mints a fresh id.
@@ -448,14 +453,14 @@ fn expiry_at_the_boundary() {
                 2,
                 1_000,
                 vec![patch(
-                    1,
+                    2,
                     b"e1",
                     vec![("tag", attr(Value::Bool(false)))],
                     vec![],
                     None,
                 )],
             ),
-            tx(ALICE, 3, 1_000, vec![create(1, b"e2", tag(), None)]),
+            tx(ALICE, 3, 1_000, vec![create(2, b"e2", tag(), None)]),
         ]))
         .outcomes
         .clone();
@@ -469,7 +474,7 @@ fn expiry_at_the_boundary() {
         three,
         BlockOutcomes {
             admin: Vec::new(),
-            expiry: vec![deletion(1, 1, 1, 78), deletion(1, 2, 1, 78)],
+            expiry: vec![deletion(2, 1, 1, 78), deletion(2, 2, 1, 78)],
             txs: vec![
                 failed(0, 4, vec![rejected(Rejection::NotFound, 4)]),
                 committed(64, vec![applied(Effect::RecordCreated { id: id(4) }, 64)]),
@@ -478,19 +483,19 @@ fn expiry_at_the_boundary() {
         }
     );
     let at_three = fixture.snapshot(3);
-    assert!(record(&at_three, 1, b"e1").is_none());
-    assert_eq!(record(&at_three, 1, b"e2").map(|row| row.id), Some(id(4)));
-    assert!(record(&at_three, 1, b"e3").is_some());
+    assert!(record(&at_three, 2, b"e1").is_none());
+    assert_eq!(record(&at_three, 2, b"e2").map(|row| row.id), Some(id(4)));
+    assert!(record(&at_three, 2, b"e3").is_some());
     assert_eq!(
         host_entries(&at_three),
-        vec![(due_key(4, 1), one.clone()), (total_key(4), one)]
+        vec![(due_key(4, 2), one.clone()), (total_key(4), one)]
     );
     let four = fixture.empty().outcomes.clone();
-    assert_eq!(four.expiry, vec![deletion(1, 3, 1, 78)]);
-    assert!(record(&fixture.snapshot(4), 1, b"e3").is_none());
+    assert_eq!(four.expiry, vec![deletion(2, 3, 1, 78)]);
+    assert!(record(&fixture.snapshot(4), 2, b"e3").is_none());
     assert!(host_entries(&fixture.snapshot(4)).is_empty());
     // The history keeps what each height had.
-    assert!(record(&fixture.snapshot(2), 1, b"e1").is_some());
+    assert!(record(&fixture.snapshot(2), 2, b"e1").is_some());
     fixture.finish(&[
         GOLDEN_BOUNDARY_1,
         GOLDEN_BOUNDARY_2,
@@ -499,10 +504,10 @@ fn expiry_at_the_boundary() {
     ]);
 }
 
-const GOLDEN_BOUNDARY_1: &str = "674e2b2f24f840db16e3cdb805eef1e45bf65a5dd5355e803a6a90f1818fed2c";
-const GOLDEN_BOUNDARY_2: &str = "522cb08f1cab319c9b3f7255627ea5cff47ce7beeca2bf2be2368054e62293fe";
-const GOLDEN_BOUNDARY_3: &str = "2ca804b6ff80daa8257b04d9393981517e7ba8fd048ee24bdab7623518abcd44";
-const GOLDEN_BOUNDARY_4: &str = "16b806d3406f59616b1e585f8466928946961f75397e91651f107c6bd19e10ff";
+const GOLDEN_BOUNDARY_1: &str = "3b849daba80bdb119058b2f8c1a946d00a96cc822e2755e2805e458f548387c3";
+const GOLDEN_BOUNDARY_2: &str = "244d353e9c22e2204648d01e5d3209572af8c391e04491a0f31665774c3850ba";
+const GOLDEN_BOUNDARY_3: &str = "c99e584bf867d7335cf115ad75511e3c030a1a3e9d75154f4d9b33d00fceffec";
+const GOLDEN_BOUNDARY_4: &str = "c14297ec9ee79fe95f7556db10158565600bd35bcbab9e2d52e72f13e5cfa7df";
 
 /// Eight cells, all attributes, under a 32-byte key: the most expensive
 /// record to expire.
@@ -539,6 +544,7 @@ fn expiry_at_capacity() {
             1,
             1_000,
             vec![
+                create_namespace("entities"),
                 create_namespace("alpha"),
                 create_namespace("beta"),
                 create_namespace("gamma"),
@@ -556,19 +562,19 @@ fn expiry_at_capacity() {
             2,
             10_000,
             vec![
-                max_cell_record(1, 1, until(4)),
-                max_cell_record(1, 2, until(4)),
-                max_cell_record(2, 3, until(4)),
-                max_cell_record(3, 4, until(4)),
+                max_cell_record(2, 1, until(4)),
+                max_cell_record(2, 2, until(4)),
+                max_cell_record(3, 3, until(4)),
+                max_cell_record(4, 4, until(4)),
             ],
         ),
-        tx(ALICE, 3, 10_000, vec![max_cell_record(3, 5, until(4))]),
+        tx(ALICE, 3, 10_000, vec![max_cell_record(4, 5, until(4))]),
         tx(
             ALICE,
             4,
             10_000,
             vec![patch(
-                1,
+                2,
                 &[1; 32],
                 vec![("a0", attr(Value::U64(100)))],
                 vec![],
@@ -596,17 +602,17 @@ fn expiry_at_capacity() {
         ALICE,
         5,
         100_000,
-        vec![create(1, b"after", vec![], None)],
+        vec![create(2, b"after", vec![], None)],
     )]));
     // Each deletion: 1 + 3 + {20 + 8·4 + 6} + 16 removals × 10 = 222, in
     // (namespace, record id) order.
     assert_eq!(
         block.outcomes.expiry,
         vec![
-            deletion(1, 1, 1, 222),
-            deletion(1, 2, 1, 222),
             deletion(2, 1, 1, 222),
+            deletion(2, 2, 1, 222),
             deletion(3, 1, 1, 222),
+            deletion(4, 1, 1, 222),
         ]
     );
     // Create {} under a 5-byte key: 1 + 3 + {20 + 0 + 0 + 5 + 6} = 35.
@@ -631,10 +637,10 @@ fn expiry_at_capacity() {
     ]);
 }
 
-const GOLDEN_CAPACITY_1: &str = "447c91be3be057b91a7563355eae15d6f66dbcb0736f5b7457abd830dd45f9a6";
-const GOLDEN_CAPACITY_2: &str = "c895ccfa6a56dd7ba3864dd190a9fa057c11c82c39b05ad99c640ec9930e0e3b";
-const GOLDEN_CAPACITY_3: &str = "330786122f1576d5487660b70c67ff5d9f7b87341ca035fa5ec286480b4cfe18";
-const GOLDEN_CAPACITY_4: &str = "ba7970e1ac388ddf3f409b542b9610bd98a93a206d3c0a2b3cd52c8d8129aadd";
+const GOLDEN_CAPACITY_1: &str = "253d914844ca2dfa30871593c031afd4d4f5ef6f5139cf1da93c5b54c3a2d94f";
+const GOLDEN_CAPACITY_2: &str = "6136587fd2c3d887011f5eb74807f0f8d47b783e42537b38efeeff2f6f5b57e7";
+const GOLDEN_CAPACITY_3: &str = "4690b2bfc9db06a7e4edc13c9a43e426509c8ff45960918460a950c01b3880eb";
+const GOLDEN_CAPACITY_4: &str = "6e5ecef1fad7937baadfe6a46b3266e173b871b166352d3cb24fc44442d6973c";
 
 /// Every read weight ×100 (DirectoryLookup, PointRead, ScanSeek, ScanEntry,
 /// ReadByte, QueryGroup, TermSeek, TermVisit, PostingEntry, RowVisit,
@@ -682,21 +688,22 @@ fn set_pricing_raises_read_weights() {
             1,
             10_000,
             vec![
+                create_namespace("entities"),
                 create_namespace("alpha"),
-                create(1, b"e1", tag(), Some(until(3))),
+                create(2, b"e1", tag(), Some(until(3))),
             ],
         )],
     });
     assert_eq!(block.outcomes.admin, vec![AdminOutcome::Applied]);
-    // Block 1 still runs on schedule 1: 53 + 244.
-    assert_eq!(block.outcomes.spent, 297);
+    // Block 1 still runs on schedule 1: 2 × 53 + 244.
+    assert_eq!(block.outcomes.spent, 350);
     let block = fixture.produce(BlockInputs {
         admin: vec![set_pricing(2, PriceSchedule::FIXTURE)],
         txs: vec![tx(
             ALICE,
             2,
             10_000,
-            vec![create(1, b"e2", tag(), Some(until(3)))],
+            vec![create(2, b"e2", tag(), Some(until(3)))],
         )],
     });
     assert_eq!(
@@ -723,16 +730,16 @@ fn set_pricing_raises_read_weights() {
     let three = fixture.empty().outcomes.clone();
     assert_eq!(
         three.expiry,
-        vec![deletion(1, 1, 2, 474), deletion(1, 2, 2, 474)]
+        vec![deletion(2, 1, 2, 474), deletion(2, 2, 2, 474)]
     );
     assert_eq!(fixture.snapshot(3).pricing(), &reads_times_100());
-    assert!(record(&fixture.snapshot(3), 1, b"e1").is_none());
+    assert!(record(&fixture.snapshot(3), 2, b"e1").is_none());
     fixture.finish(&[GOLDEN_PRICING_1, GOLDEN_PRICING_2, GOLDEN_PRICING_3]);
 }
 
-const GOLDEN_PRICING_1: &str = "3c9493ba579e0ab7bb3a70ec7272ff20cf82d788926ed0c1ea4bf8378829817b";
-const GOLDEN_PRICING_2: &str = "2a8591bde313a9c3be809d633cb1d1e57161361064102ccf099350260dd41197";
-const GOLDEN_PRICING_3: &str = "86a294128e2e864bdaa477e7ae20b00ab7842b63ed6222ea9fd7f7f1d8fe8111";
+const GOLDEN_PRICING_1: &str = "23df031e1f9a9ef109e860f974a03cc3cc1846d6e784bb188fb04e19d004eaf3";
+const GOLDEN_PRICING_2: &str = "9ab948d08d24af5f8a5b7b2196fdcd131942b87b60969c92bdd57db63fef55ca";
+const GOLDEN_PRICING_3: &str = "edf234275f00b928171ff3d75050d3f4be94017b291ed4791640d11488396167";
 
 /// Permanent records: `expires_at = u64::MAX` stores `U64(u64::MAX)` and
 /// schedules nothing; extending a finite record to permanent removes its
@@ -747,21 +754,22 @@ fn permanent_expiry() {
         1,
         10_000,
         vec![
+            create_namespace("entities"),
             create_namespace("alpha"),
-            create(1, b"p1", tag(), Some(Expiry::PERMANENT)),
-            create(1, b"p2", tag(), Some(until(3))),
-            create(1, b"p3", tag(), None),
+            create(2, b"p1", tag(), Some(Expiry::PERMANENT)),
+            create(2, b"p2", tag(), Some(until(3))),
+            create(2, b"p3", tag(), None),
         ],
     )]));
     let snapshot = fixture.snapshot(1);
     assert_eq!(
-        record(&snapshot, 1, b"p1").expect("p1").cells[0],
+        record(&snapshot, 2, b"p1").expect("p1").cells[0],
         (name("$expiresAt"), attr(Value::U64(u64::MAX)))
     );
     assert_eq!(
         host_entries(&snapshot),
         vec![
-            (due_key(3, 1), 1u64.to_be_bytes().to_vec()),
+            (due_key(3, 2), 1u64.to_be_bytes().to_vec()),
             (total_key(3), 1u64.to_be_bytes().to_vec()),
         ]
     );
@@ -770,19 +778,19 @@ fn permanent_expiry() {
             ALICE,
             2,
             10_000,
-            vec![patch(1, b"p2", vec![], vec![], Some(Expiry::PERMANENT))],
+            vec![patch(2, b"p2", vec![], vec![], Some(Expiry::PERMANENT))],
         ),
         tx(
             ALICE,
             3,
             10_000,
-            vec![patch(1, b"p3", vec![], vec![], Some(until(50)))],
+            vec![patch(2, b"p3", vec![], vec![], Some(until(50)))],
         ),
         tx(
             ALICE,
             4,
             10_000,
-            vec![patch(1, b"p1", vec![], vec![], Some(Expiry::PERMANENT))],
+            vec![patch(2, b"p1", vec![], vec![], Some(Expiry::PERMANENT))],
         ),
     ]));
     assert!(matches!(block.outcomes.txs[0].status, TxStatus::Committed));
@@ -798,18 +806,18 @@ fn permanent_expiry() {
     assert!(three.expiry.is_empty());
     let snapshot = fixture.snapshot(3);
     for key_bytes in [b"p1", b"p2", b"p3"] {
-        assert!(record(&snapshot, 1, key_bytes).is_some());
+        assert!(record(&snapshot, 2, key_bytes).is_some());
     }
     assert_eq!(
-        record(&snapshot, 1, b"p2").expect("p2").cells[0],
+        record(&snapshot, 2, b"p2").expect("p2").cells[0],
         (name("$expiresAt"), attr(Value::U64(u64::MAX)))
     );
     fixture.finish(&[GOLDEN_PERMANENT_1, GOLDEN_PERMANENT_2, GOLDEN_PERMANENT_3]);
 }
 
-const GOLDEN_PERMANENT_1: &str = "153ceefec1328a18f7dcb12d5228f823a2213f98299af10b99c00e5a994ff093";
-const GOLDEN_PERMANENT_2: &str = "0e6f8d038f6cefeba299187263eadfd51ae25974c0f80641fc22fa06375b1e46";
-const GOLDEN_PERMANENT_3: &str = "cabb3953cb15cfac47448ac50f57cc25a4fe0a5a36aa3edf3ea649e782548ecf";
+const GOLDEN_PERMANENT_1: &str = "72cd1359eb119560bf19831595d137bf2346e0b0a9ffa5b4e10602f1ac2415d5";
+const GOLDEN_PERMANENT_2: &str = "14e2389bba9bc32c2dea43192b82453d00b04d9acac0a565d2719cffe2772436";
+const GOLDEN_PERMANENT_3: &str = "80662fe78b51f510705d745a29eff05c57f43d3dc0c03c389e11ebdcf23c54cf";
 
 /// Expiry only extends: an earlier height is refused, the same height is
 /// accepted without moving the schedule, a later height moves it.
@@ -822,8 +830,9 @@ fn expiry_extends_only() {
         1,
         10_000,
         vec![
+            create_namespace("entities"),
             create_namespace("alpha"),
-            create(1, b"x1", tag(), Some(until(5))),
+            create(2, b"x1", tag(), Some(until(5))),
         ],
     )]));
     let block = fixture.produce(txs(vec![
@@ -832,21 +841,21 @@ fn expiry_extends_only() {
             2,
             10_000,
             vec![
-                patch(1, b"x1", vec![("n", attr(Value::I64(-1)))], vec![], None),
-                patch(1, b"x1", vec![], vec![], Some(until(4))),
+                patch(2, b"x1", vec![("n", attr(Value::I64(-1)))], vec![], None),
+                patch(2, b"x1", vec![], vec![], Some(until(4))),
             ],
         ),
         tx(
             ALICE,
             3,
             10_000,
-            vec![patch(1, b"x1", vec![], vec![], Some(until(5)))],
+            vec![patch(2, b"x1", vec![], vec![], Some(until(5)))],
         ),
         tx(
             ALICE,
             4,
             10_000,
-            vec![patch(1, b"x1", vec![], vec![], Some(until(7)))],
+            vec![patch(2, b"x1", vec![], vec![], Some(until(7)))],
         ),
     ]));
     let outcome = &block.outcomes.txs[0];
@@ -874,15 +883,15 @@ fn expiry_extends_only() {
     let one = u64::to_be_bytes(1).to_vec();
     assert_eq!(
         host_entries(&fixture.snapshot(2)),
-        vec![(due_key(7, 1), one.clone()), (total_key(7), one)]
+        vec![(due_key(7, 2), one.clone()), (total_key(7), one)]
     );
     for _ in 3..=6 {
         assert!(fixture.empty().outcomes.expiry.is_empty());
     }
-    assert!(record(&fixture.snapshot(6), 1, b"x1").is_some());
+    assert!(record(&fixture.snapshot(6), 2, b"x1").is_some());
     let seven = fixture.empty().outcomes.clone();
     assert_eq!(seven.expiry.len(), 1);
-    assert!(record(&fixture.snapshot(7), 1, b"x1").is_none());
+    assert!(record(&fixture.snapshot(7), 2, b"x1").is_none());
     fixture.finish(&[
         GOLDEN_EXTEND_1,
         GOLDEN_EXTEND_2,
@@ -894,13 +903,13 @@ fn expiry_extends_only() {
     ]);
 }
 
-const GOLDEN_EXTEND_1: &str = "b359ec1f302d5e841480998e72a2de7522be24ca0cebf7c8d1f50f85a57b9524";
-const GOLDEN_EXTEND_2: &str = "0bd71128b283ecd8ab0ecaa4e82dc7a3b579f03c11044d72ae6e461046aa1f58";
-const GOLDEN_EXTEND_3: &str = "42a2230580612b4f82a0c0a5b5101ec63c880b754db1a3ae801be4964e6a1d63";
-const GOLDEN_EXTEND_4: &str = "736ef36498f444a346d92e5900d07a92459326ed5ecc28a6645c0858ef4cc003";
-const GOLDEN_EXTEND_5: &str = "95ab9027cee977909b6c1b40131432d630288957a8ddfb741d9b4ef7ad73f644";
-const GOLDEN_EXTEND_6: &str = "a6db6127fa4b5b66186a71b9ab76337bb34fe0e8935b42a1f6940e2fa6a75250";
-const GOLDEN_EXTEND_7: &str = "54f17b2e7e941fde110864c2b895e405e5bbe06c5da5bc42856f4ad8cb45067e";
+const GOLDEN_EXTEND_1: &str = "890f2650a930082442fb4491d48fd7e74d3c496907c87993fbef9862bcc8aa4f";
+const GOLDEN_EXTEND_2: &str = "358760068744efd49555d48ccddc0dd8762d7d38ed23b18aa02e86a4dc09263a";
+const GOLDEN_EXTEND_3: &str = "86815b154fb4e8953ec7a84032777d7f78c2b203ae6f0ce3822bb4185e1007e9";
+const GOLDEN_EXTEND_4: &str = "5e453954697ad11eb1e4fa5be4602c3c1009a5150fc75d15af3caf03fb566216";
+const GOLDEN_EXTEND_5: &str = "968cf71800743b1b8717287cb66069b86c324028e188d60e31284e09efad2068";
+const GOLDEN_EXTEND_6: &str = "f6792054ad1da6fe1b9adb67c19274f8cbca37361badd28166c44520e9982974";
+const GOLDEN_EXTEND_7: &str = "caad4b6b4c783d6d101b5f1ec30f6d7cd29efaa89eadd6ba8d7d86a2f1d84b95";
 
 /// Expiry pairs that do not resolve: dead on arrival, too far, and an
 /// overflowing `height + min_lifetime` (reachable only with a huge
@@ -916,7 +925,7 @@ fn unresolvable_expiry_is_host_rejected() {
         ALICE,
         1,
         1_000,
-        vec![create_namespace("alpha")],
+        vec![create_namespace("entities"), create_namespace("alpha")],
     )]));
     let tag = || vec![("tag", attr(Value::Bool(true)))];
     let block = fixture.produce(txs(vec![
@@ -924,14 +933,14 @@ fn unresolvable_expiry_is_host_rejected() {
             ALICE,
             2,
             1_000,
-            vec![create(1, b"d", tag(), Some(until(2)))],
+            vec![create(2, b"d", tag(), Some(until(2)))],
         ),
         tx(
             ALICE,
             3,
             1_000,
             vec![create(
-                1,
+                2,
                 b"o",
                 tag(),
                 Some(Expiry {
@@ -966,20 +975,20 @@ fn unresolvable_expiry_is_host_rejected() {
         ALICE,
         1,
         1_000,
-        vec![create_namespace("alpha")],
+        vec![create_namespace("entities"), create_namespace("alpha")],
     )]));
     let block = fixture.produce(txs(vec![
         tx(
             ALICE,
             2,
             1_000,
-            vec![create(1, b"f", tag(), Some(until(103)))],
+            vec![create(2, b"f", tag(), Some(until(103)))],
         ),
         tx(
             ALICE,
             3,
             1_000,
-            vec![create(1, b"g", tag(), Some(until(102)))],
+            vec![create(2, b"g", tag(), Some(until(102)))],
         ),
     ]));
     // g {tag: true, $expiresAt: 102}: b = 4 + 18 = 22, c = 2, n = 1 + 22 =
@@ -994,10 +1003,10 @@ fn unresolvable_expiry_is_host_rejected() {
     fixture.finish(&[GOLDEN_TOO_FAR_1, GOLDEN_TOO_FAR_2]);
 }
 
-const GOLDEN_FAULTS_1: &str = "1ee3dd5a125eb76fbf79390d68b57716028d393819bef2a4dc410ffa62ad4c62";
-const GOLDEN_FAULTS_2: &str = "7f5c55e4b90ba50e0da194fe65e82be15a8b46d188e1694383247993edfdd30a";
-const GOLDEN_TOO_FAR_1: &str = "17d70ed184d45de7a3748d3e34550394634f24aa047e17372e2a2a3a003a8c1b";
-const GOLDEN_TOO_FAR_2: &str = "605756b7629dfbd9bce82cba4b0ffe3d728ca29f74b8d024d0e58c410479fa4e";
+const GOLDEN_FAULTS_1: &str = "c6cd430c287505b6ac6751cb2bd5bf3eebff3637a78ee6cc579c9206868ad536";
+const GOLDEN_FAULTS_2: &str = "3aa7192ea5e1605e1899b35bd31c7780b827a4fcedffa24aaf0f9b18c71aa8ca";
+const GOLDEN_TOO_FAR_1: &str = "3481980a59360ebd4118229909be069c7a81147704d87181d2abb63494fbd79d";
+const GOLDEN_TOO_FAR_2: &str = "4608254bacf39bfa01f85747526e0223496730f3c80a5ad5856b91526adaafad";
 
 /// Empty blocks still have headers, digests and outcomes; the timestamp may
 /// repeat the parent's.
@@ -1023,9 +1032,9 @@ fn empty_blocks() {
     fixture.finish(&[GOLDEN_EMPTY_1, GOLDEN_EMPTY_2, GOLDEN_EMPTY_3]);
 }
 
-const GOLDEN_EMPTY_1: &str = "68a81abe4285083b4f437f071002a9b5d00ceadfc0175087efe14e3583a053ba";
-const GOLDEN_EMPTY_2: &str = "702e4674ab61eb2225bbaff4308fecdc0e17b6f55527560cabe756ee3f40bcfa";
-const GOLDEN_EMPTY_3: &str = "50976b2a4b69f7afe7fe2579088b2cb4e0d7259a0df0d666218620c21707d99c";
+const GOLDEN_EMPTY_1: &str = "b1379725fce5ee154bc51905cf425e75d627ab4fa4a6cdcda8c84cd14db36606";
+const GOLDEN_EMPTY_2: &str = "19e02bd57d9c703a31be2dde26714ae61cb123e8da4a8314712a6f3c4c055367";
+const GOLDEN_EMPTY_3: &str = "c4334b14b91513765ac9cc81dbc5060ba14e48524a8a4add0ab8c18c20dba403";
 
 /// A recorded block whose header follows the chain but whose inputs repeat
 /// an identity: within the block, or one included earlier. Replay refuses
@@ -1037,7 +1046,12 @@ fn replay_rejects_duplicate_identities() {
     let mut fixture = Fixture::new(genesis.clone());
     fixture.produce(BlockInputs {
         admin: vec![set_pricing(1, PriceSchedule::FIXTURE.with_id(2))],
-        txs: vec![tx(ADMIN, 1, 1_000, vec![create_namespace("alpha")])],
+        txs: vec![tx(
+            ADMIN,
+            1,
+            1_000,
+            vec![create_namespace("entities"), create_namespace("alpha")],
+        )],
     });
     let good = fixture.blocks.clone();
     let header = |chain: &MemoryChain| arkiv_node::Header {
@@ -1047,7 +1061,7 @@ fn replay_rejects_duplicate_identities() {
         timestamp_ms: chain.head().timestamp_ms + 1,
         inputs_digest: Default::default(),
         outcomes_digest: Default::default(),
-        state_root: None,
+        state_root: Default::default(),
     };
     // Already included at height 1.
     let again = BlockInputs {
@@ -1102,7 +1116,7 @@ fn replay_rejects_duplicate_identities() {
     fixture.finish(&[GOLDEN_IDENTITY_1]);
 }
 
-const GOLDEN_IDENTITY_1: &str = "ac172f09369914349856735fa0441a1481b07ebc392f50158fe2cc491f9dab80";
+const GOLDEN_IDENTITY_1: &str = "bb76cb6156905f538839670367d5daa2be7f82756b11c9b8eed7df4efbb88310";
 
 /// Replay refuses a recorded block with a statically invalid request, a
 /// broken selection limit, a wrong parent, or outcomes or a header that
@@ -1115,14 +1129,14 @@ fn replay_rejects_invalid_blocks() {
         ALICE,
         1,
         1_000,
-        vec![create_namespace("alpha")],
+        vec![create_namespace("entities"), create_namespace("alpha")],
     )]));
     let block = fixture
         .produce(txs(vec![tx(
             ALICE,
             2,
             1_000,
-            vec![create(1, b"r", vec![("x", attr(Value::U64(1)))], None)],
+            vec![create(2, b"r", vec![("x", attr(Value::U64(1)))], None)],
         )]))
         .clone();
     let first = fixture.blocks[0].clone();
@@ -1136,7 +1150,7 @@ fn replay_rejects_invalid_blocks() {
 
     // A `$` cell in a user operation.
     let mut tampered = block.clone();
-    tampered.inputs.txs[0].ops[0] = create(1, b"r", vec![("$x", attr(Value::U64(1)))], None);
+    tampered.inputs.txs[0].ops[0] = create(2, b"r", vec![("$x", attr(Value::U64(1)))], None);
     assert_eq!(
         replay_second(tampered),
         invalid(BlockFault::Tx {
@@ -1226,8 +1240,8 @@ fn replay_rejects_invalid_blocks() {
     fixture.finish(&[GOLDEN_INVALID_1, GOLDEN_INVALID_2]);
 }
 
-const GOLDEN_INVALID_1: &str = "17d70ed184d45de7a3748d3e34550394634f24aa047e17372e2a2a3a003a8c1b";
-const GOLDEN_INVALID_2: &str = "74f59264e39d4058cbdad49a21504aca6e9044c947c867583d98a79136e46e09";
+const GOLDEN_INVALID_1: &str = "3481980a59360ebd4118229909be069c7a81147704d87181d2abb63494fbd79d";
+const GOLDEN_INVALID_2: &str = "790ba482fe15fc254a7be635d6553064b7424e122cb658333b4d0a47fa6897b5";
 
 /// A statically valid operation refused at engine admission is a broken
 /// invariant, never an outcome: here the (unchecked) genesis reserves less
@@ -1245,7 +1259,12 @@ fn admission_rejection_is_an_invariant_error() {
     let mut chain = MemoryChain::new(spec);
     let result = chain.produce(
         2_000,
-        txs(vec![tx(ALICE, 1, 1_000, vec![create_namespace("alpha")])]),
+        txs(vec![tx(
+            ALICE,
+            1,
+            1_000,
+            vec![create_namespace("entities"), create_namespace("alpha")],
+        )]),
     );
     assert_eq!(
         result.err(),
@@ -1275,55 +1294,58 @@ fn halted_expiry_aborts_the_candidate() {
     let spec = ChainSpec::new_unchecked(genesis_with(params, LIMITS, PriceSchedule::FIXTURE));
     let mut chain = MemoryChain::new(spec);
     let tag = || vec![("tag", attr(Value::Bool(true)))];
-    // 53 + 244; then 124 per record (every term already held).
+    // Two namespace creations, 2 × 53; then e1 with its four new terms 244,
+    // and 124 per later record (every term already held).
     chain
         .produce(
             2_000,
             txs(vec![tx(
                 ALICE,
                 1,
-                297,
-                vec![
-                    create_namespace("alpha"),
-                    create(1, b"e1", tag(), Some(until(5))),
-                ],
+                106,
+                vec![create_namespace("entities"), create_namespace("alpha")],
             )]),
         )
         .expect("block 1");
-    for (n, key_bytes) in [(2, b"e2"), (3, b"e3"), (4, b"e4")] {
+    for (n, key_bytes, budget) in [
+        (2, b"e1", 244),
+        (3, b"e2", 124),
+        (4, b"e3", 124),
+        (5, b"e4", 124),
+    ] {
         chain
             .produce(
                 2_000 + n,
                 txs(vec![tx(
                     ALICE,
                     n,
-                    124,
-                    vec![create(1, key_bytes, tag(), Some(until(5)))],
+                    budget,
+                    vec![create(2, key_bytes, tag(), Some(until(6)))],
                 )]),
             )
             .expect("record block");
     }
-    assert_eq!(chain.height(), 4);
+    assert_eq!(chain.height(), 5);
     assert_eq!(
         chain.produce(3_000, BlockInputs::default()).err(),
         Some(ChainError::Exec(ExecError::ExpiryHalted {
-            height: 5,
-            namespace: ns(1),
+            height: 6,
+            namespace: ns(2),
             deleted: 3,
             reason: Rejection::OutOfBudget,
         }))
     );
-    assert_eq!(chain.height(), 4);
-    assert!(record(&chain.snapshot(4).expect("head"), 1, b"e1").is_some());
+    assert_eq!(chain.height(), 5);
+    assert!(record(&chain.snapshot(5).expect("head"), 2, b"e1").is_some());
 }
 
-/// The genesis header is version 1 (protocol 1): 124 bytes starting with
-/// the version.
+/// A header encodes in 156 bytes: the format version first, the state root
+/// last.
 #[test]
-fn protocol_one_headers_are_version_one() {
+fn headers_carry_the_format_version_and_the_state_root() {
     let header = genesis().header();
-    assert_eq!(header.version(), 1);
     let bytes = encode(&header);
-    assert_eq!(bytes.len(), 124);
+    assert_eq!(bytes.len(), 156);
     assert_eq!(bytes[..4], [0, 0, 0, 1]);
+    assert_eq!(bytes[124..], header.state_root[..]);
 }

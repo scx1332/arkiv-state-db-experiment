@@ -6,11 +6,12 @@ the machine fields and runtime behavior of the bounded implementation.
 
 ## Versions and identity
 
-`arkiv-launch-prefill-v1` uses signed-genesis wire **4** and native execution
-protocol **4**, while retaining the existing root-bearing header version **3**,
-state layout **2** and engine value codec **2**. Signed versions 1/2/3 keep their
-exact encodings, hashes, account defaults and block-1 bootstrap. Prefills require
-a new chain/run directory. The builtin `arkiv-entity-v2/glm-v2@1` expands immutable
+`arkiv-launch-prefill-v1` is a signed genesis (version 1) whose optional
+`PrefillLaunch` is present. It uses the one native block format and protocol
+(version 1), state layout 1 and codec 1, and the `glm-v2` gas profile. A chain
+without a prefill uses the same signed genesis layout with the prefill absent
+and creates its entity namespace in block 1 instead. Prefills require a new
+chain/run directory. The builtin `arkiv-entity-v2/glm-v2@1` expands immutable
 constants; no dynamic base fees are enabled.
 
 Integers are checked fixed-width big-endian. Strings and bytes have u32 byte
@@ -37,15 +38,16 @@ paths, caller-provided keys or system attributes enter the canonical rows.
 `stream_hash = digest("arkiv/prefill-stream/v1", prefill.bin)`.
 
 Recipe fields, in order, are `u32(1), native Genesis, run_id[16], proposer[20],
-block_period_ms:u64, SignedLimits, Option<AccountConfig>, u32(builder_policy=1),
+block_period_ms:u64, SignedLimits, AccountConfig, u32(builder_policy=1),
 PrefillLimits, sponsor[20], stream_hash[32], row_count:u64, canonical_bytes:u64`.
-The account option must be `Some`. Builder policy 1 fixes namespace `entities`,
+Builder policy 1 fixes namespace `entities`,
 ordinal 1, and `sponsored-rent-v1`. `PrefillLimits` is three u64 values: max
 entities, max canonical bytes, max logical storage units.
 `recipe_hash = digest("arkiv/genesis-recipe/v1", recipe_bytes)`.
 
-Signed genesis v4 is `u32(4)` followed by the native genesis, run ID, proposer,
-cadence, signed limits and account configuration as in v3, then `PrefillLaunch`:
+The signed genesis is `u32(1)` followed by the native genesis, run ID, proposer,
+cadence, signed limits and account configuration, then the prefill option
+(`01 ‖ PrefillLaunch` here, `00` without a prefill):
 
 | Field | Encoding |
 | --- | --- |
@@ -60,7 +62,7 @@ cadence, signed limits and account configuration as in v3, then `PrefillLaunch`:
 | Initial logical storage units | u64 |
 
 Height 0 has zero parent and the existing empty-outcome commitment, with
-`inputs_digest = digest("arkiv/signed-genesis/v4", encode(SignedGenesis))` and
+`inputs_digest = digest("arkiv/signed-genesis/v1", encode(SignedGenesis))` (the same domain as a genesis without prefill) and
 `state_root = initial_state.root()`. Its ordinary header hash is the genesis
 hash clients pin. Recipe identity excludes derived state/burn, source metadata,
 compiler identity, local paths and the proposer certificate.
@@ -139,13 +141,13 @@ bounds, not a demonstrated maximum-volume performance claim.
 
 ## Validation
 
-`cargo test -p arkiv-node --features arkiv-v2 --test genesis_prefill` covers strict
+`cargo test -p arkiv-node --test genesis_prefill` covers strict
 streams, order independence, rent/capacity/sponsor bounds, empty genesis golden
 roots, system metadata, nonce separation, full/light replay, expiry and restart.
 Authoring unit tests cover typed TOML/JSONL equivalence, source mutation/pins,
 unsafe paths and atomic publication. Durable simulator tests inject failed or
 uncertain initialization and verify complete object closure, limits and root
-corruption. Existing legacy genesis golden tests remain unchanged.
+corruption.
 
 `python3 scripts/genesis-bundle-smoke.py` runs isolated real producer/full/light
 processes with temporary stores. It checks independently calculated keys/rent,

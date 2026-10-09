@@ -333,7 +333,7 @@ retention, sensitivity to each field). Root-sharing statistics
 (`records_shared_with`, `typed_shared_with`) compare map roots, so equal
 contents count as shared even when the maps were rebuilt.
 
-The demo now commits roots in protocol-2 headers and composes the catalog,
+Every block header commits the state root, and the proofs compose the catalog,
 term, row and key point proofs needed for complete Eq pages. Broader N3d
 point-read APIs remain open; a root alone is not query evidence.
 
@@ -361,9 +361,8 @@ fallible surface below.
 ### Typed records and their indexes
 
 A typed record is a caller-assigned `RecordKey` (1 to 32 bytes, the width of
-the SDK's entity keys; canonical encoding version 2, 33 bytes
-`len ‖ bytes ‖ zero padding`, with the 32-byte version-1 form kept only for
-explicit migration) bound to a dense per-namespace
+the SDK's entity keys; canonical fixed-width encoding of 33 bytes
+`len ‖ bytes ‖ zero padding`) bound to a dense per-namespace
 `RecordId` (from 1, never reused: a deleted key recreated gets a new id) and
 holding up to `max_cells` named cells. A `CellName` follows a fixed ASCII
 grammar (a letter or `$` plus a letter first, then letters, digits, `_`, `-`,
@@ -438,18 +437,21 @@ cursor names, so a walk is identical whether or not new snapshots are
 published between its pages. There are no caches.
 
 `Limits` are instance parameters (`Engine::with_limits`): the namespace cap,
-`max_cells` (also the bound on a named projection), `max_value_len` (the
-longest `Str`/`Bytes` field or payload value), `max_page`,
-`max_groups` and `max_literals`. They are fixed for the engine's lifetime and
+`max_cells` (also the bound on a named projection), the cell limits
+(`max_cell_name_len`, `max_str_len`, `max_bytes_len`, `max_indexed_len`,
+golem-db's genesis `cell_limits`), `max_page`, `max_groups` and
+`max_literals`. They are fixed for the engine's lifetime and
 checked at admission before any charge, so validation is
 O(`max_groups` × `max_literals` + `max_cells`) and every per-entry step of a
 write or query is bounded by them (a term comparison is at most
-`min(max_value_len, 64)` bytes; a patch's cell merge is one linear pass, O(cells +
+`min(max_indexed_len, max_str_len)` bytes, at most 128; a patch's cell merge is one linear pass, O(cells +
 set + remove), over at most 2 × `max_cells` entries).
 
-Indexed values have a hard 64-byte cap (`Value::MAX_INDEXED_LEN`), and all
-query strings and prefixes obey that cap as well as any smaller configured
-value limit. Namespace and cell names have a hard 20-character ASCII cap.
+Indexed strings have a hard 128-byte cap (`Value::MAX_INDEXED_LEN`) and
+cell names a hard 32-byte cap (`CellName::MAX_LEN`), the widths of the
+term-index key; the configured limits may only be smaller, and query
+strings and prefixes obey the indexed-string limit. Namespace names have a
+20-character ASCII cap.
 A namespace stores its immutable name in its descriptor; addresses still
 use the stable ID and name-registration policy stays in the host.
 
@@ -677,7 +679,7 @@ to Arkiv's naming layer.
 The directory bound above is measured by the isolation tests for every
 implemented operation, including every query operator. Namespace-local
 roots are composed through the catalog into the state root (node step N3b);
-the demo commits that root in protocol-2 headers and verifies bounded
+every block header commits that root, and light nodes verify bounded
 catalog paths for Eq pages. Its [proof overhead](eq-proof-charges.md) is
 explicit; broader proof profiles retain their own acceptance gates.
 
@@ -715,16 +717,17 @@ version 1, with golden vectors and the domain-separated digest; see the
 surface. Node step N0b-3 added the `arkiv-node` library: block format
 version 1, the executor that produces and replays blocks (admin inputs,
 expiry, then transactions rolled back whole on failure), static validation,
-selection, request identities and replay on the memory engine;
-protocol-1 headers carry no state root. Node step N3b moved every engine
+selection, request identities and replay on the memory engine. Node step
+N3b moved every engine
 map to `arkiv-db-trie`, added the state root, made the `try_` surface truly
-fallible with branch poisoning, and re-derived the physical literals; its
+fallible with branch poisoning, and re-derived the physical literals; every
+block header now carries that root. Its
 `RootUpdate` charges now cover measured rehashing (see the
 [state trie notes](state-trie.md#engine-integration-node-step-n3b)).
 
 The [continuous full/light demo](full-light-demo.md) now implements:
-running producer and independent full followers, protocol-2 root-bearing
-headers, authenticated light followers, and a bounded complete equality-proof
+running producer and independent full followers, root-bearing headers,
+authenticated light followers, and a bounded complete equality-proof
 profile. N3c [engine storage v1](engine-storage-v1.md) now supplies
 disk-backed historical state with bounded loading and preparation. No
 pruning is included. The next work in the

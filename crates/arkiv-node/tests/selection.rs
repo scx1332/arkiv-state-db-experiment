@@ -1,6 +1,3 @@
-#![cfg(not(feature = "arkiv-v2"))]
-// These retained fixtures pin the legacy generic/signed protocol.
-// Arkiv v2 has separate host, profile and crash acceptance suites.
 //! Block selection: admin inputs first, strict FIFO transactions under the
 //! count, operation, byte and budget limits, the replay-side check, and the
 //! guarantee that a largest valid transaction fits an otherwise empty block.
@@ -19,10 +16,11 @@ use arkiv_node::{
 };
 use support::*;
 
-/// A transaction of `ops` puts with values of `value` bytes and 1-byte keys:
+/// A transaction of `ops` puts (into namespace 2; namespace 1 is the entity
+/// namespace) with values of `value` bytes and 1-byte keys:
 /// `72 + ops × (1 + 8 + 5 + 4 + value)` bytes.
 fn puts(n: u64, budget: u64, ops: usize, value: usize) -> TxEnvelope {
-    let ops = (0..ops).map(|_| put(1, b"k", &vec![0x55; value])).collect();
+    let ops = (0..ops).map(|_| put(2, b"k", &vec![0x55; value])).collect();
     tx(ALICE, n, budget, ops)
 }
 
@@ -187,7 +185,7 @@ fn a_largest_transaction_always_fits_an_otherwise_empty_block() {
         let pad = u64::from(params.max_tx_bytes) - base;
         let mut envelope = puts(1, params.user_budget, usize::try_from(ops).unwrap(), 0);
         let last = envelope.ops.len() - 1;
-        envelope.ops[last] = put(1, b"k", &vec![0x55; usize::try_from(pad).unwrap()]);
+        envelope.ops[last] = put(2, b"k", &vec![0x55; usize::try_from(pad).unwrap()]);
         assert_eq!(
             encode(&envelope).len() as u64,
             u64::from(params.max_tx_bytes)

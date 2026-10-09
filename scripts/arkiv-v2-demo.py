@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a separate unsigned Arkiv v2 producer/full/light trio. Never resets stores."""
+"""Run an unsigned Arkiv entity simulator producer/full/light trio. Never resets stores."""
 import argparse
 import json
 import os
@@ -31,9 +31,8 @@ def main():
     if args.binary:
         binary = args.binary.resolve()
     else:
-        # A separate target avoids replacing legacy tooling built without v2.
-        subprocess.run(["cargo", "build", "-p", "arkiv-node", "--features", "arkiv-v2", "--bin", "arkiv-simulator", "--target-dir", str(ROOT / "target/arkiv-v2")], cwd=ROOT, check=True)
-        binary = ROOT / "target/arkiv-v2/debug/arkiv-simulator"
+        subprocess.run(["cargo", "build", "-p", "arkiv-node", "--bin", "arkiv-simulator"], cwd=ROOT, check=True)
+        binary = ROOT / "target/debug/arkiv-simulator"
     token_file = directory / "private-token"
     if not token_file.exists():
         with os.fdopen(os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as output:
@@ -54,8 +53,9 @@ def main():
                 raise RuntimeError("Node exited; inspect role log in run directory")
             try:
                 result = status(port)
-                if result["capabilities"]["profile"] != "arkiv-entity-v2":
-                    raise RuntimeError("Wrong binary profile or occupied port")
+                capabilities = result["capabilities"]
+                if capabilities["profile"] != "arkiv-entity-v2" or "entityNamespace" not in capabilities:
+                    raise RuntimeError("Unexpected node or occupied port")
                 return result
             except (OSError, ValueError):
                 time.sleep(0.1)

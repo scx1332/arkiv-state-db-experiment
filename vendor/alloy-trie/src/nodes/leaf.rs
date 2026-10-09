@@ -78,7 +78,10 @@ impl LeafNode {
 
     /// Return leaf node as [LeafNodeRef].
     pub fn as_ref(&self) -> LeafNodeRef<'_> {
-        LeafNodeRef { key: &self.key, value: &self.value }
+        LeafNodeRef {
+            key: &self.key,
+            value: &self.value,
+        }
     }
 }
 
@@ -103,7 +106,11 @@ impl fmt::Debug for LeafNodeRef<'_> {
 impl Encodable for LeafNodeRef<'_> {
     #[inline]
     fn encode(&self, out: &mut dyn BufMut) {
-        Header { list: true, payload_length: self.rlp_payload_length() }.encode(out);
+        Header {
+            list: true,
+            payload_length: self.rlp_payload_length(),
+        }
+        .encode(out);
         encode_path_leaf(self.key, true).as_slice().encode(out);
         self.value.encode(out);
     }

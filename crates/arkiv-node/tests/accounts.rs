@@ -1,4 +1,3 @@
-#![cfg(feature = "arkiv-v2")]
 use alloy_primitives::U256;
 use arkiv_db::{
     Budget, CellName, OwnerId, Projection, SnapshotId, Value, decode_exact, durable::Options,
@@ -26,25 +25,18 @@ fn glm(n: u64) -> U256 {
     U256::from(n) * U256::from(1_000_000_000_000_000_000u64)
 }
 fn genesis() -> SignedGenesis {
-    let mut g = arkiv_node::demo::workload::genesis(9300, 1000);
-    g.admins.clear();
-    g.params.max_admin_per_block = 0;
-    g.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;
-    g.params.max_block_input_bytes = INPUT_CAP;
-    g.pricing = gas::schedule();
-    g.params.block_budget = 100_000_000;
-    g.params.user_budget = 90_000_000;
-    g.params.max_lifetime = 6_307_200;
-    SignedGenesis::new(g, [7; 16], *signer(1).address().as_bytes(), 1000)
-        .unwrap()
-        .with_accounts(
-            AccountConfig::new(vec![
-                (signer(1).address(), glm(10)),
-                (signer(2).address(), glm(2)),
-            ])
-            .unwrap(),
-        )
-        .unwrap()
+    SignedGenesis::new(
+        default_native_genesis(9300, 1000),
+        [7; 16],
+        *signer(1).address().as_bytes(),
+        1000,
+        AccountConfig::new(vec![
+            (signer(1).address(), glm(10)),
+            (signer(2).address(), glm(2)),
+        ])
+        .unwrap(),
+    )
+    .unwrap()
 }
 fn create_host(
     g: &SignedGenesis,
@@ -208,12 +200,9 @@ fn funded_lifecycle_fee_burn_replay_proofs_and_restart() {
 #[test]
 fn insufficient_funds_pending_reservation_and_exact_zero_balance() {
     let mut g = genesis();
-    g.accounts
-        .as_mut()
-        .unwrap()
-        .allocations
-        .push((signer(4).address(), accounts::fee(21_000)));
-    g.accounts = Some(AccountConfig::new(g.accounts.take().unwrap().allocations).unwrap());
+    let mut allocations = g.accounts.allocations.clone();
+    allocations.push((signer(4).address(), accounts::fee(21_000)));
+    g.accounts = AccountConfig::new(allocations).unwrap();
     let mut p = host(&g, true);
     p.produce().unwrap();
     let head = p.head;
@@ -257,7 +246,7 @@ fn insufficient_funds_pending_reservation_and_exact_zero_balance() {
         .prove_host(&accounts::account_key(signer(4).address()))
         .unwrap();
     let proved = arkiv_db::proof::verify_host(
-        p.head.state_root.unwrap(),
+        p.head.state_root,
         &accounts::account_key(signer(4).address()),
         &bytes,
     )
@@ -364,22 +353,14 @@ fn failed_operations_rollback_value_and_entities_but_pay_and_consume_nonce() {
     assert_eq!(balance(&p, 2), before - accounts::fee(21_000));
 }
 #[test]
-fn genesis_and_signature_commit_accounts_and_preserve_legacy_versions() {
+fn genesis_and_signature_commit_accounts() {
     let g = genesis();
     let bytes = encode(&g);
-    assert_eq!(&bytes[..4], &3u32.to_be_bytes());
+    assert_eq!(&bytes[..4], &VERSION.to_be_bytes());
     assert_eq!(decode_exact::<SignedGenesis>(&bytes).unwrap(), g);
-    let mut legacy = g.clone();
-    legacy.accounts = None;
-    assert_eq!(&encode(&legacy)[..4], &2u32.to_be_bytes());
-    assert_ne!(legacy.hash(), g.hash());
     let signed = tx(&g, 2, 0, 21_000, vec![transfer(3, U256::from(1))]);
-    assert_eq!(
-        signed.validate(&legacy).unwrap_err().0,
-        "UnsupportedAccountOperation"
-    );
     let mut changed = g.clone();
-    changed.accounts.as_mut().unwrap().allocations[0].1 += U256::from(1);
+    changed.accounts.allocations[0].1 += U256::from(1);
     assert_ne!(changed.hash(), g.hash());
     assert_eq!(signed.validate(&changed).unwrap_err().0, "IdentityMismatch");
     let mut signed = signed;
@@ -400,10 +381,10 @@ fn genesis_and_signature_commit_accounts_and_preserve_legacy_versions() {
         .is_err()
     );
     let mut bad = g.clone();
-    bad.accounts.as_mut().unwrap().gas_price_wei = 0;
+    bad.accounts.gas_price_wei = 0;
     assert!(bad.validate().is_err());
     let mut bad = g;
-    bad.accounts = Some(AccountConfig::new(vec![(signer(2).address(), glm(1))]).unwrap());
+    bad.accounts = AccountConfig::new(vec![(signer(2).address(), glm(1))]).unwrap();
     assert_eq!(bad.validate().unwrap_err().0, "UnfundedBootstrap");
 }
 #[test]
@@ -414,13 +395,13 @@ fn proofs_reject_wrong_key_root_truncation_and_tampering() {
     let snap = p.engine.head_snapshot();
     let key = accounts::account_key(signer(1).address());
     let mut bytes = snap.prove_host(&key).unwrap();
-    let root = p.head.state_root.unwrap();
+    let root = p.head.state_root;
     assert!(
         arkiv_db::proof::verify_host(root, &key, &bytes)
             .unwrap()
             .is_some()
     );
-    assert!(arkiv_db::proof::verify_host(g.header().state_root.unwrap(), &key, &bytes).is_err());
+    assert!(arkiv_db::proof::verify_host(g.header().state_root, &key, &bytes).is_err());
     assert!(arkiv_db::proof::verify_host(root, &key, &bytes[..bytes.len() - 1]).is_err());
     let last = bytes.len() - 1;
     bytes[last] ^= 1;
@@ -487,7 +468,7 @@ fn overflow_and_insufficient_value_are_atomic_with_charged_account_receipt() {
 #[test]
 fn full_u256_balance_can_be_spent_without_overflow() {
     let mut g = genesis();
-    g.accounts = Some(AccountConfig::new(vec![(signer(1).address(), U256::MAX)]).unwrap());
+    g.accounts = AccountConfig::new(vec![(signer(1).address(), U256::MAX)]).unwrap();
     let mut p = host(&g, true);
     p.produce().unwrap();
     let before = balance(&p, 1);

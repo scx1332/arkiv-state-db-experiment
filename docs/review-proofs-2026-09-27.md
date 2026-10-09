@@ -1,5 +1,10 @@
 # Database and query-proof design review — 27 September 2026
 
+> Historical review of 2026-09-27. At that time the node had an `arkiv-v2`
+> cargo feature, a generic default build and several gas profiles; the commands
+> and profile statements below describe that code. The node now has one build
+> (no feature flags) and `glm-v2`-only signed chains.
+
 Reviewed source baseline: `7f80db66bd68d3be135e1bd387ca4979e5387743`.
 Scope: authenticated database layout, index maintenance, equality-page proofs,
 complete numeric-range proofs, their verifier boundaries and resource policies.

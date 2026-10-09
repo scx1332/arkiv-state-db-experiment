@@ -5,7 +5,7 @@ use super::{
     light::{Light, VerifiedRequest, resolve},
     wire::*,
 };
-use arkiv_db::{B256, decode_exact};
+use arkiv_db::decode_exact;
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -111,7 +111,7 @@ pub fn validate_peer_with_policy(peer: &str, allow_private_http: bool) -> Result
     Ok(())
 }
 fn head_json(h: &crate::Header) -> Json {
-    json!({"height":h.height.to_string(),"hash":hex(h.hash().as_slice()),"stateRoot":hex(h.state_root.unwrap_or(B256::ZERO).as_slice())})
+    json!({"height":h.height.to_string(),"hash":hex(h.hash().as_slice()),"stateRoot":hex(h.state_root.as_slice())})
 }
 pub fn status(node: &Node) -> Json {
     let (id, head, paused, health, role, revision, workload, observed, memory) = match node {
@@ -141,7 +141,7 @@ pub fn status(node: &Node) -> Json {
             json!({"engineCacheBytes":"0","engineCacheEntries":0,"residentManifests":0}),
         ),
     };
-    json!({"apiVersion":1,"feedVersion":1,"sourceId":id.source_id,"runId":id.run_id,"genesisHash":id.genesis_hash,"chainId":id.chain_id,"sourceKind":"arkiv-native-simulator","authentication":"unsigned-simulator-v1","durability":"durable","head":head_json(head),"paused":paused,"health":health,"role":role,"configRevision":revision.to_string(),"projectionVersion":arkiv_db::LAYOUT_VERSION,"blockFormatVersion":crate::block::FORMAT_VERSION,"protocolVersion":crate::block::DEMO_PROTOCOL_VERSION,"coverage":{"from":"0","through":head.height.to_string(),"complete":true},"proofProfiles":[super::profile::PROOF_PROFILE],"capabilities":super::profile::capabilities(),"limits":{"feedPageBytes":FEED_CAP.to_string(),"pageItems":HEADER_BATCH},"workload":workload,"memory":memory,"observedPeerHeight":observed.to_string()})
+    json!({"apiVersion":1,"feedVersion":1,"sourceId":id.source_id,"runId":id.run_id,"genesisHash":id.genesis_hash,"chainId":id.chain_id,"sourceKind":"arkiv-native-simulator","authentication":"unsigned-simulator-v1","durability":"durable","head":head_json(head),"paused":paused,"health":health,"role":role,"configRevision":revision.to_string(),"projectionVersion":arkiv_db::LAYOUT_VERSION,"blockFormatVersion":crate::block::FORMAT_VERSION,"protocolVersion":crate::block::PROTOCOL_VERSION,"coverage":{"from":"0","through":head.height.to_string(),"complete":true},"proofProfiles":[super::profile::PROOF_PROFILE],"capabilities":super::profile::capabilities(&crate::demo::workload::genesis(0, 0).limits),"limits":{"feedPageBytes":FEED_CAP.to_string(),"pageItems":HEADER_BATCH},"workload":workload,"memory":memory,"observedPeerHeight":observed.to_string()})
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

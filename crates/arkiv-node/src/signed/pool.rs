@@ -55,7 +55,6 @@ pub struct Pool {
     params: ChainParams,
     genesis_hash: B256,
     chain_id: u64,
-    accounts: bool,
     senders: BTreeMap<OwnerId, BTreeMap<u64, Entry>>,
     requests: BTreeMap<(OwnerId, RequestId), u64>,
     count: usize,
@@ -85,7 +84,6 @@ impl Pool {
             params: genesis.genesis.params,
             genesis_hash: genesis.hash(),
             chain_id: genesis.genesis.chain_id,
-            accounts: genesis.accounts.is_some(),
             senders: BTreeMap::new(),
             requests: BTreeMap::new(),
             count: 0,
@@ -151,7 +149,7 @@ impl Pool {
     ) -> Result<Admission> {
         // Request retries and request conflicts bypass the new reservation. A valid
         // pending retry must not reserve the same funds twice.
-        if self.accounts && self.pending(tx.tx.actor, tx.tx.request_id).is_none() {
+        if self.pending(tx.tx.actor, tx.tx.request_id).is_none() {
             let need = self
                 .reserved(tx.tx.actor)?
                 .checked_add(
@@ -163,14 +161,6 @@ impl Pool {
             }
         }
         self.insert_inner(tx, next)
-    }
-    /// Call only after authentication, static checks and durable duplicate lookup.
-    /// The caller holds its writer lock and supplies the acknowledged state nonce.
-    pub fn insert_verified(&mut self, tx: SignedTx, committed_next: u64) -> Result<Admission> {
-        if self.accounts {
-            return Err(Error("BalanceRequired"));
-        }
-        self.insert_inner(tx, committed_next)
     }
     fn insert_inner(&mut self, tx: SignedTx, committed_next: u64) -> Result<Admission> {
         if tx.genesis_hash != self.genesis_hash || tx.tx.chain_id != self.chain_id {

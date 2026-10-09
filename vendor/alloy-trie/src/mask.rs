@@ -31,7 +31,10 @@ use derive_more::{
     Not,
 )]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "arbitrary", derive(derive_arbitrary::Arbitrary, proptest_derive::Arbitrary))]
+#[cfg_attr(
+    feature = "arbitrary",
+    derive(derive_arbitrary::Arbitrary, proptest_derive::Arbitrary)
+)]
 pub struct TrieMask(u16);
 
 impl fmt::Debug for TrieMask {
@@ -95,7 +98,11 @@ impl TrieMask {
     /// Returns the index of the first bit set in the mask, or `None` if the mask is empty.
     #[inline]
     pub const fn first_set_bit_index(self) -> Option<u8> {
-        if self.is_empty() { None } else { Some(self.0.trailing_zeros() as u8) }
+        if self.is_empty() {
+            None
+        } else {
+            Some(self.0.trailing_zeros() as u8)
+        }
     }
 
     /// Set bit at a specified index.

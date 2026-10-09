@@ -23,16 +23,16 @@ the harness patch, the scaled scenarios and the ported golem API tests.
   covers create, patch and delete, read targets, the branch lifecycle,
   first-committer-wins, checkpoint/rollback frames and seal/commit/discard.
   None of it needs a deep engine change.
-- **Ported golem API tests: 4 pass and 5 fail, on both the default and the
-  `arkiv-v2` build** (identical results; the default build used to fail all
-  of them because the fixture uses `i32`). Every remaining failure is either
+- **Ported golem API tests: 4 pass and 5 fail.** Every failure is either
   a golem-internal system record (`#alloc`, `#recordKeys`, `#roots`) or a
   read of an old commit. golem returns `CommitUnavailable` for an old
   commit, while we keep history and return the data. All user-visible
   record and branch behaviour passes. Two adapter tests (every golem cell
-  type round-trips; empty patch semantics) also pass on both builds.
-- **Every golem cell type is native** in both profiles, and an empty patch
-  is golem's no-op in the engine itself.
+  type round-trips; empty patch semantics) also pass.
+- **Every golem cell type is native,** with golem's type ids and byte
+  order, every attribute type supports range queries, golem's genesis
+  `cell_limits` are the engine's `Limits`, and an empty patch is golem's
+  no-op in the engine itself.
 - **The run found one engine performance bug,** which is fixed here: the
   durable object cache did a linear scan on every lookup.
 
@@ -40,12 +40,12 @@ the harness patch, the scaled scenarios and the ported golem API tests.
 
 1. **Durable object cache: O(1) lookups**
    (`crates/arkiv-db/src/durable/cache.rs`).
-   - **Before:** every lookup scanned the whole FIFO, and while the cache
+   - **The bug:** every lookup scanned the whole FIFO, and while the cache
      filled, `reserve_exact(1)` copied the whole ring on every insert.
      Durable creates were 3–6x slower than they needed to be. A larger
      cache made it much worse, down to 49 ops/s with single creates taking
      up to 380 ms.
-   - **Now:** a key → sequence index sits beside the FIFO, and the FIFO
+   - **The fix:** a key → sequence index sits beside the FIFO, and the FIFO
      grows geometrically up to the entry limit.
    - **Duplicate inserts** are skipped. Recovery clears the index, and a
      load is cached only if the cache generation is unchanged.
@@ -60,53 +60,43 @@ the harness patch, the scaled scenarios and the ported golem API tests.
 3. **The conformance kit** under `conformance/golem-db/`. It is not a
    workspace member.
 4. **golem's full cell type grid** (`crates/arkiv-db/src/record.rs`,
-   `codec.rs`). New engine type ids 12–25, admitted with the existing ids
-   6–11 by both profiles. The change is additive: ids 1–5, every encoding
-   and every root and golden vector are unchanged. Each type's term bytes
-   equal golem's stored value bytes, so index order is golem's order.
-   Encodings, golden vectors and the profile rationale are in
-   `docs/block-format.md` ("Value types"). The node's JSON forms are in
-   `crates/arkiv-node/src/value_json.rs`.
+   `codec.rs`). The engine's type id is golem's cell type id, and each
+   type's term bytes equal golem's stored value bytes, so index order is
+   golem's order. Encodings and golden vectors are in
+   `docs/block-format.md` ("Value types and order"). The node's JSON forms
+   are in `crates/arkiv-node/src/value_json.rs`.
 5. **Empty patch is golem's no-op** (`crates/arkiv-db/src/typed.rs`).
    `NotFound` for a missing record; otherwise it is applied, charges the
    lookups and the patch base weight, writes nothing, and leaves the state
-   root unchanged. `ArgumentFault::EmptyPatch` is retired (its codec tag
-   still decodes). The adapter no longer emulates it.
+   root unchanged.
+6. **Ranges on every attribute type** in golem's byte order, with range
+   proofs (`docs/range-proofs.md`).
+7. **Genesis-configurable cell limits** (`Limits::max_cell_name_len`,
+   `max_str_len`, `max_bytes_len`, `max_indexed_len`, within the hard caps
+   of 32-byte names and 128-byte indexed values). The adapter maps golem's
+   genesis `cell_limits` onto them.
 
 ### Type mapping
 
-| golem type (id) | engine type (id) | attribute | range queries | notes |
-|---|---|---|---|---|
-| `bool` (1) | `Bool` (1) | yes | no (eq) | same `00`/`01` |
-| `str` (2) | `Str` (4) | yes | no (eq, prefix) | length limits: engine `max_value_len`, indexed ≤ 64 B (128 B v2) |
-| `bytes` (3) | `Bytes` (5) | no (field-only) | – | same rule as golem |
-| `bytes20` (4) | `Addr` (10) | yes | no (eq) | golem's design names it Arkiv's `addr` |
-| `bytes4/8/16` (8–10) | `Bytes4/8/16` (12–14) | yes | no (eq) | new |
-| `bytes32` (11) | `Bytes32` (9) | yes | no (eq) | engine `Key` (11) also reads back as golem `bytes32` |
-| `u32` (12) | `U32` (15) | yes | yes | new |
-| `u64` (13) | `U64` (3) | yes | yes | |
-| `u128` (14) | `U128` (16) | yes | yes | new |
-| `u256` (15) | `U256` (7) | yes | yes | |
-| `i32` (16) | `I32` (6) | yes | yes | |
-| `i64` (17) | `I64` (2) | yes | yes | |
-| `i128` (18) | `I128` (17) | yes | yes | new |
-| `i256` (19) | `I256` (18) | yes | yes | new |
-| `dec32` (20) | `Dec32` (19) | yes | yes | new; scale 4 |
-| `dec64` (21) | `Dec64` (20) | yes | yes | new; scale 6 |
-| `dec128` (22) | `Dec128` (21) | yes | yes | new; scale 18 |
-| `dec256` (23) | `Dec` (8) | yes | yes | same scale 18 and two's complement |
-| `f32` / `f64` (24, 25) | `F32` / `F64` (22, 23) | yes | yes | new; NaN rejected, −0 → +0, infinities kept, IEEE total order |
-| `date32` (28) | `Date32` (24) | yes | yes | new; days since epoch |
-| `timestamp64` (29) | `Timestamp64` (25) | yes | yes | new; µs since epoch |
+The engine id equals golem's id for every golem type.
 
-golem's API has no queries, so "range queries" is our engine's query subset.
-golem orders every attribute bytewise; we allow range predicates only on
-numeric and time types, while `bool`, `str` and fixed bytes get equality
-(and `str` prefix). The index order matches golem's in every case. Storage
-encodings differ from golem's on purpose: we store signed values in plain
-two's complement and floats as IEEE bits, and order-encode only in term
-keys. That costs nothing, because golem's value bytes are reproduced
-exactly by `Value::term_bytes`.
+| golem type (id) | engine type | attribute | range queries | notes |
+|---|---|---|---|---|
+| `bool` (1) | `Bool` | yes | yes | `false < true` |
+| `str` (2) | `Str` | yes | yes (and prefix) | UTF-8 bytewise; indexed length ≤ `max_indexed_len` (≤ 128 B) |
+| `bytes` (3) | `Bytes` | no (field-only) | – | same rule as golem |
+| `bytes20` (4) | `Addr` | yes | yes | golem's design names it Arkiv's `addr` |
+| `bytes4/8/16/32` (8–11) | `Bytes4/8/16/32` | yes | yes | unsigned bytewise; engine `Key` (64) reads back as golem `bytes32` |
+| `u32`–`u256` (12–15) | `U32`–`U256` | yes | yes | |
+| `i32`–`i256` (16–19) | `I32`–`I256` | yes | yes | |
+| `dec32`–`dec256` (20–23) | `Dec32`, `Dec64`, `Dec128`, `Dec` | yes | yes | scales 4, 6, 18, 18 |
+| `f32` / `f64` (24, 25) | `F32` / `F64` | yes | yes | NaN rejected, −0 → +0, infinities kept, IEEE total order |
+| `date32` (28) | `Date32` | yes | yes | days since epoch |
+| `timestamp64` (29) | `Timestamp64` | yes | yes | µs since epoch |
+
+golem's API has no queries, so "range queries" is our engine's query
+subset. The index order matches golem's bytewise attribute order for every
+type, and fixed-width values are stored as golem's value bytes.
 
 ## Results (ops/s; seal / commit p50 in ms)
 
@@ -116,7 +106,7 @@ rough. Our durable runs use the default object cache (8 MiB / 16384
 entries). Raw logs: `S/conf/runs` for the unmodified engine and
 `S/final-runs` after the fixes, where `S` is the scratchpad.
 
-| Scenario | golem-db (MDBX) | arkiv durable, before fix | arkiv durable, after fix |
+| Scenario | golem-db (MDBX) | arkiv durable, linear-scan cache | arkiv durable, indexed cache |
 |---|---|---|---|
 | index-layout/1-no-index | 3674 (177 / 99.5) | 9468 (4.6 / 25.2) | 23286 (4.7 / 25.7) |
 | index-layout/2-same-term | 3702 (172 / 97.5) | 8691 (5.0 / 24.2) | 21369 (4.9 / 24.4) |
@@ -136,28 +126,20 @@ entries). Raw logs: `S/conf/runs` for the unmodified engine and
   file, even though we keep every snapshot.
 - **Concurrent writers:** about 87% of branch attempts lose the race on our
   engine, against 64% on golem-db.
-- **After the type-grid and empty-patch changes** (default build, durable,
-  same setup): commit-growth 5613 ops/s (seal/commit p50 0.17 / 1.33 ms),
+- **With the type grid and empty-patch change** (durable, same setup):
+  commit-growth 5613 ops/s (seal/commit p50 0.17 / 1.33 ms),
   block-size/2 4975, 5309 and 5407 ops/s over three runs (seal/commit p50
   1.31–1.40 / 9.7–10.6 ms). That is within run-to-run noise of the
-  "after fix" column. Logs: `S/types-runs`.
+  indexed-cache column. Logs: `S/types-runs`.
 - **golem's own tests:** on golem-db itself, `cargo test -p golemdb-api`
   passes 15 tests and the integration `api` target passes 26.
 
-## Gaps not fixed here
+## Remaining differences
 
-- **Empty patch: fixed.** It is golem's no-op in the engine (see change 5).
-- **Value types: fixed.** Both profiles have every golem cell type (see the
-  type mapping). The remaining differences are by design: range predicates
-  only on ordered (numeric and time) types, and the engine-only `Key` type,
-  which golem sees as `bytes32`.
-- **Fixed limits.** Cell names are capped at 20 bytes (32 with `arkiv-v2`)
-  and indexed values at 64 bytes (128). golem sets both in its genesis.
-  Moving them into `Limits` would be a moderate change. The harness itself
-  stays within them: its names are at most 10 bytes and its `ref` value is
-  exactly 64 bytes.
+- **Key type.** The engine-only `Key` type (id 64) has no golem
+  counterpart; golem sees it as `bytes32`.
 - **Hash.** We support Keccak only. golem can also use Blake3, which the
-  harness never selects; the adapter accepts the setting but uses Keccak.
+  harness never selects; the adapter refuses a Blake3 genesis.
 - **Roots and system records.** We have one state root, with no separate
   index root. golem's `#alloc`, `#recordKeys` and `#roots` records have no
   equivalent. These are different designs, not bugs.

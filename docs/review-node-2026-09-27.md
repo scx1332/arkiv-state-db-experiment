@@ -1,5 +1,10 @@
 # Node execution and signed replication review — 27 September 2026
 
+> Historical review of 2026-09-27. At that time the node had an `arkiv-v2`
+> cargo feature, a generic default build and several gas profiles; the commands
+> and profile statements below describe that code. The node now has one build
+> (no feature flags) and `glm-v2`-only signed chains.
+
 Scope: source review of `crates/arkiv-node` signed protocol, execution, accounts,
 gas, mempool, HTTP replication and Ethereum compatibility; focused local tests.
 This is a code/design review, not a consensus audit or proof of production safety.

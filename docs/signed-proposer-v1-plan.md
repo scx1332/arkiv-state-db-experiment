@@ -6,6 +6,12 @@ on engine commit `e12a364`; preserve its query parser/classification changes.
 It concerns a new, explicitly selected signed chain profile. It does not reset,
 migrate or deploy over the retained unsigned simulator.
 
+This plan is the design record of that step. The node has since been unified:
+there is no `arkiv-v2` cargo feature or separate generic protocol (the "legacy"
+codecs and the feature gate it mentions no longer exist), every signed chain is
+`glm-v2` with funded accounts, and the signed genesis has a single version.
+The [implementation guide](signed-proposer-v1.md) describes the current code.
+
 ## Decision
 
 Use Alloy's primitive hash/address/signature types and its k256 implementation

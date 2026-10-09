@@ -278,7 +278,10 @@ pub(crate) fn validate_query(
                 }
                 // A `Str` bound obeys the indexed-string limit, as an
                 // equality value does: the seek key holds its bytes.
-                for bound in [bound_value(lower), bound_value(upper)].into_iter().flatten() {
+                for bound in [bound_value(lower), bound_value(upper)]
+                    .into_iter()
+                    .flatten()
+                {
                     validate_value(limits, bound)?;
                 }
             }

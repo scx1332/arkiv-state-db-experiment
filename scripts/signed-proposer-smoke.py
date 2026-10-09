@@ -83,11 +83,11 @@ def main():
             processes.clear()
 
         try:
-            for name in ("producer", "alice", "bob"):
-                cli("keygen", "--out", directory / (name + ".key"))
+            addresses = {name: cli("keygen", "--out", directory / (name + ".key")) for name in ("producer", "alice", "bob")}
+            (directory / "allocations.json").write_text(json.dumps({address: str(1000 * 10**18) for address in addresses.values()}))
             producer = ["producer", "--run-dir", str(directory / "producer"), "--key-file", str(directory / "producer.key"),
                         "--listen", endpoints["producer"].removeprefix("http://"), "--private-listen", endpoints["private"].removeprefix("http://"),
-                        "--block-period-ms", "100"]
+                        "--allocations-file", str(directory / "allocations.json"), "--block-period-ms", "100"]
             start("producer", producer)
             status = request(endpoints["producer"], "status")
             assert status["authentication"] == "signed-proposer-v1"

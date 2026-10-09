@@ -3,8 +3,7 @@ WORKDIR /work
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY vendor ./vendor
-ARG SIMULATOR_FEATURES=
-RUN cargo build --locked --release -p arkiv-node --bin arkiv-simulator --features "$SIMULATOR_FEATURES"
+RUN cargo build --locked --release -p arkiv-node --bin arkiv-simulator
 
 FROM debian:bookworm-slim
 # curl serves container health checks against the public status endpoint.

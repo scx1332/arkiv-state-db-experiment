@@ -48,7 +48,11 @@ fn engine(limits: Limits) -> (Engine, arkiv_db::Branch) {
     (engine, branch)
 }
 
-fn create(branch: &mut arkiv_db::Branch, key: &[u8], cells: Vec<(CellName, Cell)>) -> Result<(), Rejection> {
+fn create(
+    branch: &mut arkiv_db::Branch,
+    key: &[u8],
+    cells: Vec<(CellName, Cell)>,
+) -> Result<(), Rejection> {
     branch
         .execute(
             OWNER,
@@ -118,10 +122,16 @@ fn limits_above_the_caps_are_invalid() {
         ),
     ] {
         assert_eq!(limits.validate(), Err(reason));
-        assert!(std::panic::catch_unwind(|| Engine::with_limits(PriceSchedule::FIXTURE, limits)).is_err());
+        assert!(
+            std::panic::catch_unwind(|| Engine::with_limits(PriceSchedule::FIXTURE, limits))
+                .is_err()
+        );
         let mut genesis = EngineGenesis::new([1; 32], PriceSchedule::FIXTURE);
         genesis.limits = limits;
-        assert_eq!(kind(genesis.validate().unwrap_err()), StorageErrorKind::Incompatible);
+        assert_eq!(
+            kind(genesis.validate().unwrap_err()),
+            StorageErrorKind::Incompatible
+        );
     }
     // Zero is a valid string, bytes or indexed limit, as in golem-db.
     let zero = Limits {
@@ -139,11 +149,19 @@ fn names_longer_than_the_limit_are_rejected_in_every_write() {
     let ok = name(&"n".repeat(10));
     let long = name(&"n".repeat(11));
     assert_eq!(
-        create(&mut branch, b"a", vec![(ok.clone(), Cell::field(Value::Bool(true)))]),
+        create(
+            &mut branch,
+            b"a",
+            vec![(ok.clone(), Cell::field(Value::Bool(true)))]
+        ),
         Ok(())
     );
     assert_eq!(
-        create(&mut branch, b"b", vec![(long.clone(), Cell::field(Value::Bool(true)))]),
+        create(
+            &mut branch,
+            b"b",
+            vec![(long.clone(), Cell::field(Value::Bool(true)))]
+        ),
         invalid(ArgumentFault::NameTooLong)
     );
     for (set, remove) in [
@@ -170,7 +188,10 @@ fn names_longer_than_the_limit_are_rejected_in_every_write() {
         create(
             &mut branch,
             b"c",
-            vec![(name(&format!("${}", "n".repeat(10))), Cell::field(Value::Bool(true)))]
+            vec![(
+                name(&format!("${}", "n".repeat(10))),
+                Cell::field(Value::Bool(true))
+            )]
         ),
         invalid(ArgumentFault::NameTooLong)
     );
@@ -202,7 +223,11 @@ fn str_bytes_and_indexed_strings_have_separate_limits() {
     ];
     for (index, (cell, expected)) in cases.into_iter().enumerate() {
         assert_eq!(
-            create(&mut branch, &[index as u8 + 1], vec![(name("c"), cell.clone())]),
+            create(
+                &mut branch,
+                &[index as u8 + 1],
+                vec![(name("c"), cell.clone())]
+            ),
             expected,
             "{cell:?}"
         );
@@ -212,14 +237,23 @@ fn str_bytes_and_indexed_strings_have_separate_limits() {
 #[test]
 fn query_strings_obey_the_indexed_limit() {
     let (mut engine, mut branch) = engine(SMALL);
-    create(&mut branch, b"a", vec![(name("c"), Cell::attribute(Value::str("abc")))]).unwrap();
+    create(
+        &mut branch,
+        b"a",
+        vec![(name("c"), Cell::attribute(Value::str("abc")))],
+    )
+    .unwrap();
     engine.publish(&branch.seal()).unwrap();
     let snapshot = engine.head_snapshot();
     let long = "x".repeat(17);
     for term in [
         Term::eq(name("c"), Value::str(&long)),
         Term::starts_with(name("c"), &long),
-        Term::range(name("c"), Bound::Included(Value::str(&long)), Bound::Unbounded),
+        Term::range(
+            name("c"),
+            Bound::Included(Value::str(&long)),
+            Bound::Unbounded,
+        ),
     ] {
         let rejected = snapshot
             .query(
@@ -257,7 +291,10 @@ fn durable_genesis_persists_the_limits_and_rejects_a_mismatch() {
     let store = Arc::new(MemoryVersionedStore::new());
     let mut genesis = EngineGenesis::new([5; 32], PriceSchedule::FIXTURE);
     genesis.limits = SMALL;
-    assert_eq!(decode_exact::<EngineGenesis>(&encode(&genesis)).unwrap(), genesis);
+    assert_eq!(
+        decode_exact::<EngineGenesis>(&encode(&genesis)).unwrap(),
+        genesis
+    );
     let Initialization::Committed(engine) =
         DurableEngine::initialize(store.clone(), genesis.clone(), Options::default()).unwrap()
     else {

@@ -40,7 +40,9 @@ impl ProofNodes {
 
     /// Return the vec of proof nodes that match the target.
     pub fn matching_nodes(&self, target: &Nibbles) -> Vec<(Nibbles, Bytes)> {
-        self.matching_nodes_iter(target).map(|(key, node)| (*key, node.clone())).collect()
+        self.matching_nodes_iter(target)
+            .map(|(key, node)| (*key, node.clone()))
+            .collect()
     }
 
     /// Return the sorted vec of proof nodes that match the target.

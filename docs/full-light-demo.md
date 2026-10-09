@@ -1,8 +1,11 @@
 # Continuous full-node and light-node demo
 
 Status: implemented bounded demo profile, 2026-09-24. The producer, full
-and light processes, protocol-2 execution and complete equality-proof API
-are present. [Run and test the demo](full-light-demo-run.md); see the
+and light processes, root-bearing execution and complete equality-proof API
+are present. This contract was written while the block format still had a
+header without a state root; today every chain uses the single block format
+(version 1, protocol 1) in which every header carries its state root, so the
+"activation" rules below describe that format. [Run and test the demo](full-light-demo-run.md); see the
 [literal proof charge vectors](eq-proof-charges.md). This contract records
 the implementation's scope, trust assumptions and acceptance requirements.
 
@@ -40,7 +43,7 @@ Follower replay is not durable engine recovery or completion of N3c/N4.
 | Foundation today | Demo addition |
 | --- | --- |
 | `arkiv-node/src/replay.rs`: `MemoryChain::produce`, `apply`, historical snapshots and request identities | Process roles, a bounded queue, complete block/body retention, transport and catch-up. `apply` already compares re-executed outcomes and header bytes before publication. |
-| `arkiv-node/src/block.rs`: v1/v2 header encoding and hashes | Activate protocol 2 through genesis validation, successor validation and execution. Protocol 2 now activates the existing v2 serialization; legacy protocol 1 remains replayable. |
+| `arkiv-node/src/block.rs`: header encoding and hashes | Every header carries the terminal state root; genesis, successor validation and execution commit it. |
 | `arkiv-node/src/exec.rs`: one executor, admin/expiry/user sequencing, sealed terminal candidate | Put that candidate's state root in each produced v2 header, and compare it on full-node application before publication. |
 | `arkiv-db/src/state.rs` and `layout.rs`: state format 1, catalog roots, namespace map roots and canonical leaves | Bounded engine proof generation and stateless decoding/verification of the needed catalog, term, row and key-binding evidence. These layout types are mostly private today. |
 | `arkiv-db-trie`: point proofs and strict `walk` verifier | Compose those proofs up to a trusted state root; reconstruct a complete equality posting set to prove page completeness. Map-level point proofs alone are insufficient. |
@@ -128,22 +131,18 @@ cannot round heights, ids or values. Reject unknown
 fields/tags/versions and malformed or oversized payloads before allocation.
 Hashed/signed objects use canonical binary bytes, never JSON text.
 
-### Protocol 2 activation
+### State-root commitment
 
-Protocol-2 genesis uses the existing genesis layout with `protocol_version
-= 2`. Its height-zero header is v2 and contains the root of the initial
+The genesis's height-zero header contains the root of the initial
 engine (genesis pricing, empty catalog and host map). Its inputs digest is
 the existing genesis digest, outcomes are empty, and parent hash is zero.
 Compute the genesis root before hashing the header; do not put the genesis
 block hash or any block's own hash in engine state.
 
 For every later height B, seal after admin inputs, expiry and transactions;
-set `header.state_root = Some(candidate.state_root())`. This is the state
+set `header.state_root = candidate.state_root()`. This is the state
 **after B**. `MemoryChain::apply` must compare this root before publishing,
-including on empty blocks. A root-bearing header without a correctly
-activated protocol-2 genesis is invalid. Use a new development genesis;
-do not rewrite an old protocol-1 chain. Preserve v1 codec fixtures and any
-explicit legacy replay support, but never accept v1 headers in this demo.
+including on empty blocks.
 
 ### Authentication envelope
 
@@ -196,7 +195,7 @@ negative answers.
    node constructs its own genesis engine; the light node validates the
    pinned genesis header and initial state commitment without loading rows.
 2. Poll from the last locally accepted `(height, hash)`. Validate the
-   authentication envelope, genesis identity, protocol/header version,
+   authentication envelope, genesis identity, format version,
    chain id, exact next height, parent hash and nondecreasing timestamp.
    Reject counter overflow. Apply each valid prefix atomically per block;
    a later bad entry must not roll back that prefix or advance past it.
@@ -453,7 +452,7 @@ steps, each with its relevant acceptance tests:
 
 | Step | Deliverable and exit gate |
 | --- | --- |
-| D0: freeze demo formats and activation | Protocol-2 genesis/root timing; signed header, trust configuration, query/proof/cursor/error codecs and resource/charge rules with literal golden vectors. Existing v1 vectors stay unchanged. No runtime yet. |
+| D0: freeze demo formats | Genesis/root timing; signed header, trust configuration, query/proof/cursor/error codecs and resource/charge rules with literal golden vectors. No runtime yet. |
 | D1: producer and full follower | N1 process/queue/manual and interval production, retained bodies and snapshots, bounded RPC/polling and independent full execution with v2 root checks. Late join, reconnect and false-root tests pass. |
 | D2: proof core | The in-memory N3d subset needed here (catalog/term/row/key proofs), complete Eq posting reconstruction and stateless verifier. Oracle, missing-result, absence, historical, cursor and resource tests pass without an RPC server. Other N3d point-read APIs remain pending if not delivered. |
 | D3: light follower and integrated demo | Header-only follow, bounded query/proof RPC, verifier-owned continuations, status view/workload and multi-process adversarial scenarios. Light query verification succeeds with no engine instance or block body access. |

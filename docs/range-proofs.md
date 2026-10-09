@@ -1,15 +1,28 @@
-# Complete index-backed numeric ranges
+# Complete index-backed ranges
 
-`range-complete-v1` proves one typed numeric attribute range at one selected
+`range-complete-v1` proves one typed attribute range at one selected
 snapshot. It supports inclusive/exclusive lower and upper bounds, or one
-unbounded end. At least one bound is required and both ends must have the same
-numeric type. The engine supports every ordered type in both profiles: the
-integers `i32`/`i64`/`i128`/`i256` and `u32`/`u64`/`u128`/`u256`, the decimals
-`dec32`/`dec64`/`dec128`/`dec`, the floats `f32`/`f64` and the time types
-`date32`/`timestamp64` (`TypeTag::is_ordered`); the signed Arkiv HTTP adapter accepts its existing scalar
-profile (`u64`, `i32`, `u256`, `dec`). Reversed bounds and equal excluded bounds
-produce a complete empty result. Different types, fields, and missing attributes
-do not match. All cells and keys of matching rows are returned in RecordId order.
+unbounded end. At least one bound is required and both ends must have the
+same type. Every indexable type is ordered (`TypeTag::is_ordered`: every
+type except `Bytes`), in golem-db's attribute order, the bytewise order of
+the term bytes: numeric for the integers, decimals and time types, IEEE
+total order for the floats, `false < true`, unsigned bytewise for `addr`,
+`bytes4/8/16/32` and `key`, and UTF-8 bytewise for `str` (a proper prefix
+first, `"" < "a" < "a\0" < "ab"`; see `docs/block-format.md`, "Value types
+and order"). A `str` bound is at most the engine's indexed-string limit
+(`Limits::indexed_value_len`, hard cap 128 bytes), as for equality. The
+signed HTTP adapter (`/signed/v1/query/range/*`) accepts the same types it
+resolves for equality requests. Reversed bounds and equal excluded bounds
+produce a complete empty result; so does an excluded upper bound of `""`,
+which nothing is below. Different types, fields, and missing attributes do
+not match. All cells and keys of matching rows are returned in RecordId
+order.
+
+The proof walks the term map's closed key interval. An excluded lower bound
+starts at the bound's fixed-width successor key (its length byte plus one,
+which never carries); an excluded upper bound ends at its predecessor key,
+which for the empty string borrows into the presence byte and falls below
+the run, giving the empty interval.
 
 There is **no pagination**: no query limit, offset, cursor or continuation.
 An oversized result returns `ProofLimitExceeded` or `BudgetExceeded`; it never
@@ -39,7 +52,7 @@ Use the opt-in engine experiment to measure larger proofs independently of
 those transport and inspector limits:
 
 ```sh
-RANGE_BENCH_ROWS=10000 cargo test --release -p arkiv-db --features arkiv-v2 \
+RANGE_BENCH_ROWS=10000 cargo test --release -p arkiv-db \
   --test range_proofs range_scaling_experiment -- --ignored --nocapture
 ```
 
@@ -76,9 +89,8 @@ block hash and state root. The signed light client anchors this state root in an
 accepted producer certificate and applies existing Arkiv row/lifetime checks.
 As with equality proofs, completeness relies on the authenticated execution
 invariant that indexes describe live rows; this is not a consensus or execution
-proof. State layout, equality proof bytes, write rules and query planning are
-unchanged. No migration or chain reset is required. The text-query grammar is
-unchanged; ranges use the dedicated API. The separate light-node frontend now
+proof. Ranges use the dedicated API; the text-query grammar keeps the
+reference Arkiv rules. The separate light-node frontend now
 exposes runnable numeric-range examples at `/queries` and a walkthrough at
 `/range-explained`.
 

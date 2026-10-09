@@ -1,4 +1,3 @@
-#![cfg(feature = "arkiv-v2")]
 //! Signed execution, independent replay, retained metadata and publication faults.
 use arkiv_db::{
     B256, Budget, CellName, OwnerId, Projection, RecordKey, Value,
@@ -15,28 +14,18 @@ use arkiv_node::{
     Expiry, HostFault, OpOutcome, TxEnvelope, TxOp, TxStatus,
     arkiv::{self, ArkivFault, ArkivOperation},
     signed::{
-        crypto::Signer,
         history::History,
         host::{HeaderRecord, Host},
         light::Light,
-        protocol::{
-            INPUT_CAP, SIGNED_TX_OVERHEAD, SignedBlock, SignedGenesis, SignedHeader, SignedTx,
-            TX_CAP,
-        },
+        protocol::{SignedBlock, SignedGenesis, SignedHeader, SignedTx},
     },
 };
 use std::sync::Arc;
 
-fn signer(byte: u8) -> Signer {
-    Signer::from_bytes([byte; 32]).unwrap()
-}
+mod signed_support;
+use signed_support::signer;
 fn genesis() -> SignedGenesis {
-    let mut native = arkiv_node::demo::workload::genesis(9100, 1000);
-    native.admins.clear();
-    native.params.max_admin_per_block = 0;
-    native.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;
-    native.params.max_block_input_bytes = INPUT_CAP;
-    SignedGenesis::new(native, [7; 16], *signer(1).address().as_bytes(), 100).unwrap()
+    signed_support::genesis(9100, 1000, [7; 16], 1, 100, &[1, 2, 3])
 }
 fn create(
     state: Arc<dyn VersionedStore>,
@@ -105,8 +94,8 @@ fn create_entity(salt: u128, payload: &[u8]) -> ArkivOperation {
         salt,
         flags: 0,
         expiry: Expiry {
-            expires_at: u64::MAX,
-            min_lifetime: 0,
+            expires_at: 0,
+            min_lifetime: 1_000,
         },
         attributes: vec![
             (CellName::new("group").unwrap(), Value::U64(1)),
@@ -262,7 +251,7 @@ fn signed_lifecycle_replays_bootstrap_ownership_failures_and_native_proofs() {
             genesis_hash: genesis().hash(),
             height: producer.head.height,
             block_hash: producer.head.hash(),
-            state_root: producer.head.state_root.unwrap(),
+            state_root: producer.head.state_root,
         },
         query: EqQuery {
             namespace: arkiv::entity_namespace(),
@@ -335,11 +324,12 @@ fn multi_operation_failure_rolls_back_entity_nonce_but_consumes_transaction_nonc
     assert!(block.outcomes.txs[0].spent > 0);
     assert_eq!(
         block.outcomes.txs[0].spent,
-        block.outcomes.txs[0]
-            .ops
-            .iter()
-            .map(OpOutcome::spent)
-            .sum::<u64>()
+        arkiv_node::gas::TX_INTRINSIC_GAS
+            + block.outcomes.txs[0]
+                .ops
+                .iter()
+                .map(OpOutcome::spent)
+                .sum::<u64>()
     );
     assert_eq!(producer.committed_nonce(alice).unwrap(), 2);
     assert_eq!(creation_nonce(&producer, alice), 2);
@@ -507,7 +497,7 @@ fn full_replay_rejects_authenticated_but_invalid_body_nonce_root_outcomes_and_pa
                 recertify(&mut invalid);
             }
             2 => {
-                invalid.header.header.state_root = Some(B256::repeat_byte(0x55));
+                invalid.header.header.state_root = B256::repeat_byte(0x55);
                 recertify(&mut invalid);
             }
             3 => {
@@ -560,7 +550,8 @@ fn included_budget_failure_consumes_nonce_before_the_same_block_successor() {
     let mut producer = memory(true);
     producer.produce().unwrap();
     let mut cheap = tx(2, 0, 1, vec![create_entity(10, b"over budget")]);
-    cheap.tx.tx_budget = 1;
+    // Only the intrinsic charge fits; the create runs out of budget.
+    cheap.tx.tx_budget = arkiv_node::gas::TX_INTRINSIC_GAS;
     cheap = SignedTx::sign(&genesis(), 0, cheap.tx, &signer(2)).unwrap();
     let succeeds = tx(
         2,
@@ -609,7 +600,7 @@ fn full_independently_enforces_authorized_successful_namespace_bootstrap() {
             }];
         }
         if mutation == 2 {
-            envelope.tx_budget = 1;
+            envelope.tx_budget = arkiv_node::gas::TX_INTRINSIC_GAS;
         }
         invalid.inputs.txs[0] =
             SignedTx::sign(&genesis(), 0, envelope, &signer(signing_key)).unwrap();
@@ -650,7 +641,7 @@ fn full_authentic_equivocation_freezes_history_and_changed_signer_cannot_reopen(
     );
     assert_eq!(message(wrong_signer), "IdentityMismatch");
     let mut other = producer.block(2).unwrap();
-    other.header.header.state_root = Some(B256::repeat_byte(0x99));
+    other.header.header.state_root = B256::repeat_byte(0x99);
     recertify(&mut other);
     let mut forged = other.clone();
     forged.header.signature = [0; 65];
@@ -774,7 +765,7 @@ fn pending_engine_candidate_cannot_resume_after_authenticated_conflict() {
     );
     let commits = state.stats().committed;
     let mut other = first.header;
-    other.header.state_root = Some(B256::repeat_byte(0xee));
+    other.header.state_root = B256::repeat_byte(0xee);
     other = SignedHeader::sign(&genesis(), other.header, &signer(1)).unwrap();
     assert_eq!(message(full.observe_certificate(&other)), "ChainConflict");
     assert_eq!(message(full.retry_pending()), "ChainConflict");

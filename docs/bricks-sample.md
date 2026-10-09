@@ -4,15 +4,13 @@ On GLM chains, native `TxOp::Arkiv` operations accept any existing namespace.
 The signed admission and execution paths still prohibit generic record writes
 and namespace transfers under this pricing profile. Arkiv keeps per-entity
 ownership, system cells, finite lifetimes, storage rent and atomic rollback.
-Legacy profiles continue to restrict Arkiv operations to namespace one because
-their other namespaces admit generic writes. Ethereum/SDK APIs keep namespace
+Chains without GLM pricing (the unsigned simulator and demo) restrict Arkiv
+operations to namespace one because their other namespaces admit generic writes. Ethereum/SDK APIs keep namespace
 one as their default; explicit namespace selection uses native transactions.
 
 Records, indexes, equality proofs, due counts and expiry sweeps already include
 the namespace. Creation counters remain shared per actor, preserving distinct
-entity keys across namespaces. No state migration or reset is required for this
-sample chain update. An old binary must not replay blocks using this newly
-accepted operation; update producer and followers together before seeding.
+entity keys across namespaces.
 
 `scripts/seed-bricks.py` adds one atomic batch of 16 toy bricks to an existing
 `bricks` namespace. Indexed attributes include `sample`, `sku`, `color`, `size`,

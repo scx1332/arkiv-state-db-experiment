@@ -1,6 +1,3 @@
-#![cfg(not(feature = "arkiv-v2"))]
-// These retained fixtures pin the legacy generic/signed protocol.
-// Arkiv v2 has separate host, profile and crash acceptance suites.
 //! Golden vectors for block format version 1.
 //!
 //! Every expected byte string is assembled here from the specification in
@@ -16,15 +13,18 @@ mod support;
 
 use std::fmt::Debug;
 
-use alloy_primitives::keccak256;
+use alloy_primitives::{U256, keccak256};
 use arkiv_db::{
     B256, Cost, Decode, DecodeError, Effect, Encode, Outcome, PriceSchedule, Receipt, ReceiptKind,
-    RecordId, Rejection, Revision, Value, decode_exact, encode,
+    RecordId, RecordKey, Rejection, Revision, Value, decode_exact, encode,
 };
 use arkiv_node::{
     AdminAction, AdminInput, AdminOutcome, AdminRejection, Block, BlockInputs, BlockOutcomes,
-    Expiry, ExpiryDeletion, ExpiryFault, Genesis, Header, HostFault, Inclusion, MAX_ADMIN_BYTES,
-    OpOutcome, RequestIdentity, Scope, TxEnvelope, TxOp, TxOutcome, TxStatus,
+    ChainSpec, Expiry, ExpiryDeletion, ExpiryFault, Genesis, Header, HostFault, Inclusion,
+    MAX_ADMIN_BYTES, MemoryChain, OpOutcome, RequestIdentity, Scope, TxEnvelope, TxOp, TxOutcome,
+    TxStatus,
+    accounts::AccountFault,
+    arkiv::{ArkivFault, ArkivOperation},
 };
 use support::*;
 
@@ -208,7 +208,7 @@ fn genesis_versions_are_checked() {
         );
     }
     let mut bytes = genesis_bytes();
-    for version in [0u32, 3, u32::MAX] {
+    for version in [0u32, 2, u32::MAX] {
         bytes[4..8].copy_from_slice(&version.to_be_bytes());
         rejects::<Genesis>(
             &bytes,
@@ -233,16 +233,16 @@ fn genesis_versions_are_checked() {
 
 #[test]
 fn headers_and_block_hashes() {
-    let v1 = Header {
+    let header = Header {
         chain_id: CHAIN,
         height: 5,
         parent_hash: hash(0x11),
         timestamp_ms: 6_000,
         inputs_digest: hash(0x22),
         outcomes_digest: hash(0x33),
-        state_root: None,
+        state_root: hash(0x44),
     };
-    let v1_bytes = cat(&[
+    let bytes = cat(&[
         &be32(1),
         &be64(CHAIN),
         &be64(5),
@@ -250,54 +250,35 @@ fn headers_and_block_hashes() {
         &be64(6_000),
         &[0x22; 32],
         &[0x33; 32],
+        &[0x44; 32],
     ]);
-    assert_eq!(v1_bytes.len(), 124);
-    golden(&v1, &v1_bytes);
-    assert_eq!(v1.version(), 1);
-    assert_eq!(v1.hash(), digest_of("arkiv/header/v1", &v1_bytes));
-
-    let v2 = Header {
-        state_root: Some(hash(0x44)),
-        ..v1
-    };
-    let mut v2_bytes = v1_bytes.clone();
-    v2_bytes[..4].copy_from_slice(&be32(2));
-    v2_bytes.extend_from_slice(&[0x44; 32]);
-    golden(&v2, &v2_bytes);
-    assert_eq!(v2.version(), 2);
-    assert_eq!(v2.hash(), digest_of("arkiv/header/v2", &v2_bytes));
-
-    // The same fields under the other version's domain hash differently.
-    assert_ne!(v1.hash(), digest_of("arkiv/header/v2", &v1_bytes));
-    for version in [0u32, 3, u32::MAX] {
-        let mut bytes = v1_bytes.clone();
-        bytes[..4].copy_from_slice(&version.to_be_bytes());
+    assert_eq!(bytes.len(), 156);
+    golden(&header, &bytes);
+    assert_eq!(header.hash(), digest_of("arkiv/header/v1", &bytes));
+    for version in [0u32, 2, u32::MAX] {
+        let mut other = bytes.clone();
+        other[..4].copy_from_slice(&version.to_be_bytes());
         rejects::<Header>(
-            &bytes,
+            &other,
             DecodeError::UnsupportedVersion {
                 kind: "header",
                 version,
             },
         );
     }
-    // A version-1 header followed by a root is a trailing-byte error, and a
-    // version-2 header without one is truncated.
-    let mut long = v1_bytes.clone();
-    long.extend_from_slice(&[0x44; 32]);
-    rejects::<Header>(&long, DecodeError::TrailingBytes { remaining: 32 });
-    let mut short = v1_bytes;
-    short[..4].copy_from_slice(&be32(2));
-    assert!(matches!(
-        decode_exact::<Header>(&short),
-        Err(DecodeError::Truncated { .. })
-    ));
 }
 
+/// The genesis header commits to the root of the empty initial state, which
+/// the engine computes independently of the block format.
 #[test]
 fn genesis_block_header() {
     let genesis = genesis();
     let header = genesis.header();
     let empty_outcomes = cat(&[&be32(0), &be32(0), &be32(0), &be64(0)]);
+    let empty_root = MemoryChain::new(ChainSpec::new(genesis.clone()).unwrap())
+        .snapshot(0)
+        .unwrap()
+        .state_root();
     let expected = Header {
         chain_id: CHAIN,
         height: 0,
@@ -305,7 +286,7 @@ fn genesis_block_header() {
         timestamp_ms: 1_000,
         inputs_digest: digest_of("arkiv/genesis/v1", &genesis_bytes()),
         outcomes_digest: digest_of("arkiv/outcomes/v1", &empty_outcomes),
-        state_root: None,
+        state_root: empty_root,
     };
     assert_eq!(header, expected);
     let header_bytes = cat(&[
@@ -316,9 +297,19 @@ fn genesis_block_header() {
         &be64(1_000),
         expected.inputs_digest.as_slice(),
         expected.outcomes_digest.as_slice(),
+        empty_root.as_slice(),
     ]);
     assert_eq!(genesis.hash(), digest_of("arkiv/header/v1", &header_bytes));
+    assert_eq!(
+        hex(genesis.hash().as_slice()),
+        GENESIS_HASH,
+        "the support genesis hash"
+    );
 }
+
+/// The hash of `support::genesis()`, pinned so a change to any genesis or
+/// header byte is deliberate.
+const GENESIS_HASH: &str = "f0832101fb49ad2da2f67475fd77493af8d784261de679cfc8cebf28a52a250e";
 
 #[test]
 fn admin_inputs() {
@@ -425,6 +416,22 @@ fn ops() -> Vec<(TxOp, Vec<u8>)> {
             delete(1, &[0x5a; 32]),
             cat(&[&[7], &ns1, &[32], &[0x5a; 32]]),
         ),
+        (
+            TxOp::Arkiv {
+                namespace: ns(1),
+                operation: ArkivOperation::Delete {
+                    key: RecordKey::new(&[0x5a; 32]).unwrap(),
+                },
+            },
+            cat(&[&[8], &ns1, &[5], &[32], &[0x5a; 32]]),
+        ),
+        (
+            TxOp::Transfer {
+                to: BOB,
+                amount: U256::from(7u64),
+            },
+            cat(&[&[9], &[0xb0; 20], &U256::from(7u64).to_be_bytes::<32>()]),
+        ),
     ]
 }
 
@@ -441,7 +448,7 @@ fn transaction_operations_and_envelopes() {
         golden(&op, &bytes);
     }
     unknown_tag::<TxOp>("TxOp", 0, &lp(b"alpha"));
-    unknown_tag::<TxOp>("TxOp", 8, &lp(b"alpha"));
+    unknown_tag::<TxOp>("TxOp", 10, &lp(b"alpha"));
     // An expiry option byte other than 00/01.
     rejects::<TxOp>(
         &cat(&[&[5], &be64(1), &[1, b'a'], &be32(0), &[2]]),
@@ -517,10 +524,15 @@ fn host_faults() {
     );
     golden(&HostFault::ExpiryInvalid(ExpiryFault::TooFar), &[2, 3]);
     golden(&HostFault::ExpiryShortened, &[3]);
+    golden(&HostFault::Arkiv(ArkivFault::NotFound), &[4, 4]);
+    golden(
+        &HostFault::Account(AccountFault::InsufficientBalance),
+        &[5, 1],
+    );
     unknown_tag::<ExpiryFault>("ExpiryFault", 0, &[]);
     unknown_tag::<ExpiryFault>("ExpiryFault", 4, &[]);
     unknown_tag::<HostFault>("HostFault", 0, &[]);
-    unknown_tag::<HostFault>("HostFault", 4, &[]);
+    unknown_tag::<HostFault>("HostFault", 6, &[]);
     rejects::<HostFault>(
         &[2, 4],
         DecodeError::UnknownTag {
@@ -576,6 +588,13 @@ fn op_outcomes() -> Vec<(OpOutcome, Vec<u8>)> {
             vec![5, 3],
         ),
         (OpOutcome::NotExecuted, vec![6]),
+        (
+            OpOutcome::AccountRejected {
+                fault: AccountFault::InsufficientBalance,
+                receipt: receipt(21, Outcome::Applied),
+            },
+            cat(&[&[7, 1], &applied_receipt_bytes(21)]),
+        ),
     ]
 }
 
@@ -648,7 +667,7 @@ fn blocks() {
         timestamp_ms: 2_000,
         inputs_digest: digest_of("arkiv/inputs/v1", &[0; 8]),
         outcomes_digest: digest_of("arkiv/outcomes/v1", &[0; 20]),
-        state_root: None,
+        state_root: hash(0x44),
     };
     let header_bytes = cat(&[
         &be32(1),
@@ -658,6 +677,7 @@ fn blocks() {
         &be64(2_000),
         header.inputs_digest.as_slice(),
         header.outcomes_digest.as_slice(),
+        &[0x44; 32],
     ]);
     let block = Block {
         header,

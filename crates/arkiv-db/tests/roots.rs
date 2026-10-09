@@ -202,25 +202,16 @@ fn term_bytes(value: &V) -> Vec<u8> {
 /// `name ‖ pad to 32 ‖ name_len ‖ tag ‖ presence ‖ value ‖ pad to 128 ‖
 /// value_len`: 164 bytes.
 fn term_key(name: &str, tag: u8, value: Option<&[u8]>) -> Vec<u8> {
-    let mut key = padded(
-        name.as_bytes(),
-        32,
-    );
+    let mut key = padded(name.as_bytes(), 32);
     key.push(tag);
     match value {
         None => {
             key.push(0);
-            key.extend(padded(
-                &[],
-                128,
-            ));
+            key.extend(padded(&[], 128));
         }
         Some(bytes) => {
             key.push(1);
-            key.extend(padded(
-                bytes,
-                128,
-            ));
+            key.extend(padded(bytes, 128));
         }
     }
     assert_eq!(key.len(), 164);
@@ -351,9 +342,7 @@ fn model_roots(model: &Model) -> Roots {
     let host = (root(&host), host.len() as u64);
     // StateHeader: format 1 ‖ catalog root ‖ catalog len ‖ next namespace
     // ‖ pricing (id ‖ 31 ‖ 31 weights) ‖ host root ‖ host len.
-    let mut header = 1u32
-        .to_be_bytes()
-        .to_vec();
+    let mut header = 1u32.to_be_bytes().to_vec();
     header.extend(handle(catalog.0, catalog.1 as usize));
     header.extend(model.next_namespace.to_be_bytes());
     header.extend(model.pricing.0.to_be_bytes());

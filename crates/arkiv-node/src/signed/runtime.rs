@@ -159,35 +159,30 @@ struct ReadQuery {
     limit: Option<usize>,
 }
 fn snapshot(header: &crate::Header) -> Json {
-    json!({"height":header.height.to_string(),"hash":hex(header.hash().as_slice()),"stateRoot":header.state_root.map(|r|hex(r.as_slice()))})
+    json!({"height":header.height.to_string(),"hash":hex(header.hash().as_slice()),"stateRoot":hex(header.state_root.as_slice())})
 }
 pub fn status(node: &Node) -> Json {
-    let mut capabilities = crate::simulator::profile::capabilities();
-    let gas_active = crate::gas::is_active(&node.genesis().genesis.pricing);
-    capabilities["gas"] = if gas_active {
-        json!({
-            "profile":node.genesis().profile(), "scheduleId":crate::gas::SCHEDULE_ID,
-            "blockGasLimit":node.genesis().genesis.params.block_budget.to_string(),
-            "userGasLimit":node.genesis().genesis.params.user_budget.to_string(),
-            "transactionIntrinsicGas":crate::gas::TX_INTRINSIC_GAS.to_string(),
-            "referenceGasPriceWei":crate::gas::REFERENCE_GAS_PRICE_WEI.to_string(),
-            "token":"GLM", "tokenDecimals":18, "feesDebited":node.genesis().accounts.is_some(),
-            "gasPriceWei":crate::accounts::GAS_PRICE_WEI.to_string(),
-            "feePolicy":if node.genesis().accounts.is_some(){"burn"}else{"quote-only"},
-            "accountProofProfile":if node.genesis().accounts.is_some(){Some("glm-account-v1")}else{None},
-            "rentPeriodBlocks":crate::gas::RENT_PERIOD_BLOCKS.to_string(),
-            "rentGasPerStorageUnitPeriod":crate::gas::RENT_GAS_PER_UNIT_PERIOD.to_string(),
-            "permanentEntitiesSupported":false, "refunds":false, "storageRefunds":false,
-            "unusedGasRefunds":node.genesis().accounts.is_some(),
-            "scope":"live-state logical occupancy; archive history excluded"
-        })
-    } else {
-        json!({"profile":"legacy-fixture","feesDebited":false})
-    };
+    let genesis = node.genesis();
+    let mut capabilities = crate::simulator::profile::capabilities(&genesis.genesis.limits);
+    capabilities["gas"] = json!({
+        "profile":crate::signed::protocol::GAS_PROFILE, "scheduleId":crate::gas::SCHEDULE_ID,
+        "blockGasLimit":genesis.genesis.params.block_budget.to_string(),
+        "userGasLimit":genesis.genesis.params.user_budget.to_string(),
+        "transactionIntrinsicGas":crate::gas::TX_INTRINSIC_GAS.to_string(),
+        "referenceGasPriceWei":crate::gas::REFERENCE_GAS_PRICE_WEI.to_string(),
+        "token":"GLM", "tokenDecimals":18, "feesDebited":true,
+        "gasPriceWei":crate::accounts::GAS_PRICE_WEI.to_string(),
+        "feePolicy":"burn", "accountProofProfile":"glm-account-v1",
+        "rentPeriodBlocks":crate::gas::RENT_PERIOD_BLOCKS.to_string(),
+        "rentGasPerStorageUnitPeriod":crate::gas::RENT_GAS_PER_UNIT_PERIOD.to_string(),
+        "permanentEntitiesSupported":false, "refunds":false, "storageRefunds":false,
+        "unusedGasRefunds":true,
+        "scope":"live-state logical occupancy; archive history excluded"
+    });
     capabilities["sdkRpcProfile"] = json!({
         "id":"arkiv-sdk-native-v1", "endpoint":"/", "transports":["http-jsonrpc","websocket-jsonrpc"],
         "ethereumCompatibleConsensus":false, "completeEthereumApi":false,
-        "signedWrites":node.genesis().accounts.is_some(),
+        "signedWrites":true,
         "transactionFormats":["eip155-legacy","eip1559-empty-access-list"],
         "queryLanguage":"bounded-typed-boolean", "queryProofs":false,
         "queryOperators":["equality","inequality","ranges","prefix","and","or","not","exists","typeof"],
@@ -195,6 +190,7 @@ pub fn status(node: &Node) -> Json {
         "unsupported":["permanent-entities","arbitrary-evm","contract-creation","nonempty-access-lists","ethereum-mpt-roots"],
         "feePolicy":"fixed-one-gwei; signed-prices-are-ceilings; no-priority-payment"
     });
+    capabilities["genesisPrefill"] = json!(genesis.prefill.is_some());
     capabilities["signatures"] = json!(true);
     capabilities["proofTrust"] = json!("pinned-single-proposer-secp256k1");
     let (role, health, paused) = match node {

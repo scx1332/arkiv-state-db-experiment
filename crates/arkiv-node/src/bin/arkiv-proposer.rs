@@ -13,7 +13,7 @@ use arkiv_node::{
         history::History,
         host::Host,
         light::Light,
-        protocol::{INPUT_CAP, SIGNED_TX_OVERHEAD, SignedGenesis, SignedHeader, SignedTx, TX_CAP},
+        protocol::{SignedGenesis, SignedHeader, SignedTx, TX_CAP},
         runtime::{self, GenesisResponse, Node, Runtime},
     },
     simulator::{
@@ -254,7 +254,7 @@ async fn run() -> Result<()> {
     let (command, args) = arguments()?;
     if command == "--help" {
         println!(
-            "arkiv-proposer genesis lock CHAIN [--refresh]\narkiv-proposer genesis build CHAIN --out BUNDLE --locked\narkiv-proposer genesis verify BUNDLE\narkiv-proposer keygen --out FILE\narkiv-proposer producer --run-dir DIR --key-file FILE [--listen 127.0.0.1:9500] [--private-listen 127.0.0.1:9501] [--start paused|running] [--source-id UUID] [--chain-id 9001] [--block-period-ms 1000] [--gas-profile legacy|glm-v1|glm-v2] [--allocations-file FILE] [--bundle BUNDLE]\narkiv-proposer full|light --run-dir DIR --peer URL --genesis-hash 0xHEX --proposer 0xADDRESS --chain-id N --source-id UUID --run-id HEX32 [--replication-peer URL] [--bundle BUNDLE]\narkiv-proposer sign --key-file FILE --genesis-file FILE --tx-file FILE --nonce N --out FILE\narkiv-proposer create --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --payload-file FILE --out FILE [--salt 0] [--gas-limit 1000000] [--lifetime-blocks 17280]\narkiv-proposer transfer --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --to 0xADDRESS --amount-wei DECIMAL --out FILE [--gas-limit 21000]\narkiv-proposer submit --peer URL --transaction-file FILE\nOptional private Prometheus exporter: --metrics-listen 127.0.0.1:9600 [--metrics-interval-secs 300] (minimum 10). Metrics use rogue_one_ prefix.\nPrivate listener/full replication use ARKIV_PROPOSER_TOKEN (at least 32 bytes). Producer starts paused. Bundle profile creates the entities namespace at height 0; block 1 is ordinary. Older profiles bootstrap at block 1. Each run exports public genesis.bin/certificate.bin. Sign/create files use native canonical bytes; submit polls pending/included status. Single-proposer authentication supplies no consensus or finality. Bodies are retained in history.redb separately from node.redb."
+            "arkiv-proposer genesis lock CHAIN [--refresh]\narkiv-proposer genesis build CHAIN --out BUNDLE --locked\narkiv-proposer genesis verify BUNDLE\narkiv-proposer keygen --out FILE\narkiv-proposer producer --run-dir DIR --key-file FILE [--listen 127.0.0.1:9500] [--private-listen 127.0.0.1:9501] [--start paused|running] [--source-id UUID] [--chain-id 9001] [--block-period-ms 1000] (--allocations-file FILE | --bundle BUNDLE)\narkiv-proposer full|light --run-dir DIR --peer URL --genesis-hash 0xHEX --proposer 0xADDRESS --chain-id N --source-id UUID --run-id HEX32 [--replication-peer URL] [--bundle BUNDLE]\narkiv-proposer sign --key-file FILE --genesis-file FILE --tx-file FILE --nonce N --out FILE\narkiv-proposer create --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --payload-file FILE --out FILE [--salt 0] [--gas-limit 1000000] [--lifetime-blocks 17280]\narkiv-proposer transfer --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --to 0xADDRESS --amount-wei DECIMAL --out FILE [--gas-limit 21000]\narkiv-proposer submit --peer URL --transaction-file FILE\nOptional private Prometheus exporter: --metrics-listen 127.0.0.1:9600 [--metrics-interval-secs 300] (minimum 10). Metrics use rogue_one_ prefix.\nPrivate listener/full replication use ARKIV_PROPOSER_TOKEN (at least 32 bytes). Producer starts paused. Every chain runs the glm-v2 gas profile with funded accounts. A bundle chain creates the entities namespace (and its prefill) at height 0; a chain created from --allocations-file creates it with the proposer's bootstrap transaction in block 1. Each run exports public genesis.bin/certificate.bin. Sign/create files use native canonical bytes; submit polls pending/included status. Single-proposer authentication supplies no consensus or finality. Bodies are retained in history.redb separately from node.redb."
         );
         return Ok(());
     }
@@ -270,7 +270,6 @@ async fn run() -> Result<()> {
         "--request-id",
         "--payload-file",
         "--salt",
-        "--gas-profile",
         "--allocations-file",
         "--to",
         "--amount-wei",
@@ -292,12 +291,6 @@ async fn run() -> Result<()> {
     ];
     if args.keys().any(|k| !FLAGS.contains(&k.as_str())) {
         return Err(Error("InvalidRequest"));
-    }
-    if args
-        .get("--gas-profile")
-        .is_some_and(|p| p != "glm-v1" && p != "glm-v2" && p != "legacy")
-    {
-        return Err(Error("InvalidGasProfile"));
     }
     let required = |key: &str| {
         args.get(key)
@@ -494,16 +487,13 @@ async fn run() -> Result<()> {
                     .get("--source-id")
                     .is_some_and(|v| v != &arkiv_node::simulator::host::uuid(&id.source_id))
                 || args
-                    .get("--gas-profile")
-                    .is_some_and(|p| p != genesis.profile())
-                || args
                     .get("--block-period-ms")
                     .is_some_and(|v| v != &genesis.block_period_ms.to_string())
             {
                 return Err(Error("IdentityMismatch"));
             }
             if let Some(file) = args.get("--allocations-file")
-                && genesis.accounts.as_ref() != Some(&allocations(file)?)
+                && genesis.accounts != allocations(file)?
             {
                 return Err(Error("IdentityMismatch"));
             }
@@ -516,35 +506,19 @@ async fn run() -> Result<()> {
             let proposed = if let Some((genesis, _)) = &bundle {
                 genesis.clone()
             } else {
-                let mut native = arkiv_node::demo::workload::genesis(
+                let native = arkiv_node::signed::protocol::default_native_genesis(
                     number(&get("--chain-id", "9001"))?,
                     1_700_000_000_000,
                 );
-                native.admins.clear();
-                native.params.max_admin_per_block = 0;
-                native.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;
-                native.params.max_block_input_bytes = INPUT_CAP;
-                if matches!(get("--gas-profile", "legacy").as_str(), "glm-v1" | "glm-v2") {
-                    native.pricing = arkiv_node::gas::schedule();
-                    native.params.block_budget = arkiv_node::gas::DEFAULT_BLOCK_GAS_LIMIT;
-                    native.params.user_budget = 90_000_000;
-                    native.params.max_lifetime = 6_307_200;
-                }
                 let mut run_id = [0u8; 16];
                 getrandom::fill(&mut run_id).map_err(|_| Error("StorageUnavailable"))?;
-                let mut proposed = SignedGenesis::new(
+                SignedGenesis::new(
                     native,
                     run_id,
                     *s.address().as_bytes(),
                     number(&get("--block-period-ms", "1000"))?,
-                )?;
-                if get("--gas-profile", "legacy") == "glm-v2" {
-                    proposed =
-                        proposed.with_accounts(allocations(required("--allocations-file")?)?)?;
-                } else if args.contains_key("--allocations-file") {
-                    return Err(Error("InvalidGasProfile"));
-                }
-                proposed
+                    allocations(required("--allocations-file")?)?,
+                )?
             };
             let genesis_file = path.join("genesis.bin");
             let genesis: SignedGenesis = if genesis_file.exists() {
@@ -561,7 +535,7 @@ async fn run() -> Result<()> {
                 return Err(Error("IdentityMismatch"));
             }
             if let Some(file) = args.get("--allocations-file")
-                && genesis.accounts.as_ref() != Some(&allocations(file)?)
+                && genesis.accounts != allocations(file)?
             {
                 return Err(Error("IdentityMismatch"));
             }
@@ -569,9 +543,6 @@ async fn run() -> Result<()> {
                 || args
                     .get("--chain-id")
                     .is_some_and(|v| v != &genesis.genesis.chain_id.to_string())
-                || args
-                    .get("--gas-profile")
-                    .is_some_and(|p| p != genesis.profile())
                 || args
                     .get("--block-period-ms")
                     .is_some_and(|v| v != &genesis.block_period_ms.to_string())

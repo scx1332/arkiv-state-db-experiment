@@ -22,7 +22,10 @@ impl FromIterator<Nibbles> for DecodedProofRetainer {
 impl DecodedProofRetainer {
     /// Create new retainer with target nibbles.
     pub fn new(targets: Vec<Nibbles>) -> Self {
-        Self { targets, proof_nodes: Default::default() }
+        Self {
+            targets,
+            proof_nodes: Default::default(),
+        }
     }
 
     /// Returns `true` if the given prefix matches the retainer target.
@@ -40,7 +43,8 @@ impl DecodedProofRetainer {
     /// Returns an error if the proof could not be decoded from the given proof bytes.
     pub fn retain(&mut self, prefix: &Nibbles, proof: &[u8]) -> Result<(), alloy_rlp::Error> {
         if prefix.is_empty() || self.matches(prefix) {
-            self.proof_nodes.insert_encoded(*prefix, Bytes::from(proof.to_vec()))?;
+            self.proof_nodes
+                .insert_encoded(*prefix, Bytes::from(proof.to_vec()))?;
         }
 
         Ok(())

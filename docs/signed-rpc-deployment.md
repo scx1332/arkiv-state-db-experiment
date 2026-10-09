@@ -75,7 +75,8 @@ Persistent services: `arkiv-signed-producer`, `arkiv-signed-full`,
 binary are under `/home/ubuntu/.config/arkiv-simulator/signed-rpc` (mode0700);
 keys and environment file must never be printed or committed. Active run
 directories are `signed-rpc/glm-v2/{producer,full,light}`. The producer starts
-with `--gas-profile glm-v2 --allocations-file .../glm-v2/allocations.json`;
+with `--allocations-file .../glm-v2/allocations.json` (it was started with the
+then-required `--gas-profile glm-v2`, which no longer exists: every signed chain is `glm-v2`);
 followers pin the new chain identity. Allocations must match retained genesis
 on every restart. Funding/recipient test keys remain private under `glm-v2/`. Units are in
 `/etc/systemd/system/`; nginx site is
@@ -96,10 +97,11 @@ clients may resubmit identical signed bytes. Included submissions are durable.
 Implementation commit: `6666c349a9018b54c040fc019e587987cf855529`. The locked
 release binary SHA-256 is
 `32bcf288b8c16f919d76214d3cb3226bffd3e7b047d5e94ccd506eaddbd1657f`.
-Validation passed: 903 Arkiv-v2 workspace tests (three existing heavy tests
-ignored), 521 node/database tests without the feature, eight new account tests,
-and both funded-account and legacy subprocess smoke tests against the release
-binary.
+Validation passed at that commit: 903 workspace tests in the build that carried
+the Arkiv entity protocol (three existing heavy tests ignored), 521 node/database
+tests in the generic build, eight new account tests, and both funded-account and
+fixture-priced subprocess smoke tests against the release binary. (The node has
+since been unified into one build with `glm-v2`-only signed chains.)
 
 The live public test then passed fee deductions, transfer balances, insufficient
 funds, cumulative pending reservation, failed-state rollback, supply reconciliation,

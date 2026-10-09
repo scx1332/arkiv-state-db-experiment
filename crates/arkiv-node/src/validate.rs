@@ -137,8 +137,6 @@ pub enum BlockFault {
 pub enum SuccessorFault {
     /// The chain id differs from the genesis chain id.
     ChainId,
-    /// The header version is not the protocol's.
-    Version,
     /// The height is not the parent's plus one (or would overflow).
     Height,
     /// The parent hash is not the parent's block hash.
@@ -191,29 +189,26 @@ pub fn check_op(spec: &ChainSpec, op: &TxOp) -> Result<(), OpFault> {
     if matches!(op, TxOp::Transfer { .. }) {
         return Ok(());
     }
-    #[cfg(feature = "arkiv-v2")]
+    if let TxOp::Arkiv {
+        namespace,
+        operation,
+    } = op
     {
-        if let TxOp::Arkiv {
-            namespace,
-            operation,
-        } = op
+        if (*namespace != crate::arkiv::entity_namespace()
+            && !crate::gas::is_active(&spec.genesis().pricing))
+            || operation.validate().is_err()
         {
-            if (*namespace != crate::arkiv::entity_namespace()
-                && !crate::gas::is_active(&spec.genesis().pricing))
-                || operation.validate().is_err()
-            {
-                return Err(OpFault::HostOwnedCell);
-            }
-            if let Some(expiry) = operation.expiry() {
-                check_expiry(spec, expiry).map_err(OpFault::Expiry)?;
-            }
-            return Ok(());
-        }
-        // The entity namespace is exclusively host-controlled. Generic mutation
-        // would otherwise bypass per-entity ownership and immutable system cells.
-        if op.namespace() == Some(crate::arkiv::entity_namespace()) {
             return Err(OpFault::HostOwnedCell);
         }
+        if let Some(expiry) = operation.expiry() {
+            check_expiry(spec, expiry).map_err(OpFault::Expiry)?;
+        }
+        return Ok(());
+    }
+    // The entity namespace is exclusively host-controlled. Generic mutation
+    // would otherwise bypass per-entity ownership and immutable system cells.
+    if op.namespace() == Some(crate::arkiv::entity_namespace()) {
+        return Err(OpFault::HostOwnedCell);
     }
     let names_host_cell = match op {
         TxOp::CreateRecord { cells, .. } => cells.iter().any(|(name, _)| host_owned(name)),
@@ -295,7 +290,7 @@ pub fn check_admin(spec: &ChainSpec, input: &AdminInput) -> Result<(), AdminFaul
 }
 
 /// Checks that a block at `height` with `timestamp_ms` may follow
-/// `parent`: same chain, the protocol's header version, `height ==
+/// `parent`: same chain, `height ==
 /// parent.height + 1` (checked, never wrapping) and a timestamp no earlier
 /// than the parent's.
 pub fn check_successor(
@@ -307,9 +302,6 @@ pub fn check_successor(
     if parent.chain_id != spec.chain_id() {
         return Err(SuccessorFault::ChainId);
     }
-    if parent.version() != spec.header_version() {
-        return Err(SuccessorFault::Version);
-    }
     if parent.height.checked_add(1) != Some(height) {
         return Err(SuccessorFault::Height);
     }
@@ -320,8 +312,7 @@ pub fn check_successor(
 }
 
 /// Checks that the recorded `header` follows `parent`: every rule of
-/// [`check_successor`], plus the header's own chain id and version and its
-/// parent hash.
+/// [`check_successor`], plus the header's own chain id and its parent hash.
 pub fn check_header(
     spec: &ChainSpec,
     parent: &Header,
@@ -329,9 +320,6 @@ pub fn check_header(
 ) -> Result<(), SuccessorFault> {
     if header.chain_id != spec.chain_id() {
         return Err(SuccessorFault::ChainId);
-    }
-    if header.version() != spec.header_version() {
-        return Err(SuccessorFault::Version);
     }
     if header.parent_hash != parent.hash() {
         return Err(SuccessorFault::ParentHash);

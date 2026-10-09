@@ -80,7 +80,10 @@ impl ExtensionNode {
 
     /// Return extension node as [ExtensionNodeRef].
     pub fn as_ref(&self) -> ExtensionNodeRef<'_> {
-        ExtensionNodeRef { key: &self.key, child: &self.child }
+        ExtensionNodeRef {
+            key: &self.key,
+            child: &self.child,
+        }
     }
 }
 
@@ -104,7 +107,11 @@ impl fmt::Debug for ExtensionNodeRef<'_> {
 impl Encodable for ExtensionNodeRef<'_> {
     #[inline]
     fn encode(&self, out: &mut dyn BufMut) {
-        Header { list: true, payload_length: self.rlp_payload_length() }.encode(out);
+        Header {
+            list: true,
+            payload_length: self.rlp_payload_length(),
+        }
+        .encode(out);
         encode_path_leaf(self.key, false).as_slice().encode(out);
         // Pointer to the child is already RLP encoded.
         out.put_slice(self.child);

@@ -254,7 +254,7 @@ pub fn block_json(host: &Host, height: u64, full: bool) -> Result<Value> {
         .collect::<Result<Vec<_>>>()?;
     let gas = b.outcomes.spent;
     Ok(
-        json!({"number":quantity(height),"hash":hex(h.hash().as_slice()),"parentHash":hex(h.parent_hash.as_slice()),"timestamp":quantity(h.timestamp_ms/1000),"nonce":"0x0000000000000000","sha3Uncles":hex(keccak256([0xc0]).as_slice()),"logsBloom":bloom(&block_logs(host,height)?),"transactionsRoot":hex(h.inputs_digest.as_slice()),"stateRoot":h.state_root.map(|r|hex(r.as_slice())).unwrap_or_else(||ZERO_HASH.into()),"receiptsRoot":hex(h.outcomes_digest.as_slice()),"miner":hex(&host.genesis.proposer),"difficulty":"0x0","totalDifficulty":"0x0","extraData":"0x","size":quantity(arkiv_db::encode(&b).len() as u64),"gasLimit":quantity(host.genesis.genesis.params.block_budget),"gasUsed":quantity(gas),"baseFeePerGas":quantity(crate::accounts::GAS_PRICE_WEI),"mixHash":ZERO_HASH,"uncles":[],"transactions":txs}),
+        json!({"number":quantity(height),"hash":hex(h.hash().as_slice()),"parentHash":hex(h.parent_hash.as_slice()),"timestamp":quantity(h.timestamp_ms/1000),"nonce":"0x0000000000000000","sha3Uncles":hex(keccak256([0xc0]).as_slice()),"logsBloom":bloom(&block_logs(host,height)?),"transactionsRoot":hex(h.inputs_digest.as_slice()),"stateRoot":hex(h.state_root.as_slice()),"receiptsRoot":hex(h.outcomes_digest.as_slice()),"miner":hex(&host.genesis.proposer),"difficulty":"0x0","totalDifficulty":"0x0","extraData":"0x","size":quantity(arkiv_db::encode(&b).len() as u64),"gasLimit":quantity(host.genesis.genesis.params.block_budget),"gasUsed":quantity(gas),"baseFeePerGas":quantity(crate::accounts::GAS_PRICE_WEI),"mixHash":ZERO_HASH,"uncles":[],"transactions":txs}),
     )
 }
 fn entity_nonce(host: &Host, height: u64, a: &[u8; 20]) -> Result<u64> {
@@ -733,7 +733,7 @@ fn simulation(
             h,
             host.genesis.timestamp(h)?,
             tx.clone(),
-            host.genesis.accounts.as_ref(),
+            Some(&host.genesis.accounts),
         ),
         Simulation::Call => crate::exec::execute_block_hooked(
             &spec,
@@ -745,7 +745,7 @@ fn simulation(
                 admin: vec![],
                 txs: vec![tx.clone()],
             },
-            host.genesis.accounts.as_ref(),
+            Some(&host.genesis.accounts),
             |_, _, _| Ok(()),
             |_, _, _| Ok(()),
         )
@@ -1246,7 +1246,7 @@ mod tests {
     use super::super::{
         crypto::Signer,
         history::History,
-        protocol::{INPUT_CAP, SIGNED_TX_OVERHEAD, SignedGenesis, SignedHeader, TX_CAP},
+        protocol::{SignedGenesis, SignedHeader},
     };
     use super::*;
     use arkiv_db::{CellName, Value as DbValue, durable::Options};
@@ -1254,24 +1254,18 @@ mod tests {
     use std::sync::Arc;
     fn host() -> Host {
         let signer = Signer::from_bytes([2; 32]).unwrap();
-        let mut g = crate::demo::workload::genesis(9300, 1000);
-        g.admins.clear();
-        g.params.max_admin_per_block = 0;
-        g.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;
-        g.params.max_block_input_bytes = INPUT_CAP;
-        g.pricing = crate::gas::schedule();
-        g.params.block_budget = 100_000_000;
-        g.params.user_budget = 90_000_000;
-        let g = SignedGenesis::new(g, [7; 16], *signer.address().as_bytes(), 1000)
-            .unwrap()
-            .with_accounts(
-                crate::accounts::AccountConfig::new(vec![(
-                    signer.address(),
-                    U256::from(10_000_000_000_000_000_000u64),
-                )])
-                .unwrap(),
-            )
-            .unwrap();
+        let g = SignedGenesis::new(
+            crate::signed::protocol::default_native_genesis(9300, 1000),
+            [7; 16],
+            *signer.address().as_bytes(),
+            1000,
+            crate::accounts::AccountConfig::new(vec![(
+                signer.address(),
+                U256::from(10_000_000_000_000_000_000u64),
+            )])
+            .unwrap(),
+        )
+        .unwrap();
         let certificate = SignedHeader::sign(&g, g.header(), &signer).unwrap();
         let history = History::create(Arc::new(MemoryVersionedStore::new()), g.hash()).unwrap();
         let mut host = Host::create(
@@ -1391,7 +1385,7 @@ mod tests {
             "../../tests/fixtures/ethereum-sdk-vectors.json"
         ))
         .unwrap();
-        let before = h.head.clone();
+        let before = h.head;
         let snapshot = h.engine.snapshot(h.engine.head()).unwrap();
         let burned = snapshot.try_host_get(&crate::accounts::BURN_KEY).unwrap();
         let balances = [funded, empty].map(|a| h.account(h.head.height, a).unwrap());
@@ -1463,7 +1457,7 @@ mod tests {
         let mut h = host();
         let empty = Signer::from_bytes([3; 32]).unwrap().address();
         let recipient = Signer::from_bytes([4; 32]).unwrap().address();
-        let before = h.head.clone();
+        let before = h.head;
         let mut state = RpcState::default();
         for value in [U256::ZERO, U256::from(1), U256::MAX] {
             for to in [empty, recipient] {

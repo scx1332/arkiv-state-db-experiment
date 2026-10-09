@@ -1,21 +1,21 @@
-//! Block format version [`FORMAT_VERSION`] = 1: genesis, headers, block
+//! Block format version [`FORMAT_VERSION`]: genesis, headers, block
 //! inputs, transaction envelopes and block outcomes, with their canonical
 //! encodings and hashes.
 //!
 //! Every type here is encoded with the engine's canonical codec
-//! ([`arkiv_db::codec`], codec version 1): big-endian fixed-width integers,
+//! ([`arkiv_db::codec`]): big-endian fixed-width integers,
 //! `u32`-length-prefixed bytes and text, `u32`-counted sequences, `00`/`01`
-//! options and one explicit tag byte per enum variant. Tags start at 1, are
-//! listed in `docs/block-format.md` and are never reused. Decoders are
-//! strict: they reject unknown tags and versions and trailing bytes, and
-//! every accepted input re-encodes to itself.
+//! options and one explicit tag byte per enum variant. Tags start at 1 and
+//! are listed in `docs/block-format.md`. Decoders are strict: they reject
+//! unknown tags and versions and trailing bytes, and every accepted input
+//! re-encodes to itself.
 //!
 //! Hashes are [`digest`]s of canonical bytes under one domain per object
 //! layout:
 //!
 //! | Hash | Preimage |
 //! | --- | --- |
-//! | block hash | `digest("arkiv/header/v<version>", encode(header))` |
+//! | block hash | `digest("arkiv/header/v1", encode(header))` |
 //! | `inputs_digest` | `digest("arkiv/inputs/v1", encode(inputs))` |
 //! | `outcomes_digest` | `digest("arkiv/outcomes/v1", encode(outcomes))` |
 //! | transaction digest | `digest("arkiv/tx/v1", encode(envelope))` |
@@ -23,11 +23,9 @@
 //! | genesis `inputs_digest` | `digest("arkiv/genesis/v1", encode(genesis))` |
 //!
 //! The genesis block is height 0 with a zero parent hash, the genesis digest
-//! as its inputs digest and the digest of empty outcomes; the genesis hash
-//! (the chain's identity) is its block hash. Protocol version 1 uses header
-//! version 1, which carries no state root; header version 2 appends the
-//! state root. Protocol 2 activates that commitment; protocol 1 remains
-//! supported for legacy replay.
+//! as its inputs digest, the digest of empty outcomes and the root of the
+//! empty initial state; the genesis hash (the chain's identity) is its block
+//! hash. Every header commits to the terminal state root of its block.
 
 use std::fmt;
 
@@ -38,59 +36,24 @@ use arkiv_db::{
 };
 
 /// Version of the block format: the layouts and tag tables of this module.
-pub const FORMAT_VERSION: u32 = if cfg!(feature = "arkiv-v2") { 2 } else { 1 };
+/// Headers carry it, so a decoder never reinterprets another layout.
+pub const FORMAT_VERSION: u32 = 1;
 
-/// Legacy protocol constant retained for existing fixtures and replay.
-/// The continuous demo activates [`DEMO_PROTOCOL_VERSION`].
+/// Version of the execution rules a genesis selects.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// Root-bearing development protocol; legacy protocol 1 remains replayable.
-pub const DEMO_PROTOCOL_VERSION: u32 = if cfg!(feature = "arkiv-v2") { 3 } else { 2 };
-/// Explicit height-zero entity prefill execution protocol.
-pub const PREFILL_PROTOCOL_VERSION: u32 = 4;
-pub fn root_bearing_protocol(version: u32) -> bool {
-    version == DEMO_PROTOCOL_VERSION
-        || (cfg!(feature = "arkiv-v2") && version == PREFILL_PROTOCOL_VERSION)
-}
-
-/// Domain of the block hash of a version-1 header.
-pub const HEADER_V1_DOMAIN: &str = "arkiv/header/v1";
-/// Domain of the block hash of a version-2 header (with a state root).
-pub const HEADER_V2_DOMAIN: &str = if cfg!(feature = "arkiv-v2") {
-    "arkiv/header/v3"
-} else {
-    "arkiv/header/v2"
-};
+/// Domain of the block hash.
+pub const HEADER_DOMAIN: &str = "arkiv/header/v1";
 /// Domain of a block's inputs digest.
-pub const INPUTS_DOMAIN: &str = if cfg!(feature = "arkiv-v2") {
-    "arkiv/inputs/v3"
-} else {
-    "arkiv/inputs/v1"
-};
+pub const INPUTS_DOMAIN: &str = "arkiv/inputs/v1";
 /// Domain of a block's outcomes digest.
-pub const OUTCOMES_DOMAIN: &str = if cfg!(feature = "arkiv-v2") {
-    "arkiv/outcomes/v3"
-} else {
-    "arkiv/outcomes/v1"
-};
+pub const OUTCOMES_DOMAIN: &str = "arkiv/outcomes/v1";
 /// Domain of a transaction envelope's digest.
-pub const TX_DOMAIN: &str = if cfg!(feature = "arkiv-v2") {
-    "arkiv/tx/v3"
-} else {
-    "arkiv/tx/v1"
-};
+pub const TX_DOMAIN: &str = "arkiv/tx/v1";
 /// Domain of an admin input's digest.
-pub const ADMIN_DOMAIN: &str = if cfg!(feature = "arkiv-v2") {
-    "arkiv/admin/v3"
-} else {
-    "arkiv/admin/v1"
-};
+pub const ADMIN_DOMAIN: &str = "arkiv/admin/v1";
 /// Domain of the genesis digest (the genesis block's inputs digest).
-pub const GENESIS_DOMAIN: &str = if cfg!(feature = "arkiv-v2") {
-    "arkiv/genesis/v3"
-} else {
-    "arkiv/genesis/v1"
-};
+pub const GENESIS_DOMAIN: &str = "arkiv/genesis/v1";
 
 /// The host-owned attribute holding a record's expiry height. Users can
 /// neither write nor remove it (any cell name starting with `$` is refused
@@ -116,6 +79,8 @@ const TX_DELETE: u8 = 4;
 const TX_CREATE_RECORD: u8 = 5;
 const TX_PATCH_RECORD: u8 = 6;
 const TX_DELETE_RECORD: u8 = 7;
+const TX_ARKIV: u8 = 8;
+const TX_TRANSFER: u8 = 9;
 
 const ADMIN_OUTCOME_APPLIED: u8 = 1;
 const ADMIN_OUTCOME_REJECTED: u8 = 2;
@@ -123,6 +88,7 @@ const ADMIN_OUTCOME_REJECTED: u8 = 2;
 const ADMIN_REJECT_RESERVATION_VIOLATED: u8 = 1;
 const ADMIN_REJECT_RESERVATION_OVERFLOW: u8 = 2;
 const ADMIN_REJECT_STALE_SCHEDULE: u8 = 3;
+const ADMIN_REJECT_GAS_PROFILE_LOCKED: u8 = 4;
 
 const TX_STATUS_COMMITTED: u8 = 1;
 const TX_STATUS_FAILED: u8 = 2;
@@ -133,10 +99,13 @@ const OP_REJECTED: u8 = 3;
 const OP_ADMISSION_REJECTED: u8 = 4;
 const OP_HOST_REJECTED: u8 = 5;
 const OP_NOT_EXECUTED: u8 = 6;
+const OP_ACCOUNT_REJECTED: u8 = 7;
 
 const HOST_EXPIRY_CAPACITY_FULL: u8 = 1;
 const HOST_EXPIRY_INVALID: u8 = 2;
 const HOST_EXPIRY_SHORTENED: u8 = 3;
+const HOST_ARKIV: u8 = 4;
+const HOST_ACCOUNT: u8 = 5;
 
 const EXPIRY_OVERFLOW: u8 = 1;
 const EXPIRY_DEAD_ON_ARRIVAL: u8 = 2;
@@ -220,7 +189,7 @@ impl Decode for ChainParams {
 pub struct Genesis {
     /// Block format version; [`FORMAT_VERSION`].
     pub format_version: u32,
-    /// Protocol version: legacy 1 or root-bearing 2.
+    /// Protocol version; [`PROTOCOL_VERSION`].
     pub protocol_version: u32,
     /// Chain identity, repeated in every header and transaction.
     pub chain_id: u64,
@@ -243,8 +212,8 @@ impl Genesis {
     }
 
     /// The genesis block's header: height 0, zero parent hash, the genesis
-    /// digest as inputs digest, and the digest of empty outcomes. Protocol
-    /// 2 commits the empty initial state without constructing an engine.
+    /// digest as inputs digest, the digest of empty outcomes and the root of
+    /// the empty initial state (computed without constructing an engine).
     pub fn header(&self) -> Header {
         Header {
             chain_id: self.chain_id,
@@ -253,18 +222,16 @@ impl Genesis {
             timestamp_ms: self.timestamp_ms,
             inputs_digest: self.digest(),
             outcomes_digest: BlockOutcomes::default().digest(),
-            state_root: root_bearing_protocol(self.protocol_version).then(|| {
-                arkiv_db::StateHeader {
-                    format: arkiv_db::STATE_FORMAT,
-                    catalog_root: arkiv_db_trie::EMPTY_ROOT_HASH,
-                    catalog_len: 0,
-                    next_namespace: 1,
-                    pricing: self.pricing.clone(),
-                    host_root: arkiv_db_trie::EMPTY_ROOT_HASH,
-                    host_len: 0,
-                }
-                .root()
-            }),
+            state_root: arkiv_db::StateHeader {
+                format: arkiv_db::STATE_FORMAT,
+                catalog_root: arkiv_db_trie::EMPTY_ROOT_HASH,
+                catalog_len: 0,
+                next_namespace: 1,
+                pricing: self.pricing.clone(),
+                host_root: arkiv_db_trie::EMPTY_ROOT_HASH,
+                host_len: 0,
+            }
+            .root(),
         }
     }
 
@@ -276,8 +243,8 @@ impl Genesis {
 
 /// `format_version u32 ‖ protocol_version u32 ‖ chain_id ‖ timestamp_ms ‖
 /// limits ‖ pricing ‖ params ‖ admins`. Decoding rejects a format version
-/// other than [`FORMAT_VERSION`] and a protocol version this build does not
-/// support.
+/// other than [`FORMAT_VERSION`] and a protocol version other than
+/// [`PROTOCOL_VERSION`].
 impl Encode for Genesis {
     fn encode_to(&self, encoder: &mut Encoder) {
         encoder.u32(self.format_version);
@@ -304,7 +271,7 @@ impl Decode for Genesis {
             });
         }
         let protocol_version = decoder.u32()?;
-        if protocol_version != PROTOCOL_VERSION && !root_bearing_protocol(protocol_version) {
+        if protocol_version != PROTOCOL_VERSION {
             return Err(DecodeError::UnsupportedVersion {
                 kind: "protocol",
                 version: protocol_version,
@@ -326,13 +293,7 @@ impl Decode for Genesis {
 // ---------------------------------------------------------------------------
 // Headers.
 
-/// A block header. The block hash is the digest of its encoding under the
-/// domain of its version.
-///
-/// Version 1 (protocol 1) has no state root; version 2 (protocol 2, node
-/// step N3b) appends one. The version is not a separate field: it is 2
-/// exactly when `state_root` is present, so a header cannot name one
-/// version and carry the other's layout.
+/// A block header. The block hash is the digest of its encoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Header {
     /// Chain identity.
@@ -349,54 +310,38 @@ pub struct Header {
     pub inputs_digest: B256,
     /// `digest("arkiv/outcomes/v1", encode(outcomes))`.
     pub outcomes_digest: B256,
-    /// The terminal state root (header version 2 only).
-    pub state_root: Option<B256>,
+    /// The terminal state root.
+    pub state_root: B256,
 }
 
 impl Header {
-    /// Header 1 without a state root; the selected profile version with one.
-    pub const fn version(&self) -> u32 {
-        if self.state_root.is_some() {
-            DEMO_PROTOCOL_VERSION
-        } else {
-            1
-        }
-    }
-
-    /// The block hash: `digest("arkiv/header/v<version>", encode(self))`.
+    /// The block hash: `digest("arkiv/header/v1", encode(self))`.
     pub fn hash(&self) -> B256 {
-        let domain = match self.state_root {
-            None => HEADER_V1_DOMAIN,
-            Some(_) => HEADER_V2_DOMAIN,
-        };
-        digest(domain, &encode(self))
+        digest(HEADER_DOMAIN, &encode(self))
     }
 }
 
-/// `version u32 ‖ chain_id ‖ height ‖ parent_hash ‖ timestamp_ms ‖
-/// inputs_digest ‖ outcomes_digest`, then `‖ state_root` for the selected
-/// state-root profile. Other profile header versions fail closed.
+/// `format_version u32 ‖ chain_id ‖ height ‖ parent_hash ‖ timestamp_ms ‖
+/// inputs_digest ‖ outcomes_digest ‖ state_root`.
 impl Encode for Header {
     fn encode_to(&self, encoder: &mut Encoder) {
-        encoder.u32(self.version());
+        encoder.u32(FORMAT_VERSION);
         encoder.u64(self.chain_id);
         encoder.u64(self.height);
         encoder.put(&self.parent_hash);
         encoder.u64(self.timestamp_ms);
         encoder.put(&self.inputs_digest);
         encoder.put(&self.outcomes_digest);
-        if let Some(root) = &self.state_root {
-            encoder.put(root);
-        }
+        encoder.put(&self.state_root);
     }
 }
 
 impl Decode for Header {
-    const MIN_ENCODED_LEN: usize = 4 + 8 + 8 + 32 + 8 + 32 + 32;
+    const MIN_ENCODED_LEN: usize = 4 + 8 + 8 + 32 + 8 + 32 + 32 + 32;
 
     fn decode_from(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
         let version = decoder.u32()?;
-        if version != 1 && version != DEMO_PROTOCOL_VERSION {
+        if version != FORMAT_VERSION {
             return Err(DecodeError::UnsupportedVersion {
                 kind: "header",
                 version,
@@ -409,11 +354,7 @@ impl Decode for Header {
             timestamp_ms: decoder.u64()?,
             inputs_digest: decoder.get()?,
             outcomes_digest: decoder.get()?,
-            state_root: if version == DEMO_PROTOCOL_VERSION {
-                Some(decoder.get()?)
-            } else {
-                None
-            },
+            state_root: decoder.get()?,
         })
     }
 }
@@ -539,14 +480,19 @@ impl Decode for Expiry {
 /// as the `$expiresAt` attribute.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TxOp {
-    /// Native GLM base units; enabled only by signed account genesis v3.
+    /// Transfer native GLM base units; executes only on chains with
+    /// accounts.
     Transfer {
+        /// The recipient.
         to: OwnerId,
+        /// Amount in base units.
         amount: alloy_primitives::U256,
     },
-    #[cfg(feature = "arkiv-v2")]
+    /// An Arkiv entity operation, executed by the host's entity rules.
     Arkiv {
+        /// The namespace holding the entity.
         namespace: NamespaceId,
+        /// The operation.
         operation: crate::arkiv::ArkivOperation,
     },
     /// Create a namespace owned by the actor.
@@ -617,7 +563,6 @@ impl TxOp {
     /// The namespace the operation addresses; `None` for a creation.
     pub const fn namespace(&self) -> Option<NamespaceId> {
         match self {
-            #[cfg(feature = "arkiv-v2")]
             Self::Arkiv { namespace, .. } => Some(*namespace),
             Self::CreateNamespace { .. } | Self::Transfer { .. } => None,
             Self::TransferNamespace { namespace, .. }
@@ -632,7 +577,6 @@ impl TxOp {
     /// The expiry the operation carries, if any.
     pub fn expiry(&self) -> Option<&Expiry> {
         match self {
-            #[cfg(feature = "arkiv-v2")]
             Self::Arkiv { operation, .. } => operation.expiry(),
             Self::CreateRecord { expiry, .. } | Self::PatchRecord { expiry, .. } => expiry.as_ref(),
             _ => None,
@@ -652,7 +596,6 @@ impl TxOp {
             cells
         };
         match self {
-            #[cfg(feature = "arkiv-v2")]
             Self::Arkiv { .. } => panic!("Arkiv operation requires host execution"),
             Self::Transfer { .. } => panic!("native transfer requires account execution"),
             Self::CreateNamespace { name } => WriteOp::CreateNamespace { name: *name },
@@ -714,16 +657,15 @@ impl Encode for TxOp {
     fn encode_to(&self, encoder: &mut Encoder) {
         match self {
             Self::Transfer { to, amount } => {
-                encoder.u8(9);
+                encoder.u8(TX_TRANSFER);
                 encoder.put(to);
                 encoder.fixed(&amount.to_be_bytes::<32>());
             }
-            #[cfg(feature = "arkiv-v2")]
             Self::Arkiv {
                 namespace,
                 operation,
             } => {
-                encoder.u8(8);
+                encoder.u8(TX_ARKIV);
                 encoder.put(namespace);
                 encoder.put(operation);
             }
@@ -797,12 +739,11 @@ impl Decode for TxOp {
 
     fn decode_from(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
         let op = match decoder.u8()? {
-            9 => Self::Transfer {
+            TX_TRANSFER => Self::Transfer {
                 to: decoder.get()?,
                 amount: alloy_primitives::U256::from_be_bytes(decoder.array::<32>()?),
             },
-            #[cfg(feature = "arkiv-v2")]
-            8 => Self::Arkiv {
+            TX_ARKIV => Self::Arkiv {
                 namespace: decoder.get()?,
                 operation: decoder.get()?,
             },
@@ -969,7 +910,7 @@ impl fmt::Display for AdminRejection {
 impl Encode for AdminRejection {
     fn encode_to(&self, encoder: &mut Encoder) {
         match self {
-            Self::GasProfileLocked => encoder.u8(4),
+            Self::GasProfileLocked => encoder.u8(ADMIN_REJECT_GAS_PROFILE_LOCKED),
             Self::ReservationViolated => encoder.u8(ADMIN_REJECT_RESERVATION_VIOLATED),
             Self::ReservationOverflow => encoder.u8(ADMIN_REJECT_RESERVATION_OVERFLOW),
             Self::StaleSchedule { current } => {
@@ -983,7 +924,7 @@ impl Encode for AdminRejection {
 impl Decode for AdminRejection {
     fn decode_from(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
         match decoder.u8()? {
-            4 => Ok(Self::GasProfileLocked),
+            ADMIN_REJECT_GAS_PROFILE_LOCKED => Ok(Self::GasProfileLocked),
             ADMIN_REJECT_RESERVATION_VIOLATED => Ok(Self::ReservationViolated),
             ADMIN_REJECT_RESERVATION_OVERFLOW => Ok(Self::ReservationOverflow),
             ADMIN_REJECT_STALE_SCHEDULE => Ok(Self::StaleSchedule {
@@ -1106,7 +1047,7 @@ impl Decode for ExpiryFault {
 pub enum HostFault {
     /// Native account execution failure.
     Account(crate::accounts::AccountFault),
-    #[cfg(feature = "arkiv-v2")]
+    /// The Arkiv entity rules refused the operation.
     Arkiv(crate::arkiv::ArkivFault),
     /// The resolved expiry height already has `expiry_per_block` records
     /// due.
@@ -1122,7 +1063,6 @@ impl fmt::Display for HostFault {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Account(fault) => write!(formatter, "account: {fault:?}"),
-            #[cfg(feature = "arkiv-v2")]
             Self::Arkiv(fault) => write!(formatter, "Arkiv operation: {fault:?}"),
             Self::ExpiryCapacityFull => write!(formatter, "expiry height is at capacity"),
             Self::ExpiryInvalid(ExpiryFault::Overflow) => write!(formatter, "expiry overflows"),
@@ -1142,12 +1082,11 @@ impl Encode for HostFault {
     fn encode_to(&self, encoder: &mut Encoder) {
         match self {
             Self::Account(fault) => {
-                encoder.u8(5);
+                encoder.u8(HOST_ACCOUNT);
                 encoder.put(fault);
             }
-            #[cfg(feature = "arkiv-v2")]
             Self::Arkiv(fault) => {
-                encoder.u8(4);
+                encoder.u8(HOST_ARKIV);
                 encoder.put(fault);
             }
             Self::ExpiryCapacityFull => encoder.u8(HOST_EXPIRY_CAPACITY_FULL),
@@ -1163,9 +1102,8 @@ impl Encode for HostFault {
 impl Decode for HostFault {
     fn decode_from(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
         match decoder.u8()? {
-            5 => Ok(Self::Account(decoder.get()?)),
-            #[cfg(feature = "arkiv-v2")]
-            4 => Ok(Self::Arkiv(decoder.get()?)),
+            HOST_ACCOUNT => Ok(Self::Account(decoder.get()?)),
+            HOST_ARKIV => Ok(Self::Arkiv(decoder.get()?)),
             HOST_EXPIRY_CAPACITY_FULL => Ok(Self::ExpiryCapacityFull),
             HOST_EXPIRY_INVALID => Ok(Self::ExpiryInvalid(decoder.get()?)),
             HOST_EXPIRY_SHORTENED => Ok(Self::ExpiryShortened),
@@ -1243,7 +1181,7 @@ impl Encode for OpOutcome {
     fn encode_to(&self, encoder: &mut Encoder) {
         match self {
             Self::AccountRejected { fault, receipt } => {
-                encoder.u8(7);
+                encoder.u8(OP_ACCOUNT_REJECTED);
                 encoder.put(fault);
                 encoder.put(receipt);
             }
@@ -1278,7 +1216,7 @@ impl Encode for OpOutcome {
 impl Decode for OpOutcome {
     fn decode_from(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
         let outcome = match decoder.u8()? {
-            7 => Self::AccountRejected {
+            OP_ACCOUNT_REJECTED => Self::AccountRejected {
                 fault: decoder.get()?,
                 receipt: decoder.get()?,
             },

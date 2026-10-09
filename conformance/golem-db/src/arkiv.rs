@@ -5,9 +5,13 @@
 //! - one fixed namespace (`golemdb`), created by the adapter in the first
 //!   engine commit; golem-db commit N is engine snapshot N + 1;
 //! - `RecordKey` (32 bytes) -> engine `RecordKey` (1..=32 bytes);
-//! - attributes / fields -> engine `Cell::attribute` / `Cell::field`, typed
-//!   natively: every golem cell type has an engine type with the same value
-//!   domain, order and term bytes (see [`to_value`] and [`from_cell`]);
+//! - attributes / fields -> engine `Cell::attribute` / `Cell::field`. The
+//!   engine's type ids are golem's cell type ids and its fixed-width term
+//!   bytes are golem's stored payloads, so a cell converts by id and payload
+//!   (see [`to_value`] and [`from_cell`]);
+//! - golem's genesis `cell_limits` become the engine's own [`Limits`]; the
+//!   engine enforces them. Only keccak-256 is supported: a Blake3 genesis is
+//!   refused at open.
 //! - `BranchId` -> an adapter registry slot holding an engine `Branch`;
 //!   checkpoint/rollback frames are emulated on engine `Checkpoint`s with
 //!   golem's journal-frame rules;
@@ -27,13 +31,14 @@ use arkiv_db::{
     Branch, Budget, Cell, CellKind as ArkivKind, CellName as ArkivName, Checkpoint, Effect, Engine,
     EngineError, Limits, NamespaceId, NamespaceName, OwnerId, PriceSchedule, Projection,
     RecordKey as ArkivKey, Rejection, Row, SealedCandidate, Snapshot, SnapshotId, StorageError,
-    Value, WriteOp,
+    TypeTag, Value, WriteOp,
 };
 use arkiv_db_redb::{RedbConfig, RedbStore};
 use golemdb_api::{
-    Api, ApiError, BranchId, BranchInfo, CellKind, CellLimits, CellName, CellNameRef, CellType,
-    CellValue, CommitId, FloatWidth, ImmutableDataAddress, ImmutableDataKey, ImmutableDataOrdinal,
-    ImmutableDataRow, ReadTarget, Record, RecordKey, RecordOp, Result, SealInfo, Width, op,
+    Api, ApiError, BranchId, BranchInfo, CellKind, CellLimits, CellName, CellNameRef,
+    CellValue, CommitId, Genesis, HashAlgorithm, ImmutableDataAddress, ImmutableDataKey,
+    ImmutableDataOrdinal, ImmutableDataRow, OpenError, OpenResult, ReadTarget, Record, RecordKey,
+    RecordOp, Result, SealInfo, op,
 };
 use golemdb_cells::system;
 
@@ -196,25 +201,56 @@ pub struct ArkivDb {
     pub description: String,
 }
 
-fn engine_limits(golem: &CellLimits) -> Limits {
-    Limits {
-        max_value_len: (golem.max_bytes_len.max(golem.max_str_len) as usize).max(4096),
-        ..Limits::DEFAULT
+/// golem's genesis -> the engine's limits. The engine has one hash
+/// (keccak-256), so a Blake3 genesis is refused, as golem refuses settings
+/// its backend cannot hold. golem's cell limits map one to one; golem has no
+/// separate indexed-string limit, so attributes take golem's `max_str_len`,
+/// clamped to the engine's 128-byte term-key cap. A cell-name limit above
+/// the engine's 32-byte cap is refused.
+fn engine_limits(genesis: &Genesis) -> OpenResult<Limits> {
+    if genesis.hash_function != HashAlgorithm::Keccak256 {
+        return Err(OpenError::InvalidConfig(format!(
+            "unsupported hash function {:?}: the arkiv engine supports only keccak-256",
+            genesis.hash_function
+        )));
     }
+    let golem = genesis.cell_limits;
+    let limits = Limits {
+        max_cell_name_len: golem.max_cell_name_len as usize,
+        max_str_len: golem.max_str_len as usize,
+        max_bytes_len: golem.max_bytes_len as usize,
+        max_indexed_len: (golem.max_str_len as usize).min(Value::MAX_INDEXED_LEN),
+        ..Limits::DEFAULT
+    };
+    limits
+        .validate()
+        .map_err(|reason| OpenError::InvalidConfig(format!("arkiv engine limits: {reason}")))?;
+    Ok(limits)
+}
+
+/// A storage or engine failure while opening.
+fn open_failure(message: impl std::fmt::Display) -> OpenError {
+    OpenError::Io(std::io::Error::other(message.to_string()))
 }
 
 impl ArkivDb {
     /// Volatile engine; all history retained in memory.
-    pub fn open_memory(limits: CellLimits, options: ArkivOptions) -> Result<Self> {
-        let engine = Engine::with_limits(PriceSchedule::FIXTURE, engine_limits(&limits));
-        Self::setup(Backend::Memory(engine), limits, options, "arkiv memory Engine".into())
+    pub fn open_memory(genesis: &Genesis, options: ArkivOptions) -> OpenResult<Self> {
+        let engine = Engine::with_limits(PriceSchedule::FIXTURE, engine_limits(genesis)?);
+        Self::setup(
+            Backend::Memory(engine),
+            genesis.cell_limits,
+            options,
+            "arkiv memory Engine".into(),
+        )
+        .map_err(open_failure)
     }
 
-    fn durable_genesis(limits: &CellLimits) -> EngineGenesis {
-        let mut genesis = EngineGenesis::new([0x67; 32], PriceSchedule::FIXTURE);
-        genesis.limits = engine_limits(limits);
-        genesis.max_object_bytes = 16 << 20;
-        genesis
+    fn durable_genesis(genesis: &Genesis) -> OpenResult<EngineGenesis> {
+        let mut durable = EngineGenesis::new([0x67; 32], PriceSchedule::FIXTURE);
+        durable.limits = engine_limits(genesis)?;
+        durable.max_object_bytes = 16 << 20;
+        Ok(durable)
     }
 
     fn durable_options(options: &ArkivOptions) -> Options {
@@ -227,21 +263,19 @@ impl ArkivDb {
         }
     }
 
-    /// Reopens a durable database created by [`open_durable`] with the same
-    /// limits. Pending branches of the earlier handle are gone.
+    /// Reopens a durable database created by [`open_durable`]. The engine
+    /// checks `genesis` against the persisted one: different limits are
+    /// refused. Pending branches of the earlier handle are gone.
     /// Used by the ported golem tests only.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn reopen_durable(dir: &Path, limits: CellLimits, options: ArkivOptions) -> Result<Self> {
+    pub fn reopen_durable(dir: &Path, genesis: &Genesis, options: ArkivOptions) -> OpenResult<Self> {
+        let durable = Self::durable_genesis(genesis)?;
         let path = dir.join("arkiv.redb");
         let store = RedbStore::open(&path, RedbConfig::with_cache_size(options.redb_cache))
-            .map_err(storage)?;
+            .map_err(open_failure)?;
         let store: Arc<dyn arkiv_db_storage::versioned::VersionedStore> = Arc::new(store);
-        let engine = DurableEngine::open(
-            store,
-            Self::durable_genesis(&limits),
-            Self::durable_options(&options),
-        )
-        .map_err(|e| internal(format!("open: {e}")))?;
+        let engine = DurableEngine::open(store, durable, Self::durable_options(&options))
+            .map_err(|e| open_failure(format!("open: {e}")))?;
         let head = engine.head();
         Ok(Self {
             backend: Mutex::new(Backend::Durable(Box::new(engine))),
@@ -252,29 +286,29 @@ impl ArkivDb {
             // as engine snapshot 1.
             namespace: NamespaceId::from_ordinal(1).expect("nonzero"),
             offset: 1,
-            limits,
+            limits: genesis.cell_limits,
             options,
             description: format!("arkiv DurableEngine reopened from {}", path.display()),
         })
     }
 
     /// Durable engine over a fresh redb file `dir/arkiv.redb`.
-    pub fn open_durable(dir: &Path, limits: CellLimits, options: ArkivOptions) -> Result<Self> {
+    pub fn open_durable(dir: &Path, genesis: &Genesis, options: ArkivOptions) -> OpenResult<Self> {
+        let durable = Self::durable_genesis(genesis)?;
         let path = dir.join("arkiv.redb");
         let store = RedbStore::create(&path, RedbConfig::with_cache_size(options.redb_cache))
-            .map_err(storage)?;
+            .map_err(open_failure)?;
         let store: Arc<dyn arkiv_db_storage::versioned::VersionedStore> = Arc::new(store);
-        let genesis = Self::durable_genesis(&limits);
         let engine_options = Self::durable_options(&options);
-        let engine = match DurableEngine::initialize(store, genesis, engine_options)
-            .map_err(|e| internal(format!("initialize: {e}")))?
+        let engine = match DurableEngine::initialize(store, durable, engine_options)
+            .map_err(|e| open_failure(format!("initialize: {e}")))?
         {
             Initialization::Committed(engine) => engine,
-            _ => return Err(internal("durable initialization did not commit")),
+            _ => return Err(open_failure("durable initialization did not commit")),
         };
         Self::setup(
             Backend::Durable(Box::new(engine)),
-            limits,
+            genesis.cell_limits,
             options,
             format!(
                 "arkiv DurableEngine on redb ({}, redb cache {} MiB, object cache {} MiB / {} entries)",
@@ -284,6 +318,7 @@ impl ArkivDb {
                 options.object_cache_entries
             ),
         )
+        .map_err(open_failure)
     }
 
     fn setup(
@@ -386,20 +421,19 @@ impl ArkivDb {
         )
     }
 
+    /// golem's name grammar, then the engine's name type. Length limits are
+    /// the engine's: its 32-byte name type and the configured
+    /// `max_cell_name_len`, checked at admission.
     fn check_name(&self, name: &CellName) -> Result<ArkivName> {
-        let text = self
-            .limits
-            .parse_user_name(name.as_bytes())
+        let text = CellNameRef::parse_user(name.as_bytes(), usize::MAX)
             .map_err(|e| ApiError::invalid_argument(e.to_string()))?;
         let text = std::str::from_utf8(text.as_bytes()).expect("grammar is ASCII");
         ArkivName::new(text)
             .map_err(|e| ApiError::invalid_argument(format!("arkiv cell name {text:?}: {e}")))
     }
 
+    /// Value limits are the engine's, checked at admission.
     fn check_value(&self, value: &CellValue) -> Result<Cell> {
-        self.limits
-            .validate_value(value.as_view())
-            .map_err(|e| ApiError::invalid_argument(e.to_string()))?;
         let converted = to_value(value)?;
         Ok(match value.kind() {
             CellKind::Attribute => Cell::attribute(converted),
@@ -463,94 +497,39 @@ fn rejection(rejected: arkiv_db::Rejected) -> ApiError {
     }
 }
 
-/// golem cell -> engine value. Every golem type maps natively, in both
-/// engine profiles; the accessors cannot fail for the matching type.
+/// golem cell -> engine value: the same type id, and golem's payload is
+/// the engine's term bytes for every fixed-width type.
 fn to_value(value: &CellValue) -> Result<Value> {
-    let mismatch = || internal(format!("golem {:?} accessor failed", value.cell_type()));
-    Ok(match value.cell_type() {
-        CellType::Bool => Value::Bool(value.as_bool().ok_or_else(mismatch)?),
-        CellType::Str => Value::str(value.as_str().ok_or_else(mismatch)?),
-        CellType::Bytes => Value::bytes(value.as_bytes().ok_or_else(mismatch)?),
-        CellType::Bytes20 => Value::Addr(value.as_bytes20().ok_or_else(mismatch)?),
-        CellType::FixedBytes(Width::W4) => Value::Bytes4(value.as_bytes4().ok_or_else(mismatch)?),
-        CellType::FixedBytes(Width::W8) => Value::Bytes8(value.as_bytes8().ok_or_else(mismatch)?),
-        CellType::FixedBytes(Width::W16) => {
-            Value::Bytes16(value.as_bytes16().ok_or_else(mismatch)?)
-        }
-        CellType::FixedBytes(Width::W32) => {
-            Value::Bytes32(value.as_bytes32().ok_or_else(mismatch)?)
-        }
-        CellType::Uint(Width::W4) => Value::U32(value.as_u32().ok_or_else(mismatch)?),
-        CellType::Uint(Width::W8) => Value::U64(value.as_u64().ok_or_else(mismatch)?),
-        CellType::Uint(Width::W16) => Value::U128(value.as_u128().ok_or_else(mismatch)?),
-        CellType::Uint(Width::W32) => Value::U256(value.as_u256_be().ok_or_else(mismatch)?),
-        CellType::Int(Width::W4) => Value::I32(value.as_i32().ok_or_else(mismatch)?),
-        CellType::Int(Width::W8) => Value::I64(value.as_i64().ok_or_else(mismatch)?),
-        CellType::Int(Width::W16) => Value::I128(value.as_i128().ok_or_else(mismatch)?),
-        CellType::Int(Width::W32) => Value::I256(value.as_i256_be().ok_or_else(mismatch)?),
-        CellType::Decimal(Width::W4) => {
-            Value::Dec32(value.as_dec32_unscaled().ok_or_else(mismatch)?)
-        }
-        CellType::Decimal(Width::W8) => {
-            Value::Dec64(value.as_dec64_unscaled().ok_or_else(mismatch)?)
-        }
-        CellType::Decimal(Width::W16) => {
-            Value::Dec128(value.as_dec128_unscaled().ok_or_else(mismatch)?)
-        }
-        CellType::Decimal(Width::W32) => {
-            Value::Dec(value.as_dec256_unscaled_be().ok_or_else(mismatch)?)
-        }
-        // golem's codec already rejected NaN and negative zero.
-        CellType::Float(FloatWidth::F32) => {
-            Value::f32(value.as_f32().ok_or_else(mismatch)?).ok_or_else(mismatch)?
-        }
-        CellType::Float(FloatWidth::F64) => {
-            Value::f64(value.as_f64().ok_or_else(mismatch)?).ok_or_else(mismatch)?
-        }
-        CellType::Date32 => Value::Date32(value.as_date32().ok_or_else(mismatch)?),
-        CellType::Timestamp64 => Value::Timestamp64(value.as_timestamp64().ok_or_else(mismatch)?),
+    let mismatch = || internal(format!("golem {:?} payload", value.cell_type()));
+    let tag = TypeTag::from_id(value.cell_type().id()).ok_or_else(mismatch)?;
+    Ok(match tag {
+        TypeTag::Str => Value::str(value.as_str().ok_or_else(mismatch)?),
+        TypeTag::Bytes => Value::bytes(value.as_bytes().ok_or_else(mismatch)?),
+        fixed => Value::from_term_bytes(fixed, value.value()).ok_or_else(mismatch)?,
     })
 }
 
-/// Engine cell -> golem cell. The inverse of [`to_value`]; the engine's
-/// `Key` (an Arkiv entity reference) has no golem counterpart and reads back
-/// as golem `bytes32`.
+/// Engine cell -> golem cell, the inverse of [`to_value`]: golem's encoded
+/// cell is `type id | attribute bit ‖ payload`. The engine's `Key` (an
+/// Arkiv entity reference, id 64) has no golem type and reads back as
+/// golem `bytes32`.
 fn from_cell(cell: &Cell) -> Result<CellValue> {
-    let value = match &cell.value {
-        Value::Bool(v) => CellValue::from_bool(*v),
-        Value::Str(v) => CellValue::from_str(v),
-        Value::Bytes(v) => CellValue::from_bytes(v),
-        Value::Addr(v) => CellValue::from_bytes20(*v),
-        Value::Bytes4(v) => CellValue::from_bytes4(*v),
-        Value::Bytes8(v) => CellValue::from_bytes8(*v),
-        Value::Bytes16(v) => CellValue::from_bytes16(*v),
-        Value::Bytes32(v) | Value::Key(v) => CellValue::from_bytes32(*v),
-        Value::U32(v) => CellValue::from_u32(*v),
-        Value::U64(v) => CellValue::from_u64(*v),
-        Value::U128(v) => CellValue::from_u128(*v),
-        Value::U256(v) => CellValue::from_u256_be(*v),
-        Value::I32(v) => CellValue::from_i32(*v),
-        Value::I64(v) => CellValue::from_i64(*v),
-        Value::I128(v) => CellValue::from_i128(*v),
-        Value::I256(v) => CellValue::from_i256_be(*v),
-        Value::Dec32(v) => CellValue::from_dec32_unscaled(*v),
-        Value::Dec64(v) => CellValue::from_dec64_unscaled(*v),
-        Value::Dec128(v) => CellValue::from_dec128_unscaled(*v),
-        Value::Dec(v) => CellValue::from_dec256_unscaled_be(*v),
-        Value::F32(v) => CellValue::from_f32(v.get())
-            .map_err(|e| internal(format!("stored f32: {e}")))?,
-        Value::F64(v) => CellValue::from_f64(v.get())
-            .map_err(|e| internal(format!("stored f64: {e}")))?,
-        Value::Date32(v) => CellValue::from_date32(*v),
-        Value::Timestamp64(v) => CellValue::from_timestamp64(*v),
+    let (id, payload) = match &cell.value {
+        Value::Str(text) => (TypeTag::Str.id(), text.as_bytes().to_vec()),
+        Value::Bytes(bytes) => (TypeTag::Bytes.id(), bytes.to_vec()),
+        Value::Key(bytes) => (TypeTag::Bytes32.id(), bytes.to_vec()),
+        fixed => (
+            fixed.tag().id(),
+            fixed.term_bytes().expect("fixed-width values have term bytes"),
+        ),
     };
-    let kind = match cell.kind {
-        ArkivKind::Attribute => CellKind::Attribute,
-        ArkivKind::Field => CellKind::Field,
+    let attribute = match cell.kind {
+        ArkivKind::Attribute => 0x80,
+        ArkivKind::Field => 0,
     };
-    value
-        .with_kind(kind)
-        .map_err(|e| internal(format!("stored cell kind: {e}")))
+    let mut encoded = vec![id | attribute];
+    encoded.extend(payload);
+    CellValue::parse(encoded).map_err(|e| internal(format!("stored cell: {e}")))
 }
 
 fn golem_name(name: &str) -> CellName {

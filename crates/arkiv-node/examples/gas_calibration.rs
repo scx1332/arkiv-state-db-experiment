@@ -24,7 +24,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let engine = Engine::with_limits(
             gas::schedule(),
             Limits {
-                max_value_len: 128 * 1024,
+                max_str_len: 128 * 1024,
+                max_bytes_len: 128 * 1024,
                 ..Limits::DEFAULT
             },
         );

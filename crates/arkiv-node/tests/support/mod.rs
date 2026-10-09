@@ -27,10 +27,11 @@ pub const ADMIN: OwnerId = OwnerId::new([0xad; 20]);
 pub const LIMITS: Limits = Limits {
     namespace_cap: 1 << 32,
     max_cells: 8,
-    max_value_len: 64,
+    max_str_len: 64,
+    max_bytes_len: 64,
     max_page: 4,
     max_groups: 8,
-    max_literals: 8,
+    max_literals: 8,    ..Limits::DEFAULT
 };
 
 /// Parameters for the fixtures. Under `PriceSchedule::FIXTURE` and

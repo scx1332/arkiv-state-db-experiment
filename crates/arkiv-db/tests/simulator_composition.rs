@@ -554,23 +554,18 @@ fn assert_prefilled(engine: &DurableEngine) {
 #[test]
 fn prefilled_genesis_has_distinct_encoding_and_one_complete_height_zero_commit() {
     let (g, c) = prefilled();
-    let legacy = genesis();
-    assert_eq!(legacy.initial_state, None);
-    assert_eq!(
-        decode_exact::<EngineGenesis>(&encode(&legacy)).unwrap(),
-        legacy
-    );
-    let mut expected = if cfg!(feature = "arkiv-v2") {
-        b"ARKENG03"
-    } else {
-        b"ARKENG04"
-    }
-    .to_vec();
-    expected.extend_from_slice(&encode(&legacy)[8..]);
+    let empty = genesis();
+    assert_eq!(empty.initial_state, None);
+    assert_eq!(decode_exact::<EngineGenesis>(&encode(&empty)).unwrap(), empty);
+    // The empty genesis ends in the absent-option byte; a prefilled one
+    // replaces it with `01 ‖ header`.
+    let mut expected = encode(&empty);
+    assert_eq!(expected.pop(), Some(0));
+    expected.push(1);
     expected.extend(encode(g.initial_state.as_ref().unwrap()));
     assert_eq!(encode(&g), expected);
     assert_eq!(decode_exact::<EngineGenesis>(&expected).unwrap(), g);
-    assert_ne!(g.id(), legacy.id());
+    assert_ne!(g.id(), empty.id());
     for len in 0..expected.len() {
         assert!(decode_exact::<EngineGenesis>(&expected[..len]).is_err());
     }
@@ -593,7 +588,7 @@ fn prefilled_genesis_has_distinct_encoding_and_one_complete_height_zero_commit()
     assert_eq!(store.stats().since(&before).object_reads(), 0);
     assert_prefilled(&reopened);
     assert!(
-        DurableEngine::open_simulator(store.clone(), legacy, Options::default(), identity())
+        DurableEngine::open_simulator(store.clone(), empty, Options::default(), identity())
             .is_err()
     );
     let c = reopened
@@ -643,7 +638,7 @@ fn prefilled_genesis_limits_and_invariants_fail_without_writes() {
     changed.limits.max_cells = 1;
     variants.push((changed, Options::default()));
     let mut changed = g.clone();
-    changed.limits.max_value_len = 95;
+    changed.limits = changed.limits.with_value_len(95);
     variants.push((changed, Options::default()));
     let mut changed = g.clone();
     changed.max_object_bytes = 500;

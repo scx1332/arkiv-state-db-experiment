@@ -385,7 +385,7 @@ fn verify_genesis_objects(
             }
             let loader = loader(SpaceId::Namespace(id.ordinal()));
             // Raw keys have a fixed codec bound; raw values intentionally have
-            // no Limits.max_value_len admission rule. Preflight has checked their
+            // no Limits value-length admission rule. Preflight has checked their
             // codec width and the genesis object-byte ceiling.
             check_map(&leaf.records, &loader, |_, _| Ok(()))?;
             check_map(&leaf.typed.keys, &loader, |_, _| Ok(()))?;

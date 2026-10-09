@@ -795,12 +795,7 @@ fn partial_initialization_records_are_not_treated_as_a_fresh_store() {
         (Table::Meta, b"engine/profile".to_vec()),
         Some(
             [
-                (if cfg!(feature = "arkiv-v2") {
-                    b"ARKENG02"
-                } else {
-                    b"ARKENG01"
-                })
-                .as_slice(),
+                b"ARKENG01".as_slice(),
                 &1_u32.to_be_bytes(),
             ]
             .concat(),

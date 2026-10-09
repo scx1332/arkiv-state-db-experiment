@@ -76,7 +76,7 @@ fn compatible(spec: &ChainSpec) -> Result<()> {
     if body_bound > RESPONSE_CAP as u64
         || u64::from(p.max_tx_bytes) * 2 + 1024 > REQUEST_CAP as u64
         || l.max_cells > 64
-        || l.max_value_len > 65536
+        || l.max_payload_len() > 65536
         || l.max_page > 4096
     {
         return Err(DemoError::InvalidRequest);

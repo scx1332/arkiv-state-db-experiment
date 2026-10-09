@@ -19,22 +19,19 @@ fn padded(b: &[u8], n: usize) -> Vec<u8> {
 fn tag(v: &Value) -> u8 {
     match v {
         Value::Bool(_) => 1,
-        Value::I64(_) => 2,
-        Value::U64(_) => 3,
-        Value::Str(_) => 4,
-        Value::Bytes(_) => 5,
-        _ => panic!("Arkiv scalar in legacy root fixture"),
+        Value::Str(_) => 2,
+        Value::Bytes(_) => 3,
+        Value::U64(_) => 13,
+        Value::I64(_) => 17,
+        _ => panic!("scalar outside the root fixture"),
     }
 }
 fn value(v: &Value) -> Vec<u8> {
     let mut b = vec![tag(v)];
     match v {
-        Value::Bool(v) => b.push(u8::from(*v)),
-        Value::I64(v) => b.extend(v.to_be_bytes()),
-        Value::U64(v) => b.extend(v.to_be_bytes()),
         Value::Str(v) => b.extend(bytes(v.as_bytes())),
         Value::Bytes(v) => b.extend(bytes(v)),
-        _ => panic!("Arkiv scalar in legacy root fixture"),
+        fixed => b.extend(term_value(fixed)),
     };
     b
 }
@@ -45,14 +42,14 @@ fn term_value(v: &Value) -> Vec<u8> {
         Value::U64(v) => v.to_be_bytes().to_vec(),
         Value::Str(v) => v.as_bytes().to_vec(),
         Value::Bytes(_) => unreachable!(),
-        _ => panic!("Arkiv scalar in legacy root fixture"),
+        _ => panic!("scalar outside the root fixture"),
     }
 }
 fn term(name: &str, t: u8, v: Option<Vec<u8>>) -> Vec<u8> {
-    let mut b = padded(name.as_bytes(), 20);
+    let mut b = padded(name.as_bytes(), 32);
     b.push(t);
     b.push(u8::from(v.is_some()));
-    b.extend(padded(&v.unwrap_or_default(), 64));
+    b.extend(padded(&v.unwrap_or_default(), 128));
     b
 }
 fn handle(m: &BTreeMap<Vec<u8>, Vec<u8>>) -> Vec<u8> {

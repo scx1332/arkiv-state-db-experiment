@@ -11,9 +11,9 @@
 //! | catalog | [`NamespaceId`] big-endian | 8 | [`NamespaceState`]: `descriptor ‖ next_record u64 ‖ records ‖ keys ‖ rows ‖ terms`, each map as `root ‖ len u64` |
 //! | host | raw `[u8; 32]` | 32 | [`Blob`]: `u32 len ‖ bytes` |
 //! | records (raw) | [`RawKey`]: `key ‖ 0x00 pad to 20 ‖ len` | 21 | [`Blob`]: `u32 len ‖ bytes` |
-//! | keys | [`RecordKey`] v2: `len ‖ bytes ‖ 0x00 pad` | 33 | [`RecordId`]: `u64` (nonzero) |
+//! | keys | [`RecordKey`]: `len ‖ bytes ‖ 0x00 pad` | 33 | [`RecordId`]: `u64` (nonzero) |
 //! | rows | [`RecordId`] big-endian | 8 | [`StoredRecord`]: `RecordKey ‖ Vec<(CellName, Cell)>` sorted by name |
-//! | terms | [`TermKey`]: `name ‖ 0x00 pad to 20 ‖ name_len ‖ tag ‖ presence ‖ term bytes ‖ 0x00 pad to 64 ‖ term_len` | 88 | [`Posting`]: `posting root ‖ posting len u64` (len ≥ 1) |
+//! | terms | [`TermKey`]: `name ‖ 0x00 pad to 32 ‖ name_len ‖ tag ‖ presence ‖ term bytes ‖ 0x00 pad to 128 ‖ term_len` | 164 | [`Posting`]: `posting root ‖ posting len u64` (len ≥ 1) |
 //! | postings | [`RecordId`] big-endian | 8 | [`Member`]: `01` |
 //!
 //! A nested map is written as its root hash and entry count; `(EMPTY_ROOT_HASH,
@@ -25,7 +25,7 @@
 //! namespace's space and is staged through [`TrieValue::stage_nested`].
 //!
 //! Decoding checks everything a leaf alone can check (codec rules, name
-//! grammar, sorted unique cells, attributes indexable and at most 64 bytes,
+//! grammar, sorted unique cells, attributes indexable and at most 128 bytes,
 //! nonzero ids, map handles, the key and row counts agreeing, the allocator
 //! ahead of the rows); what depends on the key the leaf sits under (a
 //! catalog leaf's descriptor id, a row's key) is checked where the leaf is
@@ -174,8 +174,8 @@ const TERM_VALUE_MAX: u8 = Value::MAX_INDEXED_LEN as u8;
 /// One index term: a value term (`value = Some`, its term bytes) or the
 /// existence term of a `(name, type)` (`value = None`).
 ///
-/// Keyed as `name ‖ 0x00 pad to 20 ‖ name_len ‖ tag ‖ presence ‖ term bytes
-/// ‖ 0x00 pad to 64 ‖ term_len` (88 bytes, presence `00` for existence with
+/// Keyed as `name ‖ 0x00 pad to 32 ‖ name_len ‖ tag ‖ presence ‖ term bytes
+/// ‖ 0x00 pad to 128 ‖ term_len` (164 bytes, presence `00` for existence with
 /// an empty value field, `01` for a value). Every field has a fixed width
 /// and the padded fields preserve bytewise order, so terms order by name,
 /// then type id, then existence before every value, then value bytes: every
@@ -225,12 +225,12 @@ impl TrieKey for TermKey {
 
     /// # Panics
     ///
-    /// If the name exceeds 20 bytes or the value 64, which name validation
+    /// If the name exceeds 32 bytes or the value 128, which name validation
     /// and admission rule out before any term is built.
     fn encode(&self) -> Vec<u8> {
         let mut key = KeyWriter::new();
         key.padded(self.name.as_str().as_bytes(), TERM_NAME_MAX)
-            .expect("cell names are at most 20 bytes")
+            .expect("cell names are at most 32 bytes")
             .byte(self.tag.id());
         match &self.value {
             None => key
@@ -240,7 +240,7 @@ impl TrieKey for TermKey {
             Some(bytes) => key
                 .byte(PRESENCE_VALUE)
                 .padded(bytes, TERM_VALUE_MAX)
-                .expect("indexed values and query bounds are at most 64 bytes"),
+                .expect("indexed values and query bounds are at most 128 bytes"),
         };
         key.finish()
     }
@@ -431,7 +431,7 @@ impl TrieValue for StoredRecord {
                     || cell.value.encoded_len() > Value::MAX_INDEXED_LEN)
         }) {
             return Err(CodecError::new(
-                "a row attribute is not indexable or longer than 64 bytes",
+                "a row attribute is not indexable or longer than 128 bytes",
             ));
         }
         Ok(Self {
@@ -766,20 +766,20 @@ mod tests {
 
     #[test]
     fn term_keys_have_the_documented_layout() {
-        // Built by hand: "c" padded to 20, length 1, type Str (4), value
-        // presence, "red" padded to 64, length 3.
+        // Built by hand: "c" padded to 32, length 1, type Str (2), value
+        // presence, "red" padded to 128, length 3.
         let mut expected = vec![b'c'];
         expected.extend(vec![0; CellName::MAX_LEN - 1]);
-        expected.extend([1, 4, 1]);
+        expected.extend([1, 2, 1]);
         expected.extend(b"red");
         expected.extend(vec![0; Value::MAX_INDEXED_LEN - 3]);
         expected.push(3);
         let name = CellName::new("c").unwrap();
         assert_eq!(TermKey::value(&name, &Value::str("red")).encode(), expected);
-        // The existence term of n: I64 (2).
+        // The existence term of n: I64 (17).
         let mut expected = vec![b'n'];
         expected.extend(vec![0; CellName::MAX_LEN - 1]);
-        expected.extend([1, 2, 0]);
+        expected.extend([1, 17, 0]);
         expected.extend(vec![0; Value::MAX_INDEXED_LEN + 1]);
         let name = CellName::new("n").unwrap();
         assert_eq!(TermKey::existence(&name, TypeTag::I64).encode(), expected);

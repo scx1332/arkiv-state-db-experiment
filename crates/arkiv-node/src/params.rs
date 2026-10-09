@@ -91,6 +91,8 @@ pub enum GenesisError {
     /// `limits.max_literals` is zero: the expiry sweep's one-literal query
     /// would be refused.
     MaxLiterals,
+    /// A cell limit is outside its range (see `Limits::validate`).
+    CellLimits(&'static str),
 }
 
 impl fmt::Display for GenesisError {
@@ -116,6 +118,7 @@ impl fmt::Display for GenesisError {
             ),
             Self::Reservation(fault) => write!(formatter, "expiry reservation: {fault}"),
             Self::MaxCells => write!(formatter, "records must hold at least one cell"),
+            Self::CellLimits(reason) => formatter.write_str(reason),
             Self::MaxPage => write!(formatter, "query pages must hold at least one row"),
             Self::MaxGroups => write!(formatter, "queries must allow at least one group"),
             Self::MaxLiterals => {
@@ -248,6 +251,7 @@ pub fn check_params(
     if limits.max_cells == 0 {
         return Err(GenesisError::MaxCells);
     }
+    limits.validate().map_err(GenesisError::CellLimits)?;
     if limits.max_page == 0 {
         return Err(GenesisError::MaxPage);
     }

@@ -303,7 +303,7 @@ Verification proceeds as follows, under the caller's resource limits:
    proven absence returns `VerifiedNamespaceAbsent`, surfaced as
    `NamespaceNotFound`, **not** a successful empty query. A missing or
    truncated path is a verification error, not absence.
-3. Derive the exact 88-byte value-term key from the caller's attribute and
+3. Derive the exact 164-byte value-term key from the caller's attribute and
    typed value using `layout.rs` rules (presence byte 1); prove it against
    the authenticated namespace term root. A proven absent term requires
    empty ids, empty rows and no next cursor: it proves an empty Eq result

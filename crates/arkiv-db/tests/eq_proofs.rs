@@ -179,7 +179,7 @@ impl Wire {
         let mut d = Decoder::new(bytes);
         assert_eq!(
             d.u32().unwrap(),
-            if cfg!(feature = "arkiv-v2") { 2 } else { 1 }
+            1
         );
         let snapshot = d.get().unwrap();
         let digest = d.get().unwrap();
@@ -212,7 +212,7 @@ impl Wire {
     }
     fn bytes(&self) -> Vec<u8> {
         let mut e = Encoder::new();
-        e.u32(if cfg!(feature = "arkiv-v2") { 2 } else { 1 });
+        e.u32(1);
         e.put(&self.snapshot);
         e.put(&self.digest);
         e.u8(self.tag);
@@ -259,13 +259,13 @@ fn pages_match_independent_scan_and_posting_root_with_changing_sizes() {
                 .collect();
             let posting_root = hash_builder_root(&leaves);
             assert_eq!(posting_root, reference::root(&leaves));
-            // An independent 88-byte term key; no layout::TermKey reuse.
+            // An independent 164-byte term key; no layout::TermKey reuse.
             let mut term_key = vec![0; CellName::MAX_LEN + Value::MAX_INDEXED_LEN + 4];
             term_key[..4].copy_from_slice(b"kind");
             term_key[CellName::MAX_LEN] = 4;
             let (tag, value) = match &request.query.value {
-                Value::Str(s) => (4, s.as_bytes().to_vec()),
-                Value::U64(n) => (3, n.to_be_bytes().to_vec()),
+                Value::Str(s) => (2, s.as_bytes().to_vec()),
+                Value::U64(n) => (13, n.to_be_bytes().to_vec()),
                 _ => unreachable!(),
             };
             term_key[CellName::MAX_LEN + 1] = tag;
@@ -580,7 +580,6 @@ fn resource_caps_reject_before_large_allocation_and_never_return_partial_rows() 
 }
 
 #[test]
-#[cfg(not(feature = "arkiv-v2"))]
 fn codecs_have_literal_version_one_vectors_and_reject_unknown_tags() {
     let query = EqQuery {
         namespace: ns(1),
@@ -588,7 +587,7 @@ fn codecs_have_literal_version_one_vectors_and_reject_unknown_tags() {
         value: Value::I64(-2),
     };
     let expected = [
-        0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'a', 2, 255, 255, 255, 255, 255, 255, 255,
+        0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'a', 17, 127, 255, 255, 255, 255, 255, 255,
         254, 1, 1,
     ];
     assert_eq!(encode(&query), expected);
@@ -748,7 +747,7 @@ fn independent_witness(mutation: u8) -> (EqRequest, Wire) {
     }
     let catalog = BTreeMap::from([(1u64.to_be_bytes().to_vec(), catalog_leaf)]);
     let header = StateHeader {
-        format: if cfg!(feature = "arkiv-v2") { 2 } else { 1 },
+        format: 1,
         catalog_root: reference::root(&catalog),
         catalog_len: 1,
         next_namespace: 2,
@@ -836,6 +835,15 @@ fn unavailable_storage_is_an_error_and_memory_and_stored_proof_bytes_match() {
             id: &ObjectId,
         ) -> Result<Option<Vec<u8>>, StorageError> {
             Ok(self.0.lock().unwrap().get(&(space, *id)).cloned())
+        }
+
+        fn read_object_bounded(
+            &self,
+            space: SpaceId,
+            id: &ObjectId,
+            _max_bytes: usize,
+        ) -> Result<Option<Vec<u8>>, StorageError> {
+            self.read_object(space, id)
         }
     }
     let (engine, _) = fixture(9);
@@ -943,7 +951,8 @@ fn largest_rows_are_bounded_before_materialization_and_respect_trusted_genesis_l
             ..Limits::DEFAULT
         },
         Limits {
-            max_value_len: 4095,
+            max_str_len: 4095,
+            max_bytes_len: 4095,
             ..Limits::DEFAULT
         },
     ] {
@@ -1104,7 +1113,6 @@ fn every_supported_type_and_historical_expiry_use_selected_state_only() {
 }
 
 #[test]
-#[cfg(not(feature = "arkiv-v2"))]
 fn empty_namespace_proof_has_hand_built_canonical_bytes() {
     fn independent_digest(domain: &[u8], bytes: &[u8]) -> B256 {
         let mut input = vec![domain.len() as u8];
@@ -1215,5 +1223,4 @@ fn inspection_binds_map_roots_keys_and_complete_posting_reconstruction() {
     );
 }
 
-#[cfg(not(feature = "arkiv-v2"))]
 use arkiv_db::{decode_exact, encode};

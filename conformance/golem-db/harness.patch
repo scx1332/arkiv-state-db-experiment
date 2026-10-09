@@ -1,17 +1,9 @@
 diff --git a/crates/harness/Cargo.toml b/crates/harness/Cargo.toml
-index fbfd44f..63f8100 100644
+index fbfd44f..9188242 100644
 --- a/crates/harness/Cargo.toml
 +++ b/crates/harness/Cargo.toml
-@@ -5,8 +5,23 @@ edition.workspace = true
- rust-version.workspace = true
- license.workspace = true
+@@ -7,6 +7,15 @@ license.workspace = true
  
-+[features]
-+default = []
-+# Build our engine with its deployed Arkiv-v2 profile (32-byte cell names,
-+# i32/u256/bytes32/addr scalars, 128-byte indexed values).
-+arkiv-v2 = ["arkiv-db/arkiv-v2"]
-+
  [dependencies]
  golemdb-api = { path = "../../golem-db/crates/api" }
 +# Only for the reserved system-record keys (system::by_key), so the arkiv
@@ -26,7 +18,7 @@ index fbfd44f..63f8100 100644
  anyhow = "1"
  hdrhistogram = "7"
  # Same version as golem-db's storage; only reads per-table stats (see tables.rs).
-@@ -16,3 +31,6 @@ rand_chacha = "0.9"
+@@ -16,3 +25,6 @@ rand_chacha = "0.9"
  rand_distr = "0.5"
  serde = { version = "1", features = ["derive"] }
  toml = "0.9"
@@ -34,7 +26,7 @@ index fbfd44f..63f8100 100644
 +[dev-dependencies]
 +tempfile = "3"
 diff --git a/crates/harness/src/main.rs b/crates/harness/src/main.rs
-index c84a17b..4a5bc33 100644
+index c84a17b..98c6d2e 100644
 --- a/crates/harness/src/main.rs
 +++ b/crates/harness/src/main.rs
 @@ -1,11 +1,14 @@
@@ -52,7 +44,7 @@ index c84a17b..4a5bc33 100644
  
  use std::path::{Path, PathBuf};
  use std::process::Command;
-@@ -70,9 +73,40 @@ fn run(scenario: &Scenario) -> Result<String> {
+@@ -70,9 +73,39 @@ fn run(scenario: &Scenario) -> Result<String> {
          max_map_size: (scenario.database.max_map_size_gib << 30) as usize,
          ..Default::default()
      };
@@ -77,11 +69,10 @@ index c84a17b..4a5bc33 100644
 +            if let Ok(n) = std::env::var("ARKIV_OBJECT_CACHE_ENTRIES") {
 +                opts.object_cache_entries = n.parse()?;
 +            }
-+            let limits = scenario.database.limits;
 +            let db = if backend == "arkiv" {
-+                arkiv::ArkivDb::open_durable(dir, limits, opts)?
++                arkiv::ArkivDb::open_durable(dir, &config.genesis, opts)?
 +            } else {
-+                arkiv::ArkivDb::open_memory(limits, opts)?
++                arkiv::ArkivDb::open_memory(&config.genesis, opts)?
 +            };
 +            let note = db.description.clone();
 +            (Arc::new(db), note)

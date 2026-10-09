@@ -152,7 +152,7 @@ impl SignedGenesis {
             || p.expiry_per_block > 16
             || self.genesis.limits.namespace_cap > 1024
             || self.genesis.limits.max_cells > 32
-            || self.genesis.limits.max_value_len > 128 * 1024
+            || self.genesis.limits.max_payload_len() > 128 * 1024
             || self.genesis.limits.max_page > 64
             || self.genesis.limits.max_groups > 8
             || self.genesis.limits.max_literals > 8

@@ -42,7 +42,7 @@ bytes its parent embeds, so the store is content-addressed.
 
 The crate uses its own node types rather than `alloy_trie`'s `LeafNode` and
 `ExtensionNode`, because those hold paths in `nybbles::Nibbles`, which is
-capped at 64 nibbles (32-byte keys), while engine maps need 33- and 88-byte
+capped at 64 nibbles (32-byte keys), while engine maps need 33- and 164-byte
 keys. Its paths are unpacked nibbles of any length; the byte layout is the
 same format continued to longer paths. Evidence: `node.rs` unit tests
 compare every encoding with alloy's encoders byte for byte wherever alloy
@@ -122,9 +122,9 @@ The engine key encodings (implemented in node step N3b, in
 | catalog | `NamespaceId` big-endian | 8 | 17 | 18 |
 | host | raw `[u8; 32]` | 32 | 65 | 66 |
 | records (raw) | `key ‖ 0x00 pad to 20 ‖ len` | 21 | 43 | 44 |
-| keys | RecordKey v2 `len ‖ bytes ‖ pad` | 33 | 67 | 68 |
+| keys | RecordKey `len ‖ bytes ‖ pad` | 33 | 67 | 68 |
 | rows, postings | `RecordId` big-endian | 8 | 17 | 18 |
-| terms | `name ‖ pad to 20 ‖ name_len ‖ tag ‖ presence ‖ value ‖ pad to 64 ‖ value_len` | 88 | 177 | 178 |
+| terms | `name ‖ pad to 32 ‖ name_len ‖ tag ‖ presence ‖ value ‖ pad to 128 ‖ value_len` | 164 | 329 | 330 |
 
 ## Depth bound
 
@@ -435,25 +435,26 @@ Evidence in `crates/arkiv-db/tests`:
 
   | Block | Hashed nodes | Staged objects | Allowed by the entry writes |
   | --- | --- | --- | --- |
-  | 200 record creations in two namespaces | 710 | 650 | 256,036 |
-  | 20 mixed blocks of 2–30 operations | 28–206 | 27–199 | 562–13,190 |
+  | 200 record creations in two namespaces | 710 | 650 | 438,436 |
+  | 20 mixed blocks of 2–30 operations | 28–206 | 27–199 | 866–22,006 |
   | One key inserted on a crafted 67-node key path | 66 key-map (71 in all) | 66 key-map (71 in all) | 68 key-map (104 in all) |
   | One key removed there, collapsing the deepest branch | 65 key-map | 65 key-map | 68 |
-  | One record added to a crafted 175-node term path | 176 term (188 in all) | 176 term (188 in all) | 356 term (496 in all) |
+  | One record added to a crafted 175-node term path | 177 term (189 in all) | 177 term (189 in all) | 660 term (800 in all) |
 
   The crafted fixtures reach the bounds as closely as valid data allows: 66
   record keys branch at every nibble a 33-byte key encoding can branch on
   (the length's low nibble cannot: 0x21–0x2f exceed 32), so the spine's
   path is 67 = `2·33 + 1` nodes and one more key rehashes 66 of them (its
-  new leaf is inline). 214 terms branch at 172 of the 176 nibbles of the
-  88-byte term encoding; only the name length (equal padded names are
+  new leaf is inline). 214 terms branch at 172 nibbles of the term
+  encoding's name and value fields; only the name length (equal padded names are
   equal names, since names never contain 0x00) and the tag's and presence
   byte's high nibbles cannot differ while the bytes before them agree. The
   value length can: a `Str` value may end in zero bytes, so values that
-  agree on all 64 padded bytes can still differ in length. A valid term
-  path therefore has at most 175 nodes (172 branches, two extensions and
-  a leaf), not 177. Adding a record to the spine term rewrites its leaf
-  (175 path nodes) and its existence term's leaf (one more). These are
+  agree on all padded value bytes can still differ in length. The spine
+  term's path has 175 nodes (172 branches, two extensions and a leaf).
+  Adding a record to the spine term rewrites its leaf (175 path nodes) and
+  its existence term's leaf, with one node on the existence term's side
+  of the trie (two more: 177). These are
   logical counts; hashing time was not measured.
 
 ## Durable integration and remaining work

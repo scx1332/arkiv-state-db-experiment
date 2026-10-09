@@ -114,13 +114,17 @@ fn fixture_schedule_bytes() -> Vec<u8> {
     out
 }
 
-/// `support::LIMITS`: namespace cap 2^32, 8 cells, 64-byte values, pages
-/// of 4, 8 groups, 8 literals.
+/// `support::LIMITS`: namespace cap 2^32, 8 cells, 32-byte names, 64-byte
+/// strings and bytes, 128-byte indexed strings, pages of 4, 8 groups, 8
+/// literals.
 fn limits_bytes() -> Vec<u8> {
     cat(&[
         &be64(1 << 32),
         &be64(8),
+        &be64(32),
         &be64(64),
+        &be64(64),
+        &be64(128),
         &be64(4),
         &be64(8),
         &be64(8),
@@ -184,8 +188,8 @@ fn chain_params_and_genesis() {
     assert_eq!(params_bytes().len(), 52);
     let genesis = genesis();
     let bytes = genesis_bytes();
-    // 4 + 4 + 8 + 8 + 48 + 256 + 52 + 4 + 20.
-    assert_eq!(bytes.len(), 404);
+    // 4 + 4 + 8 + 8 + 72 + 256 + 52 + 4 + 20.
+    assert_eq!(bytes.len(), 428);
     golden(&genesis, &bytes);
     assert_eq!(genesis.digest(), digest_of("arkiv/genesis/v1", &bytes));
 }
@@ -214,10 +218,10 @@ fn genesis_versions_are_checked() {
             },
         );
     }
-    // A schedule with 30 classes (the count sits after 4 + 4 + 8 + 8 + 48
+    // A schedule with 30 classes (the count sits after 4 + 4 + 8 + 8 + 72
     // bytes and the 4-byte schedule id).
     let mut bytes = genesis_bytes();
-    bytes[76..80].copy_from_slice(&30u32.to_be_bytes());
+    bytes[100..104].copy_from_slice(&30u32.to_be_bytes());
     rejects::<Genesis>(
         &bytes,
         DecodeError::ClassCountMismatch {
@@ -344,8 +348,8 @@ fn ops() -> Vec<(TxOp, Vec<u8>)> {
         min_lifetime: 2,
     };
     let expiry_bytes = cat(&[&be64(9), &be64(2)]);
-    let price = cat(&[&lp(b"price"), &[1, 3], &be64(7)]);
-    let note = cat(&[&lp(b"note"), &[2, 4], &lp(b"hi")]);
+    let price = cat(&[&lp(b"price"), &[1, 13], &be64(7)]);
+    let note = cat(&[&lp(b"note"), &[2, 2], &lp(b"hi")]);
     vec![
         (create_namespace("alpha"), cat(&[&[1], &lp(b"alpha")])),
         (
@@ -730,7 +734,7 @@ fn nested_engine_types_stay_strict() {
         &[1, b'a'],
         &be32(1),
         &lp(b"1bad"),
-        &[1, 3],
+        &[1, 13],
         &be64(7),
         &[0],
     ]);

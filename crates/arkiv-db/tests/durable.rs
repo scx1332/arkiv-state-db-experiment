@@ -35,7 +35,6 @@ fn publish(engine: &mut DurableEngine, branch: Branch) {
     ));
 }
 #[test]
-#[cfg(not(feature = "arkiv-v2"))]
 fn hand_built_profile_and_manifest_vectors() {
     let g = EngineGenesis::new([9; 32], PriceSchedule::uniform(1, 2));
     let mut expected = b"ARKENG01".to_vec();
@@ -43,7 +42,7 @@ fn hand_built_profile_and_manifest_vectors() {
         expected.extend(version.to_be_bytes());
     }
     expected.extend([9; 32]);
-    for limit in [1u64 << 32, 64, 4096, 200, 8, 8] {
+    for limit in [1u64 << 32, 64, 32, 4096, 4096, 128, 200, 8, 8] {
         expected.extend(limit.to_be_bytes());
     }
     expected.extend(1u32.to_be_bytes());
@@ -52,6 +51,7 @@ fn hand_built_profile_and_manifest_vectors() {
         expected.extend(2u64.to_be_bytes());
     }
     expected.extend((1024u64 * 1024).to_be_bytes());
+    expected.push(0); // no initial state
     // This vector deliberately pins the initial schedule rather than taking
     // it from the encoding under test.
     assert_eq!(encode(&g), expected);
@@ -80,7 +80,7 @@ fn hand_built_profile_and_manifest_vectors() {
     bytes.extend(empty);
     bytes.extend(0u64.to_be_bytes());
     bytes.extend(1u64.to_be_bytes());
-    bytes.extend(&expected[112..368]);
+    bytes.extend(&expected[136..392]); // the pricing
     bytes.extend(empty);
     bytes.extend(0u64.to_be_bytes());
     bytes.extend(header.root());
@@ -241,5 +241,4 @@ fn ten_thousand_publications_retain_no_resident_history_or_dirty_committed_nodes
     assert_eq!(engine.stats().resident_manifests, 1);
 }
 
-#[cfg(not(feature = "arkiv-v2"))]
 use arkiv_db::{decode_exact, durable::EngineManifest, encode};

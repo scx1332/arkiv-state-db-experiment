@@ -166,5 +166,5 @@ impl<S: KvStore> Database<S> {
     }
 }
 
-/// Logical trie layout profile; v2 requires a separate genesis and store.
-pub const LAYOUT_VERSION: u32 = if cfg!(feature = "arkiv-v2") { 2 } else { 1 };
+/// Version of the logical trie layout, the codec and the proof formats.
+pub const LAYOUT_VERSION: u32 = 1;

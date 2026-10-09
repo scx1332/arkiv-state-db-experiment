@@ -19,27 +19,19 @@ use std::{fmt, sync::Arc};
 /// keys are 32-byte hashes, so they fit as they are; shorter keys are
 /// accepted too.
 ///
-/// The canonical encoding (version [`Self::ENCODING_VERSION`] = 2) is 33
-/// bytes, `len ‖ bytes ‖ zero padding`, a bijection: short keys round-trip
-/// losslessly and every accepted byte string decodes to exactly one key.
-/// The version-1 form was 32 bytes wide and held keys of 1 to 31 bytes; it
-/// remains available through [`Self::encoded_v1`] and [`Self::decode_v1`]
-/// for explicit migration only. The two forms differ in length, so one is
-/// never silently read as the other. No version-1 encoding was ever
-/// persisted. Charges count the raw key length, not the encoding.
+/// The canonical encoding is 33 bytes, `len ‖ bytes ‖ zero padding`, a
+/// bijection: short keys round-trip losslessly and every accepted byte
+/// string decodes to exactly one key. Charges count the raw key length, not
+/// the encoding.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RecordKey(Arc<[u8]>);
 
 impl RecordKey {
     /// Longest accepted key: the SDK's 32-byte entity keys.
     pub const MAX_LEN: usize = 32;
-    /// Width of the canonical (version 2) encoding: the length byte plus
+    /// Width of the canonical encoding: the length byte plus
     /// [`Self::MAX_LEN`] bytes.
     pub const ENCODED_LEN: usize = 33;
-    /// Version of the canonical encoding produced by [`Self::encoded`].
-    pub const ENCODING_VERSION: u32 = 2;
-    /// Width of the version-1 encoding (keys of at most 31 bytes).
-    pub const ENCODED_LEN_V1: usize = 32;
 
     /// Wraps `bytes`; `None` for an empty key or one longer than [`Self::MAX_LEN`].
     pub fn new(bytes: &[u8]) -> Option<Self> {
@@ -53,7 +45,7 @@ impl RecordKey {
         &self.0
     }
 
-    /// Canonical version-2 encoding: `len ‖ bytes ‖ 0x00…`, 33 bytes.
+    /// Canonical encoding: `len ‖ bytes ‖ 0x00…`, 33 bytes.
     pub fn encoded(&self) -> [u8; Self::ENCODED_LEN] {
         let mut out = [0u8; Self::ENCODED_LEN];
         out[0] = u8::try_from(self.0.len()).expect("keys are at most 32 bytes");
@@ -61,35 +53,11 @@ impl RecordKey {
         out
     }
 
-    /// Decodes the canonical version-2 encoding; rejects a length byte of 0
-    /// or above 32 and any non-zero padding.
+    /// Decodes the canonical encoding; rejects a length byte of 0 or above
+    /// 32 and any non-zero padding.
     pub fn decode(encoded: [u8; Self::ENCODED_LEN]) -> Option<Self> {
-        Self::decode_padded(&encoded, Self::MAX_LEN)
-    }
-
-    /// The version-1 encoding (`len ‖ bytes ‖ 0x00…`, 32 bytes), for explicit
-    /// migration only; `None` for a 32-byte key, which version 1 cannot hold.
-    pub fn encoded_v1(&self) -> Option<[u8; Self::ENCODED_LEN_V1]> {
-        let len = self.0.len();
-        if len >= Self::ENCODED_LEN_V1 {
-            return None;
-        }
-        let mut out = [0u8; Self::ENCODED_LEN_V1];
-        out[0] = u8::try_from(len).expect("checked above");
-        out[1..=len].copy_from_slice(&self.0);
-        Some(out)
-    }
-
-    /// Decodes a version-1 encoding, for explicit migration only; rejects a
-    /// length byte of 0 or above 31 and any non-zero padding.
-    pub fn decode_v1(encoded: [u8; Self::ENCODED_LEN_V1]) -> Option<Self> {
-        Self::decode_padded(&encoded, Self::ENCODED_LEN_V1 - 1)
-    }
-
-    /// Shared strict decoder of the `len ‖ bytes ‖ zero padding` forms.
-    fn decode_padded(encoded: &[u8], max_len: usize) -> Option<Self> {
         let len = usize::from(encoded[0]);
-        if !(1..=max_len).contains(&len) {
+        if !(1..=Self::MAX_LEN).contains(&len) {
             return None;
         }
         if encoded[len + 1..].iter().any(|&byte| byte != 0) {
@@ -175,14 +143,16 @@ impl std::error::Error for NameFault {}
 ///
 /// Grammar: ASCII only; the first character is a letter, or `$` followed by a
 /// letter; every later character is a letter, a digit, `_`, `-`, `.` or `:`;
-/// 1 to the selected profile's byte limit; case-sensitive with no normalisation. `#` and `@` never
+/// 1 to [`Self::MAX_LEN`] bytes (writes: [`Limits::max_cell_name_len`]); case-sensitive with no normalisation. `#` and `@` never
 /// occur, so engine-reserved names are unreachable from the data plane.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CellName(Arc<str>);
 
 impl CellName {
-    /// Longest accepted name, in bytes.
-    pub const MAX_LEN: usize = if cfg!(feature = "arkiv-v2") { 32 } else { 20 };
+    /// Longest representable name, in bytes: the hard cap fixed by the
+    /// term-index key's name width. Writes obey the
+    /// configured [`Limits::max_cell_name_len`], which is at most this.
+    pub const MAX_LEN: usize = 32;
 
     /// Validates `name` against the grammar.
     pub fn new(name: &str) -> Result<Self, NameFault> {
@@ -241,102 +211,93 @@ impl fmt::Display for CellName {
     }
 }
 
-/// The type of a value. Ids are local to this repository (they are not the
-/// SDK's typeIds) and are never reassigned.
-///
-/// Ids 1–11 are the original scalars; ids 12–25 complete golem-db's cell
-/// type grid (see `docs/block-format.md`, "Value types"). Every id is
-/// admitted by both engine profiles.
+/// The type of a value. The ids are golem-db's 7-bit cell type ids (golem
+/// `CellType::id`), so one id table serves both systems; `Key`, the only
+/// engine-only type, takes id 64, outside golem's range. Ids are never
+/// reassigned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TypeTag {
-    /// `true` or `false`.
+    /// `true` or `false` (golem `bool`).
     Bool = 1,
-    /// Signed 64-bit integer.
-    I64 = 2,
-    /// Unsigned 64-bit integer.
-    U64 = 3,
-    /// UTF-8 text.
-    Str = 4,
-    /// Opaque bytes; field-only, never indexed.
-    Bytes = 5,
-    /// Signed 32-bit integer.
-    I32 = 6,
-    /// Unsigned 256-bit integer.
-    U256 = 7,
-    /// Signed 256-bit decimal at scale 18 (golem `dec256`).
-    Dec = 8,
-    /// Exactly 32 opaque bytes.
-    Bytes32 = 9,
+    /// UTF-8 text (golem `str`).
+    Str = 2,
+    /// Opaque bytes; field-only, never indexed (golem `bytes`).
+    Bytes = 3,
     /// Exactly 20 address bytes (golem `bytes20`).
-    Addr = 10,
-    /// Exactly 32 entity-reference bytes.
-    Key = 11,
+    Addr = 4,
     /// Exactly 4 opaque bytes.
-    Bytes4 = 12,
+    Bytes4 = 8,
     /// Exactly 8 opaque bytes.
-    Bytes8 = 13,
+    Bytes8 = 9,
     /// Exactly 16 opaque bytes.
-    Bytes16 = 14,
+    Bytes16 = 10,
+    /// Exactly 32 opaque bytes.
+    Bytes32 = 11,
     /// Unsigned 32-bit integer.
-    U32 = 15,
+    U32 = 12,
+    /// Unsigned 64-bit integer.
+    U64 = 13,
     /// Unsigned 128-bit integer.
-    U128 = 16,
+    U128 = 14,
+    /// Unsigned 256-bit integer.
+    U256 = 15,
+    /// Signed 32-bit integer.
+    I32 = 16,
+    /// Signed 64-bit integer.
+    I64 = 17,
     /// Signed 128-bit integer.
-    I128 = 17,
+    I128 = 18,
     /// Signed 256-bit integer.
-    I256 = 18,
+    I256 = 19,
     /// Signed 32-bit decimal at scale 4.
-    Dec32 = 19,
+    Dec32 = 20,
     /// Signed 64-bit decimal at scale 6.
-    Dec64 = 20,
+    Dec64 = 21,
     /// Signed 128-bit decimal at scale 18.
-    Dec128 = 21,
+    Dec128 = 22,
+    /// Signed 256-bit decimal at scale 18 (golem `dec256`).
+    Dec = 23,
     /// IEEE-754 binary32, never NaN or negative zero.
-    F32 = 22,
+    F32 = 24,
     /// IEEE-754 binary64, never NaN or negative zero.
-    F64 = 23,
+    F64 = 25,
     /// Signed days since the Unix epoch.
-    Date32 = 24,
+    Date32 = 28,
     /// Signed microseconds since the Unix epoch.
-    Timestamp64 = 25,
+    Timestamp64 = 29,
+    /// Exactly 32 entity-reference bytes (Arkiv's entity key; engine-only).
+    Key = 64,
 }
 
 impl TypeTag {
-    /// Every tag, in id order. Both profiles admit every tag.
+    /// Every tag, in id order.
     pub const ALL: [Self; 25] = [
         Self::Bool,
-        Self::I64,
-        Self::U64,
         Self::Str,
         Self::Bytes,
-        Self::I32,
-        Self::U256,
-        Self::Dec,
-        Self::Bytes32,
         Self::Addr,
-        Self::Key,
         Self::Bytes4,
         Self::Bytes8,
         Self::Bytes16,
+        Self::Bytes32,
         Self::U32,
+        Self::U64,
         Self::U128,
+        Self::U256,
+        Self::I32,
+        Self::I64,
         Self::I128,
         Self::I256,
         Self::Dec32,
         Self::Dec64,
         Self::Dec128,
+        Self::Dec,
         Self::F32,
         Self::F64,
         Self::Date32,
         Self::Timestamp64,
+        Self::Key,
     ];
-
-    /// Whether the selected engine profile admits this type. Every type is
-    /// admitted by both profiles; the method is kept for callers that gate
-    /// on it.
-    pub const fn is_supported(self) -> bool {
-        true
-    }
 
     /// The type id.
     pub const fn id(self) -> u8 {
@@ -345,11 +306,34 @@ impl TypeTag {
 
     /// The tag with type id `id`, if any.
     pub const fn from_id(id: u8) -> Option<Self> {
-        if id == 0 || id as usize > Self::ALL.len() {
-            None
-        } else {
-            Some(Self::ALL[id as usize - 1])
-        }
+        Some(match id {
+            1 => Self::Bool,
+            2 => Self::Str,
+            3 => Self::Bytes,
+            4 => Self::Addr,
+            8 => Self::Bytes4,
+            9 => Self::Bytes8,
+            10 => Self::Bytes16,
+            11 => Self::Bytes32,
+            12 => Self::U32,
+            13 => Self::U64,
+            14 => Self::U128,
+            15 => Self::U256,
+            16 => Self::I32,
+            17 => Self::I64,
+            18 => Self::I128,
+            19 => Self::I256,
+            20 => Self::Dec32,
+            21 => Self::Dec64,
+            22 => Self::Dec128,
+            23 => Self::Dec,
+            24 => Self::F32,
+            25 => Self::F64,
+            28 => Self::Date32,
+            29 => Self::Timestamp64,
+            64 => Self::Key,
+            _ => return None,
+        })
     }
 
     /// The tag whose [`Self::name`] is `name`, if any.
@@ -417,33 +401,17 @@ impl TypeTag {
 
     /// Whether attributes of this type exist (everything except `Bytes`).
     pub const fn is_indexable(self) -> bool {
-        self.is_supported() && !matches!(self, Self::Bytes)
+        !matches!(self, Self::Bytes)
     }
 
-    /// Whether range predicates apply: the integers, decimals, floats and
-    /// time types. Booleans, strings and the fixed-width byte types are
-    /// equality-only.
+    /// Whether range predicates apply: every indexable type (everything
+    /// except `Bytes`). Ranges order by [`Value::term_bytes`], which is
+    /// golem-db's attribute order: numeric order for the integers,
+    /// decimals, floats and time types, `false < true`, unsigned bytewise
+    /// order for the fixed-width byte types, and bytewise UTF-8 order for
+    /// `Str` (a proper prefix sorts first, so `"a" < "a\0" < "ab"`).
     pub const fn is_ordered(self) -> bool {
-        self.is_supported()
-            && matches!(
-                self,
-                Self::I64
-                    | Self::U64
-                    | Self::I32
-                    | Self::U256
-                    | Self::Dec
-                    | Self::U32
-                    | Self::U128
-                    | Self::I128
-                    | Self::I256
-                    | Self::Dec32
-                    | Self::Dec64
-                    | Self::Dec128
-                    | Self::F32
-                    | Self::F64
-                    | Self::Date32
-                    | Self::Timestamp64
-            )
+        self.is_indexable()
     }
 
     /// Whether prefix predicates apply (`Str`).
@@ -626,9 +594,11 @@ pub enum Value {
 }
 
 impl Value {
-    /// Hard bound on the encoded bytes of an indexed attribute value.
-    /// Field values retain the engine's independently configured value limit.
-    pub const MAX_INDEXED_LEN: usize = if cfg!(feature = "arkiv-v2") { 128 } else { 64 };
+    /// Hard cap on the encoded bytes of an indexed attribute value, fixed
+    /// by the term-index key's value width. Indexed strings obey the
+    /// configured [`Limits::max_indexed_len`], which is at most this; field
+    /// values obey [`Limits::max_str_len`] and [`Limits::max_bytes_len`].
+    pub const MAX_INDEXED_LEN: usize = 128;
 
     /// A text value.
     pub fn str(text: &str) -> Self {
@@ -774,14 +744,16 @@ impl Value {
     }
 
     /// Orders two values of the same ordered type; `None` when the types
-    /// differ or the type is not ordered ([`TypeTag::is_ordered`]). Agrees
-    /// with the byte order of [`Self::term_bytes`].
+    /// differ or the type is not ordered ([`TypeTag::is_ordered`], i.e.
+    /// `Bytes`). Agrees with the byte order of [`Self::term_bytes`].
     pub fn cmp_ordered(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
             (Self::I32(left), Self::I32(right))
             | (Self::Dec32(left), Self::Dec32(right))
             | (Self::Date32(left), Self::Date32(right)) => Some(left.cmp(right)),
-            (Self::U256(left), Self::U256(right)) => Some(left.cmp(right)),
+            (Self::U256(left), Self::U256(right))
+            | (Self::Bytes32(left), Self::Bytes32(right))
+            | (Self::Key(left), Self::Key(right)) => Some(left.cmp(right)),
             (Self::Dec(left), Self::Dec(right)) | (Self::I256(left), Self::I256(right)) => {
                 Some(flip_sign(*left).cmp(&flip_sign(*right)))
             }
@@ -796,6 +768,13 @@ impl Value {
             }
             (Self::F32(left), Self::F32(right)) => Some(left.cmp(right)),
             (Self::F64(left), Self::F64(right)) => Some(left.cmp(right)),
+            (Self::Bool(left), Self::Bool(right)) => Some(left.cmp(right)),
+            // `Str` compares its UTF-8 bytes, which is code point order.
+            (Self::Str(left), Self::Str(right)) => Some(left.as_bytes().cmp(right.as_bytes())),
+            (Self::Addr(left), Self::Addr(right)) => Some(left.cmp(right)),
+            (Self::Bytes4(left), Self::Bytes4(right)) => Some(left.cmp(right)),
+            (Self::Bytes8(left), Self::Bytes8(right)) => Some(left.cmp(right)),
+            (Self::Bytes16(left), Self::Bytes16(right)) => Some(left.cmp(right)),
             _ => None,
         }
     }
@@ -854,7 +833,16 @@ pub struct Row {
 }
 
 /// Instance parameters: every limit user input can reach. Fixed for an
-/// engine's lifetime and checked at admission, before any charge.
+/// engine's lifetime (a durable engine persists them in its genesis) and
+/// checked at admission, before any charge.
+///
+/// The cell limits are golem-db's genesis `cell_limits`
+/// ([`Self::max_cell_name_len`], [`Self::max_str_len`],
+/// [`Self::max_bytes_len`]) plus [`Self::max_indexed_len`] for indexed
+/// strings. The term-index key pads names and indexed values to fixed
+/// widths, so two limits have hard caps: [`CellName::MAX_LEN`] (32) and
+/// [`Value::MAX_INDEXED_LEN`] (128). [`Self::validate`] rejects a
+/// configuration above a cap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Most namespaces the directory admits (see
@@ -862,9 +850,18 @@ pub struct Limits {
     pub namespace_cap: u64,
     /// Most cells a record may hold, and most names a projection may list.
     pub max_cells: usize,
-    /// Longest `Str`/`Bytes` value, in bytes. Indexed values and query
-    /// strings also obey the hard [`Value::MAX_INDEXED_LEN`] bound.
-    pub max_value_len: usize,
+    /// Longest cell name a write may set or remove, in bytes: 1 to
+    /// [`CellName::MAX_LEN`].
+    pub max_cell_name_len: usize,
+    /// Longest `Str` value, attribute or field, in bytes.
+    pub max_str_len: usize,
+    /// Longest `Bytes` value (fields only), in bytes.
+    pub max_bytes_len: usize,
+    /// Longest indexed `Str`, in bytes: a `Str` attribute, and a `Str`
+    /// equality value, range bound, prefix or `terms` bound in a query. At
+    /// most [`Value::MAX_INDEXED_LEN`]; the effective bound is the smaller
+    /// of this and [`Self::max_str_len`].
+    pub max_indexed_len: usize,
     /// Largest query page.
     pub max_page: usize,
     /// Most AND-groups in a query.
@@ -878,23 +875,75 @@ impl Limits {
     /// The namespace is a separate fixed-width ID, not part of these bytes.
     pub const MAX_RAW_KEY_LEN: usize = 20;
 
-    pub(crate) const fn indexed_value_len(&self) -> usize {
-        if self.max_value_len < Value::MAX_INDEXED_LEN {
-            self.max_value_len
-        } else {
-            Value::MAX_INDEXED_LEN
-        }
-    }
-
-    /// The defaults every engine uses unless configured otherwise.
+    /// The defaults every engine uses unless configured otherwise: the name
+    /// and indexed-string limits at their caps.
     pub const DEFAULT: Self = Self {
         namespace_cap: crate::engine::DEFAULT_NAMESPACE_CAP,
         max_cells: 64,
-        max_value_len: 4096,
+        max_cell_name_len: CellName::MAX_LEN,
+        max_str_len: 4096,
+        max_bytes_len: 4096,
+        max_indexed_len: Value::MAX_INDEXED_LEN,
         max_page: 200,
         max_groups: 8,
         max_literals: 8,
     };
+
+    /// The effective bound on an indexed `Str` (attribute or query string):
+    /// the smaller of [`Self::max_indexed_len`] and [`Self::max_str_len`],
+    /// never above [`Value::MAX_INDEXED_LEN`].
+    pub const fn indexed_value_len(&self) -> usize {
+        let mut len = self.max_indexed_len;
+        if self.max_str_len < len {
+            len = self.max_str_len;
+        }
+        if Value::MAX_INDEXED_LEN < len {
+            len = Value::MAX_INDEXED_LEN;
+        }
+        len
+    }
+
+    /// The longest `Str` or `Bytes` value any record may hold.
+    pub const fn max_payload_len(&self) -> usize {
+        if self.max_str_len > self.max_bytes_len {
+            self.max_str_len
+        } else {
+            self.max_bytes_len
+        }
+    }
+
+    /// Whether `value` fits the value limits: the `Str` and `Bytes` limits,
+    /// and for an attribute the indexed-string bound. Fixed-width types have
+    /// no configurable limit, as in golem-db.
+    pub fn admits_value(&self, value: &Value, attribute: bool) -> bool {
+        match value {
+            Value::Str(text) if attribute => text.len() <= self.indexed_value_len(),
+            Value::Str(text) => text.len() <= self.max_str_len,
+            Value::Bytes(bytes) => bytes.len() <= self.max_bytes_len,
+            _ => true,
+        }
+    }
+
+    /// Checks the cell limits against the hard caps. The engine
+    /// constructors and durable genesis require it.
+    pub const fn validate(&self) -> Result<(), &'static str> {
+        if self.max_cell_name_len == 0 {
+            Err("max_cell_name_len must be positive")
+        } else if self.max_cell_name_len > CellName::MAX_LEN {
+            Err("max_cell_name_len exceeds the term-key name width (32)")
+        } else if self.max_indexed_len > Value::MAX_INDEXED_LEN {
+            Err("max_indexed_len exceeds the term-key value width (128)")
+        } else {
+            Ok(())
+        }
+    }
+
+    /// These limits with both `Str` and `Bytes` values bounded by `len`.
+    pub const fn with_value_len(mut self, len: usize) -> Self {
+        self.max_str_len = len;
+        self.max_bytes_len = len;
+        self
+    }
 }
 
 impl Default for Limits {
@@ -916,18 +965,16 @@ pub enum ArgumentFault {
     DuplicateCell,
     /// A name appears in both a patch's set and remove lists.
     SetAndRemoveOverlap,
-    /// A value exceeds the configured value limit or the indexed-value cap.
+    /// A value exceeds the configured `Str`/`Bytes` limit or the
+    /// indexed-string limit.
     ValueTooLarge,
     /// An attribute cell carries a `Bytes` value.
     BytesNotIndexable,
-    /// Retired: never produced. An empty patch is a valid no-op (golem-db
-    /// semantics). The variant and its codec tag 7 remain so that receipts
-    /// recorded before the change still decode.
-    EmptyPatch,
     /// The host path accepts typed record operations only.
     NotHostOperation,
-    /// The scalar belongs to another engine profile.
-    UnsupportedType,
+    /// A cell name (set or removed) is longer than
+    /// [`Limits::max_cell_name_len`].
+    NameTooLong,
 }
 
 impl fmt::Display for ArgumentFault {
@@ -939,9 +986,8 @@ impl fmt::Display for ArgumentFault {
             Self::SetAndRemoveOverlap => "a name is both set and removed",
             Self::ValueTooLarge => "value too large",
             Self::BytesNotIndexable => "bytes values cannot be attributes",
-            Self::EmptyPatch => "patch changes nothing",
             Self::NotHostOperation => "not a host operation",
-            Self::UnsupportedType => "scalar type is unsupported by this profile",
+            Self::NameTooLong => "cell name exceeds the configured name limit",
         };
         formatter.write_str(text)
     }
@@ -955,7 +1001,6 @@ mod tests {
     fn keys_encode_with_a_length_byte_and_zero_padding() {
         assert_eq!(RecordKey::MAX_LEN, 32);
         assert_eq!(RecordKey::ENCODED_LEN, 33);
-        assert_eq!(RecordKey::ENCODING_VERSION, 2);
 
         // b"a" -> 01 61 00…00 (33 bytes).
         let key = RecordKey::new(b"a").unwrap();
@@ -995,26 +1040,6 @@ mod tests {
         dirty[32] = 1;
         assert_eq!(RecordKey::decode(dirty), None);
 
-        // Version 1: 32 bytes wide, keys of at most 31 bytes, migration only.
-        let mut v1 = [0u8; 32];
-        v1[0] = 1;
-        v1[1] = b'a';
-        assert_eq!(key.encoded_v1(), Some(v1));
-        assert_eq!(RecordKey::decode_v1(v1), Some(key));
-        let mut v1 = [0u8; 32];
-        v1[0] = 31;
-        assert_eq!(zeros.encoded_v1(), Some(v1));
-        assert_eq!(RecordKey::decode_v1(v1), Some(zeros));
-        assert_eq!(full.encoded_v1(), None);
-        let mut v1_too_long = [0u8; 32];
-        v1_too_long[0] = 32;
-        assert_eq!(RecordKey::decode_v1(v1_too_long), None);
-        assert_eq!(RecordKey::decode_v1([0u8; 32]), None);
-        let mut v1_dirty = [0u8; 32];
-        v1_dirty[0] = 1;
-        v1_dirty[1] = b'a';
-        v1_dirty[31] = 1;
-        assert_eq!(RecordKey::decode_v1(v1_dirty), None);
     }
 
     #[test]
@@ -1081,7 +1106,11 @@ mod tests {
             Some(std::cmp::Ordering::Less)
         );
         assert_eq!(Value::I64(3).cmp_ordered(&Value::U64(4)), None);
-        assert_eq!(Value::str("a").cmp_ordered(&Value::str("b")), None);
+        assert_eq!(
+            Value::str("a").cmp_ordered(&Value::str("b")),
+            Some(std::cmp::Ordering::Less)
+        );
+        assert_eq!(Value::bytes(b"a").cmp_ordered(&Value::bytes(b"b")), None);
         assert_eq!(Value::Bool(true).encoded_len(), 1);
         assert_eq!(Value::U64(1).encoded_len(), 8);
         assert_eq!(Value::str("héllo").encoded_len(), 6);

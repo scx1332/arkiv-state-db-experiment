@@ -135,15 +135,17 @@ fn one_of_each() -> Vec<Value> {
 #[test]
 fn every_type_id_is_admitted_and_named() {
     assert_eq!(TypeTag::ALL.len(), 25);
-    for (index, tag) in TypeTag::ALL.into_iter().enumerate() {
-        assert_eq!(usize::from(tag.id()), index + 1);
-        assert!(tag.is_supported());
+    for tag in TypeTag::ALL {
         assert_eq!(TypeTag::from_id(tag.id()), Some(tag));
         assert_eq!(TypeTag::from_name(tag.name()), Some(tag));
         assert_eq!(tag.is_indexable(), tag != TypeTag::Bytes);
     }
     assert_eq!(TypeTag::from_id(0), None);
-    assert_eq!(TypeTag::from_id(26), None);
+    for id in [5, 6, 7, 26, 27, 30, 63, 65, 127, 255] {
+        assert_eq!(TypeTag::from_id(id), None, "{id}");
+    }
+    let ids: Vec<u8> = TypeTag::ALL.iter().map(|tag| tag.id()).collect();
+    assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "ALL is in id order");
     let mut seen: Vec<_> = one_of_each().iter().map(Value::tag).collect();
     seen.sort();
     assert_eq!(seen, TypeTag::ALL.to_vec());
@@ -171,18 +173,10 @@ fn ordered_types_sort_by_term_bytes_and_cmp_ordered() {
             assert_eq!(value.cmp_ordered(value), Some(std::cmp::Ordering::Equal));
         }
     }
-    for tag in [
-        TypeTag::Bool,
-        TypeTag::Str,
-        TypeTag::Bytes,
-        TypeTag::Addr,
-        TypeTag::Bytes4,
-        TypeTag::Bytes8,
-        TypeTag::Bytes16,
-        TypeTag::Bytes32,
-        TypeTag::Key,
-    ] {
-        assert!(!tag.is_ordered(), "{tag}");
+    // Every indexable type is ordered (golem orders every attribute by its
+    // stored bytes); only `Bytes`, which is never indexed, is not.
+    for tag in TypeTag::ALL {
+        assert_eq!(tag.is_ordered(), tag != TypeTag::Bytes, "{tag}");
     }
     assert_eq!(Value::U32(1).cmp_ordered(&Value::U64(1)), None);
     assert_eq!(Value::Dec32(1).cmp_ordered(&Value::I32(1)), None);

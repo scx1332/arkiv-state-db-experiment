@@ -1,15 +1,14 @@
-//! Scalar profile compatibility, natural-width encodings, and adversarial proofs.
+//! The single engine profile: hard caps, scalar encodings, and adversarial proofs.
 use arkiv_db::{CellName, NamespaceName, TypeTag, Value, decode_exact, encode};
 
 #[test]
 fn profile_limits_are_explicit_and_namespaces_stay_independent() {
-    let v2 = cfg!(feature = "arkiv-v2");
-    assert_eq!(arkiv_db::LAYOUT_VERSION, if v2 { 2 } else { 1 });
+    assert_eq!(arkiv_db::LAYOUT_VERSION, 1);
     assert_eq!(arkiv_db::CODEC_VERSION, arkiv_db::LAYOUT_VERSION);
     assert_eq!(arkiv_db::state::STATE_FORMAT, arkiv_db::LAYOUT_VERSION);
     assert_eq!(arkiv_db::proof::PROOF_VERSION, arkiv_db::LAYOUT_VERSION);
-    assert_eq!(CellName::MAX_LEN, if v2 { 32 } else { 20 });
-    assert_eq!(Value::MAX_INDEXED_LEN, if v2 { 128 } else { 64 });
+    assert_eq!(CellName::MAX_LEN, 32);
+    assert_eq!(Value::MAX_INDEXED_LEN, 128);
     for len in [0, 20, 21, 32, 33] {
         assert_eq!(
             CellName::new(&"a".repeat(len)).is_ok(),
@@ -51,7 +50,7 @@ fn values() -> Vec<Value> {
 }
 
 #[test]
-fn scalar_widths_and_tags_are_admitted_by_both_profiles() {
+fn scalar_widths_and_tags_round_trip() {
     for v in values() {
         let wire = encode(&v);
         assert_eq!(wire.len(), 1 + v.encoded_len());
@@ -70,14 +69,19 @@ fn scalar_widths_and_tags_are_admitted_by_both_profiles() {
         assert!(Value::from_term_bytes(v.tag(), &vec![0; v.encoded_len() - 1]).is_none());
         assert!(Value::from_term_bytes(v.tag(), &vec![0; v.encoded_len() + 1]).is_none());
     }
-    assert_eq!(encode(&Value::I32(-1)), vec![6, 255, 255, 255, 255]);
+    // `type id ‖ term bytes`: i32 is golem id 16, stored sign-flipped.
+    assert_eq!(encode(&Value::I32(-1)), vec![16, 127, 255, 255, 255]);
     assert_eq!(
         Value::I32(-1).term_bytes().unwrap(),
         vec![127, 255, 255, 255]
     );
     let mut tags: Vec<_> = values().iter().map(|v| v.tag().id()).collect();
+    tags.sort_unstable();
     tags.dedup();
-    assert_eq!(tags, (6..=25).collect::<Vec<u8>>());
+    assert_eq!(
+        tags,
+        [4, 8, 9, 10, 11, 12, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 28, 29, 64]
+    );
     assert_ne!(
         encode(&Value::U256([0; 32])),
         encode(&Value::Bytes32([0; 32]))
@@ -223,23 +227,19 @@ fn all_scalars_prove_equality_and_reject_typed_substitution() {
 }
 
 #[test]
-fn opposite_profile_genesis_and_state_are_rejected() {
+fn foreign_genesis_magic_and_state_format_are_rejected() {
     use arkiv_db::{PriceSchedule, StateHeader, durable::EngineGenesis};
     let genesis = EngineGenesis::new([3; 32], PriceSchedule::FIXTURE);
     let mut wire = encode(&genesis);
-    wire[7] = if cfg!(feature = "arkiv-v2") {
-        b'1'
-    } else {
-        b'2'
-    };
+    wire[7] = b'2';
     assert!(decode_exact::<EngineGenesis>(&wire).is_err());
     let mut state = encode(&genesis.initial_header());
-    state[..4].copy_from_slice(&(if cfg!(feature = "arkiv-v2") { 1u32 } else { 2 }).to_be_bytes());
+    state[..4].copy_from_slice(&2u32.to_be_bytes());
     assert!(decode_exact::<StateHeader>(&state).is_err());
 }
 
 #[test]
-fn scalar_and_string_admission_obeys_profile() {
+fn scalar_and_string_admission_obeys_the_caps() {
     use arkiv_db::{Budget, Cell, Engine, NamespaceId, OwnerId, PriceSchedule, RecordKey, WriteOp};
     let mut engine = Engine::new(PriceSchedule::FIXTURE);
     let mut branch = engine.begin(engine.head(), None).unwrap();
@@ -286,14 +286,13 @@ fn scalar_and_string_admission_obeys_profile() {
     engine.publish(&branch.seal()).unwrap();
 }
 
-#[cfg(feature = "arkiv-v2")]
 #[test]
-fn version_two_genesis_and_query_have_literal_profile_vectors() {
+fn genesis_and_query_have_literal_profile_vectors() {
     use arkiv_db::{NamespaceId, PriceSchedule, durable::EngineGenesis, proof::EqQuery};
     let genesis = EngineGenesis::new([3; 32], PriceSchedule::FIXTURE);
     let wire = encode(&genesis);
-    let mut prefix = b"ARKENG02".to_vec();
-    for version in [2u32, 2, 2, 3, 2, 2] {
+    let mut prefix = b"ARKENG01".to_vec();
+    for version in [1u32, 1, 1, 3, 2, 1] {
         prefix.extend(version.to_be_bytes());
     }
     assert_eq!(&wire[..32], &prefix);
@@ -304,12 +303,12 @@ fn version_two_genesis_and_query_have_literal_profile_vectors() {
         value: Value::I32(-2),
     };
     let mut expected = vec![
-        0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'a', 6, 255, 255, 255, 254,
+        0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'a', 16, 127, 255, 255, 254,
     ];
     // Projection flags bind both the structural key and all committed cells.
     expected.extend([1, 1]);
     assert_eq!(encode(&query), expected);
     assert_eq!(decode_exact::<EqQuery>(&expected).unwrap(), query);
-    expected[3] = 1;
+    expected[3] = 2;
     assert!(decode_exact::<EqQuery>(&expected).is_err());
 }

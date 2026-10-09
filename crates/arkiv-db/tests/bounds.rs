@@ -191,7 +191,8 @@ fn index_values_have_a_hard_byte_cap_while_payloads_keep_their_own_limit() {
     let mut engine = Engine::with_limits(
         PriceSchedule::FIXTURE,
         Limits {
-            max_value_len: 8192,
+            max_str_len: 8192,
+            max_bytes_len: 8192,
             ..Limits::DEFAULT
         },
     );

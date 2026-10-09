@@ -400,7 +400,7 @@ async fn external_admission_full_replay_and_light_paginated_proofs() {
             assert_eq!(page["query"][field], q[field]);
         }
         assert!(page["entities"][0]["creationFlags"]["readonly"].is_boolean());
-        assert_eq!(page["inspection"]["version"], 2);
+        assert_eq!(page["inspection"]["version"], arkiv_db::LAYOUT_VERSION);
         let certificate: SignedHeader =
             unpack(page["certificateBytes"].as_str().unwrap(), 512).unwrap();
         certificate.authenticate(&genesis()).unwrap();
@@ -966,7 +966,7 @@ async fn range_inspection_exposes_only_complete_authenticated_branching_witnesse
     .unwrap();
     assert_eq!(raw["proof"], result["canonicalProof"]);
     let inspection = &result["inspection"];
-    assert_eq!(inspection["version"], 2);
+    assert_eq!(inspection["version"], arkiv_db::LAYOUT_VERSION);
     assert_eq!(
         inspection["stateComposition"]["stateRoot"],
         result["snapshot"]["stateRoot"]

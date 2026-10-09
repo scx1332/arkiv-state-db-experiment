@@ -644,7 +644,6 @@ fn assert_read_sweep<T: Debug + PartialEq>(
 fn record_keys_take_1_to_32_bytes_and_encode_as_length_bytes_padding() {
     assert_eq!(RecordKey::MAX_LEN, 32);
     assert_eq!(RecordKey::ENCODED_LEN, 33);
-    assert_eq!(RecordKey::ENCODING_VERSION, 2);
     assert_eq!(RecordKey::new(b""), None, "empty keys are refused");
     assert_eq!(RecordKey::new(&[7u8; 33]), None, "33-byte keys are refused");
 
@@ -703,26 +702,6 @@ fn record_keys_take_1_to_32_bytes_and_encode_as_length_bytes_padding() {
         assert!(encoded[len + 1..].iter().all(|&byte| byte == 0));
         assert_eq!(RecordKey::decode(encoded), Some(key));
     }
-
-    // Version 1 (32 bytes wide, keys of 1..=31 bytes) stays available for
-    // explicit migration only. The widths differ, so neither form can be
-    // passed where the other is expected.
-    let mut v1 = [0u8; 32];
-    v1[0] = 0x01;
-    v1[1] = 0x61;
-    assert_eq!(short.encoded_v1(), Some(v1));
-    assert_eq!(RecordKey::decode_v1(v1), Some(short.clone()));
-    let mut v1 = [0u8; 32];
-    v1[0] = 0x1f;
-    assert_eq!(zeros.encoded_v1(), Some(v1));
-    assert_eq!(RecordKey::decode_v1(v1), Some(zeros));
-    assert_eq!(entity.encoded_v1(), None, "version 1 cannot hold 32 bytes");
-    let mut v1_too_long = [0u8; 32];
-    v1_too_long[0] = 32;
-    assert_eq!(RecordKey::decode_v1(v1_too_long), None, "v1 length byte 32");
-    let mut v1_dirty = short.encoded_v1().unwrap();
-    v1_dirty[31] = 0x01;
-    assert_eq!(RecordKey::decode_v1(v1_dirty), None, "v1 non-zero padding");
 }
 
 #[test]
@@ -737,10 +716,7 @@ fn record_ids_are_positive_ordinals() {
 
 #[test]
 fn cell_names_follow_the_grammar_and_order_bytewise() {
-    assert_eq!(
-        CellName::MAX_LEN,
-        if cfg!(feature = "arkiv-v2") { 32 } else { 20 }
-    );
+    assert_eq!(CellName::MAX_LEN, 32);
     for good in [
         "a",
         "Z",
@@ -780,36 +756,30 @@ fn cell_names_follow_the_grammar_and_order_bytewise() {
 
 #[test]
 fn type_tags_have_frozen_ids_and_capabilities() {
-    let ids: Vec<u8> = TypeTag::ALL[..5].iter().map(|tag| tag.id()).collect();
-    assert_eq!(ids, vec![1, 2, 3, 4, 5]);
+    let ids: Vec<u8> = TypeTag::ALL[..4].iter().map(|tag| tag.id()).collect();
+    assert_eq!(ids, vec![1, 2, 3, 4]);
     assert_eq!(
-        &TypeTag::ALL[..5],
-        &[
+        [
             TypeTag::Bool,
-            TypeTag::I64,
-            TypeTag::U64,
             TypeTag::Str,
-            TypeTag::Bytes
+            TypeTag::Bytes,
+            TypeTag::U64,
+            TypeTag::I64
         ]
+        .map(TypeTag::id),
+        [1, 2, 3, 13, 17]
     );
     let indexable: Vec<TypeTag> = TypeTag::ALL
         .into_iter()
-        .take(5)
-        .filter(|t| t.is_indexable())
+        .filter(|t| !t.is_indexable())
         .collect();
-    assert_eq!(
-        indexable,
-        vec![TypeTag::Bool, TypeTag::I64, TypeTag::U64, TypeTag::Str]
-    );
-    let ordered: Vec<TypeTag> = TypeTag::ALL
-        .into_iter()
-        .take(5)
-        .filter(|t| t.is_ordered())
-        .collect();
-    assert_eq!(ordered, vec![TypeTag::I64, TypeTag::U64]);
+    assert_eq!(indexable, vec![TypeTag::Bytes]);
+    // Ordered is the same set as indexable: every attribute type.
+    for tag in TypeTag::ALL {
+        assert_eq!(tag.is_ordered(), tag.is_indexable(), "{tag}");
+    }
     let prefix: Vec<TypeTag> = TypeTag::ALL
         .into_iter()
-        .take(5)
         .filter(|t| t.supports_prefix())
         .collect();
     assert_eq!(prefix, vec![TypeTag::Str]);
@@ -872,10 +842,14 @@ fn values_have_frozen_term_bytes_and_encoded_lengths() {
     );
     assert_eq!(
         Value::str("a").cmp_ordered(&Value::str("b")),
-        None,
-        "Str is not ordered"
+        Some(Ordering::Less),
+        "Str orders by its UTF-8 bytes"
     );
-    assert_eq!(Value::Bool(false).cmp_ordered(&Value::Bool(true)), None);
+    assert_eq!(
+        Value::Bool(false).cmp_ordered(&Value::Bool(true)),
+        Some(Ordering::Less)
+    );
+    assert_eq!(Value::bytes(b"a").cmp_ordered(&Value::bytes(b"b")), None);
     assert_ne!(
         Value::I64(1),
         Value::U64(1),
@@ -904,10 +878,13 @@ fn limits_are_fixed_per_engine() {
     let defaults = Limits {
         namespace_cap: 1 << 32,
         max_cells: 64,
-        max_value_len: 4096,
+        max_str_len: 4096,
+        max_bytes_len: 4096,
         max_page: 200,
         max_groups: 8,
         max_literals: 8,
+        max_cell_name_len: CellName::MAX_LEN,
+        max_indexed_len: Value::MAX_INDEXED_LEN,
     };
     assert_eq!(Limits::DEFAULT, defaults);
     assert_eq!(DEFAULT_NAMESPACE_CAP, 1 << 32);

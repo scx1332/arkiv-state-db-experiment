@@ -1,9 +1,12 @@
 # Genesis bundles and deterministic prefills
 
-Status: bounded reference implementation, 2026-09-25. Signed-genesis version 4
-and native protocol 4 implement the small sponsored-rent prefill profile;
-versions 1/2/3 retain their prior encodings and bootstrap rules. This document
-also retains the larger-scale design, which goes beyond the shipped envelope.
+Status: bounded reference implementation, 2026-09-25. The signed genesis's
+optional `PrefillLaunch` implements the small sponsored-rent prefill profile;
+a signed genesis without it creates the entity namespace in block 1. This
+document also keeps the larger-scale design, which goes beyond the shipped
+envelope. The "baseline" and "stages" sections below are the design record of
+2026-09-25; the current wire format is in
+[genesis-bundle-v1.md](genesis-bundle-v1.md).
 The tooling does not authorize or perform a deployment.
 
 The exact implemented wire fields and runtime behavior are frozen in
@@ -71,14 +74,14 @@ files. It deliberately contains no invented state root or launch certificate.
 ## Baseline mechanisms and integration points
 
 The following observations record the baseline that motivated this design.
-Protocol 4 adds the bounded integration described above; the legacy profiles
-keep their behavior. These are not claims about another Arkiv implementation.
+The prefill launch adds the bounded integration described above. These are not
+claims about another Arkiv implementation.
 
 | Existing mechanism | Consequence for this design |
 | --- | --- |
 | [`Genesis`](../crates/arkiv-node/src/block.rs) and [`SignedGenesis`](../crates/arkiv-node/src/signed/protocol.rs) already have strict canonical binary codecs | Human syntax is an authoring layer. Do not replace the codec with TOML or JSON hashing. |
 | `Genesis::header()` derives an empty catalog and host root | A prefilled root needs a new initializer and versioned header construction; copying rows into a running database is invalid. |
-| Signed genesis versions 1/2 describe legacy/gas-only rules; version 3 adds `AccountConfig` | Preserve their exact encodings, roots, bootstrap rules and verification. |
+| The signed genesis carries an `AccountConfig` | Prefill sponsorship debits a declared allocation. |
 | [`accounts.rs`](../crates/arkiv-node/src/accounts.rs) uses sorted positive `(OwnerId20, U256)` allocations, at most 256, and checked supply | Defaults authenticate through genesis. A missing account record means nonce 0 and its allocation, or zero balance. It does not imply that a funded account lacks state. |
 | Signed block 1 is a proposer-only namespace bootstrap | The new prefilled profile must remove that special case in validation, producer, follower, pool and light verification together. |
 | [`arkiv/mod.rs`](../crates/arkiv-node/src/arkiv/mod.rs) derives entity keys from chain, creator, creation nonce and salt | Creation nonces differ from account transaction nonces. Both must be specified at launch. |

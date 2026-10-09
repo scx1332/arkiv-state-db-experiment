@@ -449,7 +449,7 @@ retain the current proof version, limits, verifier and metering. Pin one
 manifest per request. Its state root must match the proof request's
 `SnapshotRef.state_root`; the caller still supplies/resolves protocol block
 identity. An engine commit ID is not a signed block identity and the
-engine must not fabricate a protocol-2 header around it.
+engine must not fabricate a block header around it.
 
 Demonstrate byte-identical supported proofs for equal requests/states in
 memory and durable modes with cache disabled, cold and warm, including

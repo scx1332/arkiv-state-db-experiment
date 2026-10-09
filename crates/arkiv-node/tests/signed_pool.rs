@@ -1,8 +1,10 @@
 //! Nonce ordering, byte accounting and capacity invariants of signed admission.
-#![cfg(feature = "arkiv-v2")]
+use alloy_primitives::U256;
 use arkiv_db::{NamespaceName, OwnerId, encode};
 use arkiv_node::{
     TxEnvelope, TxOp,
+    accounts::AccountConfig,
+    gas,
     signed::{Error, crypto::Signer, pool::*, protocol::*},
 };
 
@@ -12,13 +14,30 @@ fn signer(n: u16) -> Signer {
     Signer::from_bytes(key).unwrap()
 }
 fn genesis() -> SignedGenesis {
-    let mut native = arkiv_node::demo::workload::genesis(7, 1_000);
-    native.admins.clear();
-    native.params.max_admin_per_block = 0;
-    native.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;
-    native.params.max_block_input_bytes = INPUT_CAP;
-    SignedGenesis::new(native, [0x42; 16], *signer(1).address().as_bytes(), 250).unwrap()
+    SignedGenesis::new(
+        default_native_genesis(7, 1_000),
+        [0x42; 16],
+        *signer(1).address().as_bytes(),
+        250,
+        AccountConfig::new(vec![(
+            signer(1).address(),
+            U256::from(1_000_000_000_000_000_000u64),
+        )])
+        .unwrap(),
+    )
+    .unwrap()
 }
+/// Admission against a balance that covers every reservation here, so these
+/// tests isolate nonce ordering, byte accounting and capacity.
+trait Admit {
+    fn admit(&mut self, tx: SignedTx, next: u64) -> Result<Admission, Error>;
+}
+impl Admit for Pool {
+    fn admit(&mut self, tx: SignedTx, next: u64) -> Result<Admission, Error> {
+        self.insert_funded(tx, next, U256::from(10u64).pow(U256::from(30u64)))
+    }
+}
+/// A namespace creation with a budget of `budget` intrinsic-gas units.
 fn tx(g: &SignedGenesis, who: u16, nonce: u64, budget: u64) -> SignedTx {
     let s = signer(who);
     let mut request_id = [0; 32];
@@ -30,7 +49,7 @@ fn tx(g: &SignedGenesis, who: u16, nonce: u64, budget: u64) -> SignedTx {
             chain_id: 7,
             actor: s.address(),
             request_id,
-            tx_budget: budget,
+            tx_budget: budget * gas::TX_INTRINSIC_GAS,
             ops: vec![TxOp::CreateNamespace {
                 name: NamespaceName::new("entities").unwrap(),
             }],
@@ -48,29 +67,17 @@ fn duplicates_conflicts_and_failed_admission_preserve_pending() {
     let g = genesis();
     let mut pool = Pool::new(&g).unwrap();
     let first = tx(&g, 1, 0, 10);
-    assert_eq!(
-        pool.insert_verified(first.clone(), 0),
-        Ok(Admission::Inserted)
-    );
+    assert_eq!(pool.admit(first.clone(), 0), Ok(Admission::Inserted));
     let bytes = pool.bytes();
-    assert_eq!(
-        pool.insert_verified(first.clone(), 0),
-        Ok(Admission::Duplicate)
-    );
+    assert_eq!(pool.admit(first.clone(), 0), Ok(Admission::Duplicate));
     assert_eq!(pool.bytes(), bytes);
     assert_eq!(pool.len(), 1);
     let mut changed = first.tx.clone();
     changed.request_id[0] = 1;
     let changed = SignedTx::sign(&g, 0, changed, &signer(1)).unwrap();
-    assert_eq!(
-        pool.insert_verified(changed, 0),
-        Err(Error("NonceConflict"))
-    );
+    assert_eq!(pool.admit(changed, 0), Err(Error("NonceConflict")));
     let changed = SignedTx::sign(&g, 1, first.tx.clone(), &signer(1)).unwrap();
-    assert_eq!(
-        pool.insert_verified(changed, 0),
-        Err(Error("RequestConflict"))
-    );
+    assert_eq!(pool.admit(changed, 0), Err(Error("RequestConflict")));
     assert_eq!(
         pool.pending(first.tx.actor, first.tx.request_id),
         Some(&first)
@@ -86,12 +93,9 @@ fn duplicates_conflicts_and_failed_admission_preserve_pending() {
         },
     )
     .unwrap();
-    full.insert_verified(first.clone(), 0).unwrap();
-    assert_eq!(
-        full.insert_verified(tx(&g, 2, 0, 10), 0),
-        Err(Error("PoolFull"))
-    );
-    assert_eq!(full.insert_verified(first, 0), Ok(Admission::Duplicate));
+    full.admit(first.clone(), 0).unwrap();
+    assert_eq!(full.admit(tx(&g, 2, 0, 10), 0), Err(Error("PoolFull")));
+    assert_eq!(full.admit(first, 0), Ok(Admission::Duplicate));
 }
 
 #[test]
@@ -100,12 +104,12 @@ fn gaps_become_ready_only_after_the_missing_nonce_and_order_by_arrival() {
     let mut pool = Pool::new(&g).unwrap();
     let a = signer(1).address();
     let b = signer(2).address();
-    pool.insert_verified(tx(&g, 1, 1, 10), 0).unwrap();
-    pool.insert_verified(tx(&g, 2, 0, 10), 0).unwrap();
+    pool.admit(tx(&g, 1, 1, 10), 0).unwrap();
+    pool.admit(tx(&g, 2, 0, 10), 0).unwrap();
     assert_eq!(nonces(&pool.select(|_| Ok(0)).unwrap()), vec![(b, 0)]);
     assert_eq!(pool.contiguous_next(a, 0), 0);
-    pool.insert_verified(tx(&g, 1, 0, 10), 0).unwrap();
-    pool.insert_verified(tx(&g, 2, 1, 10), 0).unwrap();
+    pool.admit(tx(&g, 1, 0, 10), 0).unwrap();
+    pool.admit(tx(&g, 2, 1, 10), 0).unwrap();
     assert_eq!(
         nonces(&pool.select(|_| Ok(0)).unwrap()),
         vec![(b, 0), (a, 0), (a, 1), (b, 1)]
@@ -124,12 +128,12 @@ fn gaps_become_ready_only_after_the_missing_nonce_and_order_by_arrival() {
 #[test]
 fn no_fit_defers_a_sender_and_its_descendants_but_keeps_other_senders() {
     let mut g = genesis();
-    g.genesis.params.user_budget = 100;
+    g.genesis.params.user_budget = 100 * gas::TX_INTRINSIC_GAS;
     let mut pool = Pool::new(&g).unwrap();
-    pool.insert_verified(tx(&g, 1, 0, 80), 0).unwrap();
-    pool.insert_verified(tx(&g, 2, 0, 50), 0).unwrap();
-    pool.insert_verified(tx(&g, 2, 1, 1), 0).unwrap();
-    pool.insert_verified(tx(&g, 3, 0, 10), 0).unwrap();
+    pool.admit(tx(&g, 1, 0, 80), 0).unwrap();
+    pool.admit(tx(&g, 2, 0, 50), 0).unwrap();
+    pool.admit(tx(&g, 2, 1, 1), 0).unwrap();
+    pool.admit(tx(&g, 3, 0, 10), 0).unwrap();
     let chosen = pool.select(|_| Ok(0)).unwrap();
     assert_eq!(
         nonces(&chosen),
@@ -154,8 +158,8 @@ fn signed_wrappers_count_toward_block_bytes() {
     g.limits.max_input_bytes = (length * 2 + 7) as u32;
     g.validate().unwrap();
     let mut pool = Pool::new(&g).unwrap();
-    pool.insert_verified(tx(&g, 1, 0, 10), 0).unwrap();
-    pool.insert_verified(tx(&g, 1, 1, 10), 0).unwrap();
+    pool.admit(tx(&g, 1, 0, 10), 0).unwrap();
+    pool.admit(tx(&g, 1, 1, 10), 0).unwrap();
     let selected = pool.select(|_| Ok(0)).unwrap();
     assert_eq!(selected.txs.len(), 1);
     let both = SignedInputs {
@@ -167,8 +171,8 @@ fn signed_wrappers_count_toward_block_bytes() {
     g.limits.max_input_bytes += 1;
     g.genesis.params.max_block_input_bytes += 1;
     let mut exact = Pool::new(&g).unwrap();
-    exact.insert_verified(tx(&g, 1, 0, 10), 0).unwrap();
-    exact.insert_verified(tx(&g, 1, 1, 10), 0).unwrap();
+    exact.admit(tx(&g, 1, 0, 10), 0).unwrap();
+    exact.admit(tx(&g, 1, 1, 10), 0).unwrap();
     assert_eq!(exact.select(|_| Ok(0)).unwrap().txs.len(), 2);
 }
 
@@ -193,11 +197,8 @@ fn byte_sender_entry_and_per_sender_limits_are_inclusive_and_do_not_evict() {
     ];
     for limits in cases {
         let mut pool = Pool::with_limits(&g, limits).unwrap();
-        pool.insert_verified(first.clone(), 0).unwrap();
-        assert_eq!(
-            pool.insert_verified(tx(&g, 2, 0, 10), 0),
-            Err(Error("PoolFull"))
-        );
+        pool.admit(first.clone(), 0).unwrap();
+        assert_eq!(pool.admit(tx(&g, 2, 0, 10), 0), Err(Error("PoolFull")));
         assert_eq!(pool.len(), 1);
         assert_eq!(pool.bytes(), bytes);
         assert_eq!(
@@ -213,13 +214,10 @@ fn byte_sender_entry_and_per_sender_limits_are_inclusive_and_do_not_evict() {
         },
     )
     .unwrap();
-    pool.insert_verified(first.clone(), 0).unwrap();
-    pool.insert_verified(tx(&g, 1, 1, 10), 0).unwrap();
-    assert_eq!(
-        pool.insert_verified(tx(&g, 1, 2, 10), 0),
-        Err(Error("PoolFull"))
-    );
-    pool.insert_verified(tx(&g, 2, 0, 10), 0).unwrap();
+    pool.admit(first.clone(), 0).unwrap();
+    pool.admit(tx(&g, 1, 1, 10), 0).unwrap();
+    assert_eq!(pool.admit(tx(&g, 1, 2, 10), 0), Err(Error("PoolFull")));
+    pool.admit(tx(&g, 2, 0, 10), 0).unwrap();
     assert_eq!(pool.len(), 3);
     let mut small = Pool::with_limits(
         &g,
@@ -229,7 +227,7 @@ fn byte_sender_entry_and_per_sender_limits_are_inclusive_and_do_not_evict() {
         },
     )
     .unwrap();
-    assert_eq!(small.insert_verified(first, 0), Err(Error("PoolFull")));
+    assert_eq!(small.admit(first, 0), Err(Error("PoolFull")));
     assert!(small.is_empty());
     assert_eq!(
         PoolLimits::default(),
@@ -266,18 +264,12 @@ fn byte_sender_entry_and_per_sender_limits_are_inclusive_and_do_not_evict() {
 fn nonce_window_and_exhaustion_do_not_wrap() {
     let g = genesis();
     let mut pool = Pool::new(&g).unwrap();
-    pool.insert_verified(tx(&g, 1, 15, 10), 0).unwrap();
-    assert_eq!(
-        pool.insert_verified(tx(&g, 1, 16, 10), 0),
-        Err(Error("NonceTooHigh"))
-    );
-    assert_eq!(
-        pool.insert_verified(tx(&g, 2, 0, 10), 1),
-        Err(Error("NonceTooLow"))
-    );
+    pool.admit(tx(&g, 1, 15, 10), 0).unwrap();
+    assert_eq!(pool.admit(tx(&g, 1, 16, 10), 0), Err(Error("NonceTooHigh")));
+    assert_eq!(pool.admit(tx(&g, 2, 0, 10), 1), Err(Error("NonceTooLow")));
     assert!(pool.select(|_| Ok(0)).unwrap().txs.is_empty());
     let last = tx(&g, 2, u64::MAX - 1, 10);
-    pool.insert_verified(last.clone(), u64::MAX - 1).unwrap();
+    pool.admit(last.clone(), u64::MAX - 1).unwrap();
     assert_eq!(pool.contiguous_next(last.tx.actor, u64::MAX - 1), u64::MAX);
     assert_eq!(
         pool.select(|actor| Ok(if actor == last.tx.actor {
@@ -297,7 +289,7 @@ fn acknowledged_nonces_are_sampled_once_per_sender_and_errors_propagate() {
     let g = genesis();
     let mut pool = Pool::new(&g).unwrap();
     for n in 0..16 {
-        pool.insert_verified(tx(&g, 1, n, 10), 0).unwrap();
+        pool.admit(tx(&g, 1, n, 10), 0).unwrap();
     }
     let mut calls = 0;
     let selected = pool
@@ -333,27 +325,21 @@ fn default_entry_and_sender_ceilings_are_enforced_at_full_capacity() {
     let mut pool = Pool::new(&g).unwrap();
     for who in 1..=64 {
         for nonce in 0..16 {
-            pool.insert_verified(tx(&g, who, nonce, 10), 0).unwrap();
+            pool.admit(tx(&g, who, nonce, 10), 0).unwrap();
         }
     }
     assert_eq!(pool.len(), 1024);
-    assert_eq!(
-        pool.insert_verified(tx(&g, 65, 0, 10), 0),
-        Err(Error("PoolFull"))
-    );
+    assert_eq!(pool.admit(tx(&g, 65, 0, 10), 0), Err(Error("PoolFull")));
     let selected = pool.select(|_| Ok(0)).unwrap();
     assert_eq!(selected.txs.len(), 16);
     assert_eq!(pool.len(), 1024);
     let mut senders = Pool::new(&g).unwrap();
     for who in 1..=256 {
-        senders.insert_verified(tx(&g, who, 0, 10), 0).unwrap();
+        senders.admit(tx(&g, who, 0, 10), 0).unwrap();
     }
     assert_eq!(senders.sender_count(), 256);
-    assert_eq!(
-        senders.insert_verified(tx(&g, 257, 0, 10), 0),
-        Err(Error("PoolFull"))
-    );
-    senders.insert_verified(tx(&g, 1, 1, 10), 0).unwrap();
+    assert_eq!(senders.admit(tx(&g, 257, 0, 10), 0), Err(Error("PoolFull")));
+    senders.admit(tx(&g, 1, 1, 10), 0).unwrap();
     assert_eq!(senders.len(), 257);
 }
 
@@ -371,7 +357,10 @@ fn default_retained_byte_cap_rejects_without_eviction() {
                 operation: arkiv_node::arkiv::ArkivOperation::Create {
                     salt: 0,
                     flags: 0,
-                    expiry: arkiv_node::Expiry::PERMANENT,
+                    expiry: arkiv_node::Expiry {
+                        expires_at: 0,
+                        min_lifetime: 1_000,
+                    },
                     attributes: vec![(
                         arkiv_db::CellName::new("$payload").unwrap(),
                         arkiv_db::Value::bytes(&vec![7; 128 * 1024]),
@@ -383,13 +372,13 @@ fn default_retained_byte_cap_rejects_without_eviction() {
             let old = pool.len();
             let bytes = pool.bytes();
             if bytes + size > MAX_BYTES {
-                assert_eq!(pool.insert_verified(signed, 0), Err(Error("PoolFull")));
+                assert_eq!(pool.admit(signed, 0), Err(Error("PoolFull")));
                 assert_eq!(pool.len(), old);
                 assert_eq!(pool.bytes(), bytes);
                 assert!(MAX_BYTES - bytes < size);
                 break 'outer;
             }
-            pool.insert_verified(signed, 0).unwrap();
+            pool.admit(signed, 0).unwrap();
             filled += 1;
         }
     }

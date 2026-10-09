@@ -1,6 +1,3 @@
-#![cfg(not(feature = "arkiv-v2"))]
-// These retained fixtures pin the legacy generic/signed protocol.
-// Arkiv v2 has separate host, profile and crash acceptance suites.
 //! Seeded block histories against an independent oracle.
 //!
 //! For each seed a generator builds 60 blocks of inputs — multi-operation
@@ -68,6 +65,11 @@ const SEEDS: [u64; 4] = [
 const BLOCKS: u64 = 60;
 const ACTORS: [OwnerId; 3] = [ALICE, BOB, CAROL];
 
+/// The Arkiv entity namespace: host-controlled, so static validation
+/// refuses every generic operation on it. Block 1 creates it (owned by
+/// `ADMIN`, never one of [`ACTORS`]) and the generator never addresses it.
+const ENTITY_NAMESPACE: u64 = 1;
+
 /// Five cells, 16-byte values, pages of two (so sweeps and walks read
 /// several pages).
 const LIMITS: Limits = Limits {
@@ -77,7 +79,8 @@ const LIMITS: Limits = Limits {
     max_bytes_len: 16,
     max_page: 2,
     max_groups: 8,
-    max_literals: 8,    ..Limits::DEFAULT
+    max_literals: 8,
+    ..Limits::DEFAULT
 };
 
 /// The block budget is `user_budget + expiry_per_block ×` the dearest
@@ -410,7 +413,7 @@ fn encoded_len(value: &Value) -> u64 {
         Value::I64(_) | Value::U64(_) => 8,
         Value::Str(text) => count(text.len()),
         Value::Bytes(bytes) => count(bytes.len()),
-        _ => panic!("Arkiv scalar in legacy model fixture"),
+        _ => panic!("the generic model generates only bool, i64, u64, str and bytes"),
     }
 }
 
@@ -744,6 +747,9 @@ impl Model {
         let w = self.in_force;
         let (charges, semantic, effect): (Vec<u64>, Option<(usize, Rejection)>, Option<Effect>) =
             match op {
+                TxOp::Arkiv { .. } => {
+                    panic!("the generic model never generates Arkiv operations")
+                }
                 TxOp::Transfer { .. } => {
                     return OpOutcome::HostRejected {
                         fault: HostFault::Account(arkiv_node::accounts::AccountFault::Unsupported),
@@ -1000,7 +1006,10 @@ impl Model {
     /// Applies an operation the oracle predicted to apply.
     fn apply(&mut self, actor: OwnerId, op: &TxOp, injected: Option<Value>) {
         match op {
-            TxOp::Transfer { .. } => panic!("legacy oracle never applies native account transfers"),
+            TxOp::Transfer { .. } => {
+                panic!("the generic model never applies native account transfers")
+            }
+            TxOp::Arkiv { .. } => panic!("the generic model never generates Arkiv operations"),
             TxOp::CreateNamespace { name } => {
                 self.namespaces.insert(
                     self.next_namespace,
@@ -1573,10 +1582,15 @@ impl Generator {
         let owned: Vec<u64> = model
             .namespaces
             .iter()
-            .filter(|(_, state)| state.owner == actor)
+            .filter(|(id, state)| **id != ENTITY_NAMESPACE && state.owner == actor)
             .map(|(id, _)| *id)
             .collect();
-        let all: Vec<u64> = model.namespaces.keys().copied().collect();
+        let all: Vec<u64> = model
+            .namespaces
+            .keys()
+            .copied()
+            .filter(|id| *id != ENTITY_NAMESPACE)
+            .collect();
         match self.rng.below(40) {
             0 => 99,
             1..=3 if !all.is_empty() => *self.rng.pick(&all),
@@ -1721,7 +1735,12 @@ fn generate(
     let mut inputs = BlockInputs::default();
     let mut weights = Vec::new();
     if height == 1 {
-        for (actor, name) in [(ALICE, "alpha"), (BOB, "beta"), (CAROL, "gamma")] {
+        for (actor, name) in [
+            (ADMIN, "entities"),
+            (ALICE, "alpha"),
+            (BOB, "beta"),
+            (CAROL, "gamma"),
+        ] {
             let op = TxOp::CreateNamespace {
                 name: NamespaceName::new(name).unwrap(),
             };
@@ -1752,7 +1771,8 @@ fn generate(
         if let Some((&id, state)) = work
             .namespaces
             .iter()
-            .nth(usize::try_from(generator.rng.below(count(work.namespaces.len()))).unwrap())
+            .filter(|(id, _)| **id != ENTITY_NAMESPACE)
+            .nth(usize::try_from(generator.rng.below(count(work.namespaces.len() - 1))).unwrap())
         {
             let old = state.owner;
             let new = *ACTORS.iter().find(|actor| **actor != old).unwrap();
@@ -2024,7 +2044,7 @@ fn oracle_reservation_matches_the_parameters() {
 mod root_model;
 
 #[test]
-fn continuous_protocol_two_200_blocks_match_independent_roots_outcomes_and_pages() {
+fn continuous_demo_200_blocks_match_independent_roots_outcomes_and_pages() {
     use arkiv_db::proof::{EqQuery, EqRequest, ProofLimits, SnapshotRef, VerifiedEq, verify_eq};
     use arkiv_node::demo::{
         auth::{SignedHeader, TrustConfig},
@@ -2072,10 +2092,7 @@ fn continuous_protocol_two_200_blocks_match_independent_roots_outcomes_and_pages
     assert!(lights.iter().all(|n| n.chain.is_none()));
     let mut model = Model::new();
     let mut history = Vec::new();
-    assert_eq!(
-        trust.genesis.header().state_root,
-        Some(root_model::root(&model))
-    );
+    assert_eq!(trust.genesis.header().state_root, root_model::root(&model));
     for height in 1..=200 {
         let inputs = workload::inputs(CHAIN, height, 7);
         let predicted = model.block(height, &[], &inputs.txs);
@@ -2087,7 +2104,7 @@ fn continuous_protocol_two_200_blocks_match_independent_roots_outcomes_and_pages
         );
         assert_eq!(
             block.header.state_root,
-            Some(root_model::root(&model)),
+            root_model::root(&model),
             "independent root at {height}"
         );
         for full in &mut fulls {
@@ -2122,17 +2139,17 @@ fn continuous_protocol_two_200_blocks_match_independent_roots_outcomes_and_pages
                             genesis_hash: trust.genesis_hash,
                             height: header.height,
                             block_hash: accepted.hash(),
-                            state_root: accepted.state_root.unwrap(),
+                            state_root: accepted.state_root,
                         },
                         query: EqQuery {
-                            namespace: ns(1),
+                            namespace: ns(2),
                             attribute: attribute.clone(),
                             value: Value::U64(1),
                         },
                         limit,
                         continuation: None,
                     };
-                    let mut expected: Vec<_> = model.namespaces[&1]
+                    let mut expected: Vec<_> = model.namespaces[&2]
                         .records
                         .iter()
                         .filter(|(_, r)| {

@@ -53,7 +53,7 @@ def main():
             (directory / "allocations.json").write_text(json.dumps({owner: str(1000 * 10**18)}))
             start("producer", ["producer", "--run-dir", directory / "producer", "--key-file", directory / "owner.key",
                                "--listen", endpoints["producer"].removeprefix("http://"), "--private-listen", endpoints["private"].removeprefix("http://"),
-                               "--gas-profile", "glm-v2", "--allocations-file", directory / "allocations.json", "--chain-id", "9317"])
+                               "--allocations-file", directory / "allocations.json", "--chain-id", "9317"])
             status = request(endpoints["producer"], "status")
             identity = status["identity"]
             pins = ["--peer", endpoints["producer"], "--genesis-hash", identity["genesisHash"], "--proposer", status["proposer"],
@@ -96,7 +96,7 @@ def main():
             verify({k: v for k, v in query.items() if k != "upper"}, 3)
             verify({**query, "lower": {"value": "2", "inclusive": True}, "upper": {"value": "3", "inclusive": True}}, 0)
             rejected(endpoints["light"], "query/range/verified", {k: v for k, v in query.items() if k not in ("lower", "upper")})
-            for change in ({"limit": 1}, {"cursor": "0x00"}, {"valueType": "str"}, {"lower": {"value": "-1", "inclusive": True}}):
+            for change in ({"limit": 1}, {"cursor": "0x00"}, {"valueType": "bytes"}, {"lower": {"value": "-1", "inclusive": True}}):
                 rejected(endpoints["light"], "query/range/verified", {**query, **change})
             for name in ("producer", "full", "light"):
                 assert request(endpoints[name], "status")["head"] == head, "queries changed state"

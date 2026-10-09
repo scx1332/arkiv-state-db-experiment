@@ -1,12 +1,13 @@
-# GLM gas v1
+# GLM gas schedule
 
-For native balances, transfers and actual fee payment, see [GLM accounts (`glm-v2`)](glm-accounts-v1.md). This document describes the unchanged gas-only `glm-v1` profile.
+Every signed native chain runs the `glm-v2` gas profile: this gas schedule plus
+[GLM accounts](glm-accounts-v1.md), which debit the fees from funded balances
+and burn them. This document describes the schedule: how transaction execution
+and finite entity occupancy are priced in gas.
 
-This opt-in native-chain profile prices transaction execution and finite entity
-occupancy in gas. It uses a **1 gwei reference price**, meaning 1,000,000,000
-GLM base units per gas, with 18 decimal places per GLM. Fees are **quoted, not
-debited**: there is no balance ledger, fee market, EIP-1559 base fee, miner tip,
-or Ethereum JSON-RPC compatibility implied by this profile.
+Gas is priced at a fixed **1 gwei**, meaning 1,000,000,000 GLM base units per
+gas, with 18 decimal places per GLM. There is no fee market, EIP-1559 base fee
+or miner tip.
 
 The default block limit is **100,000,000 gas**, with **90,000,000 gas** available
 to declared user transaction budgets; the rest protects expiry processing.
@@ -15,24 +16,19 @@ apply. The gas limit is not a throughput promise, and the existing 16-transactio
 cap can bind before gas does. 50–200 million gas is the intended experimental
 block range, subject to validating the expiry reservation.
 
-## Version and activation
+## Schedule identity
 
 Schedule ID `0x474c4d01` (`GLM` + version 1) commits the exact 31 engine prices in
 genesis. The node rejects different weights under this ID. Host intrinsic and
-rent rules are part of this named profile, in addition to engine metering model
-3. Admin pricing changes cannot activate, replace, or alter this profile: use a
-fresh genesis. The signed-genesis envelope uses version 2 for GLM gas v1;
-legacy chains retain version 1, and mismatched version/profile pairs are
-rejected. Old binaries reject the new genesis before trusting its rules.
-Existing fixture-priced chains keep their old behavior. The signed transaction
-and header envelope formats are unchanged; `tx_budget` is the transaction gas limit.
-Receipts, outcomes and signed headers commit the charged units through the
-existing outcome commitment. No public deployment is performed by this change.
+rent rules are part of this named schedule, in addition to engine metering model
+3. Admin pricing changes cannot enter, replace, or alter it
+(`AdminRejection::GasProfileLocked`); a signed genesis without it is invalid.
+`tx_budget` is the transaction gas limit. Receipts, outcomes and signed headers
+commit the charged units through the outcome commitment.
 
-Create a new producer with `--gas-profile glm-v1` (see `arkiv-proposer --help`
-for the other required identity, path and key arguments). The status response
-advertises `capabilities.gas`, including whether the profile is active, exact
-limits, quote price, finite-lifetime restriction and `feesDebited: false`.
+The status response advertises `capabilities.gas` (profile `glm-v2`, exact
+limits, gas price, rent rule, finite-lifetime restriction and
+`feesDebited: true`).
 
 ## Storage units and rent
 
@@ -65,15 +61,16 @@ changes the real duration bought by the same charge.
 - Extending expiry prepays the entity's current size for the added blocks.
 - Shrinking or deleting gives no refund. Regrowing pays for the renewed increase.
 - Ownership transfer does not change occupancy, but pays execution gas.
-- Permanent entities (`u64::MAX` expiry) are rejected in this profile. V1 does not
-  pretend that a finite fee purchases unbounded retention.
+- Permanent entities (`u64::MAX` expiry) are rejected: a finite fee does not
+  purchase unbounded retention.
 
 All arithmetic is checked and integer-only, using a wide intermediate for
 unit-block multiplication and one upward division per operation. An operation
 reserves rent before running the engine; a rejected engine operation does not
 charge that rent. If a later operation fails an atomic transaction, state is
 rolled back but already consumed execution and rent gas remains in its receipt.
-There are no monetary debits or refunds in this implementation.
+The fee for the gas used is debited and burned (see
+[GLM accounts](glm-accounts-v1.md)); there are no storage refunds.
 
 Expiry removes live occupancy. Historical snapshots and signed transaction
 bodies remain stored under the current no-pruning policy. Rent therefore prices
@@ -89,7 +86,12 @@ An empty patch (golem-db's no-op) pays the directory and key lookups and the
 patch base weight only; it writes nothing, so it has no cell, row or map-update
 charges. Every scalar type is charged by its encoded width alone
 (`Value::encoded_len`: 1 to 32 bytes for the fixed-width types); no type has a
-type-specific price.
+type-specific price. Reads are priced the same way: a range over any ordered
+type (every indexable type, including `bool`, `str` and the fixed-width byte
+types) costs one `TermSeek`, one `TermVisit` per distinct term in the run and
+one `PostingEntry` per match, exactly as a numeric range or a `str` prefix
+does; a term visit compares at most 128 bytes (the indexed-string cap).
+Configured cell limits change which inputs are admitted, not any price.
 The full price array lives in `crates/arkiv-node/src/gas.rs`. Invalid operations
 still consume their preceding work; gas is a capacity budget, not only a count
 of successfully written entities.
@@ -117,20 +119,20 @@ benchmark. Hardware-based calibration remains future work.
 Reproduce the table:
 
 ```sh
-cargo run -p arkiv-node --features arkiv-v2 --example gas_calibration
+cargo run -p arkiv-node --example gas_calibration
 ```
 
 Reference fee calculations use exact integers and decimal strings:
 `gas × 1,000,000,000` base units, divided by `10^18` for GLM display. For example,
-1,000,000 gas quotes 0.001 GLM; a completely consumed 100,000,000-gas block quotes
-0.1 GLM. Neither number means that tokens were transferred.
+1,000,000 gas costs 0.001 GLM; a completely consumed 100,000,000-gas block costs
+0.1 GLM.
 
 ## Validation
 
-The profile's six integration tests cover exact gas-limit success and failure,
-independent producer/full replay, finite lifetime enforcement, batch rollback and
-nonce behavior, growth/shrink/extension/delete accounting, signed-genesis version
-pinning, restart of durable full and light stores, proof verification after
-restart, and expiry processing alongside the maximum declared user gas budget.
-Four unit tests cover storage-unit arithmetic, rounding, overflow and exact GLM
-formatting. Existing engine and node tests run under both feature profiles.
+`cargo test -p arkiv-node --test gas_execution` covers exact gas-limit success
+and failure, independent producer/full replay, finite lifetime enforcement, batch
+rollback and nonce behavior, growth/shrink/extension/delete accounting, restart
+of durable full and light stores, proof verification after restart, and expiry
+processing alongside the maximum declared user gas budget. Unit tests in
+`gas.rs` cover storage-unit arithmetic, rounding, overflow and exact GLM
+formatting.

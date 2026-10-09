@@ -280,14 +280,10 @@ impl ChainSpec {
         if genesis.format_version != FORMAT_VERSION {
             return Err(GenesisError::UnsupportedFormat(genesis.format_version));
         }
-        if genesis.protocol_version != PROTOCOL_VERSION
-            && !crate::block::root_bearing_protocol(genesis.protocol_version)
-        {
+        if genesis.protocol_version != PROTOCOL_VERSION {
             return Err(GenesisError::UnsupportedProtocol(genesis.protocol_version));
         }
-        if !crate::gas::validate_schedule(&genesis.pricing)
-            || (!cfg!(feature = "arkiv-v2") && crate::gas::is_active(&genesis.pricing))
-        {
+        if !crate::gas::validate_schedule(&genesis.pricing) {
             return Err(GenesisError::InvalidGasSchedule);
         }
         check_params(&genesis.params, &genesis.limits, &genesis.pricing)?;
@@ -321,17 +317,6 @@ impl ChainSpec {
     /// The protocol version.
     pub const fn protocol_version(&self) -> u32 {
         self.genesis.protocol_version
-    }
-
-    /// The protocol selects header 1 (legacy) or 2 (terminal state root).
-    pub const fn header_version(&self) -> u32 {
-        // Prefill changes initialization/execution, while reusing the existing
-        // root-bearing header and state codecs.
-        if self.genesis.protocol_version == crate::block::PREFILL_PROTOCOL_VERSION {
-            crate::block::DEMO_PROTOCOL_VERSION
-        } else {
-            self.genesis.protocol_version
-        }
     }
 
     /// Execution parameters.

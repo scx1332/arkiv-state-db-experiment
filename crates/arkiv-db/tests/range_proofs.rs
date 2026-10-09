@@ -261,7 +261,10 @@ fn unsupported_and_mixed_bounds_fail_before_reading() {
         (Included(Value::U64(1)), Included(Value::I64(2))),
         (Included(Value::str("a")), Included(Value::Bool(true))),
         (Included(Value::bytes(b"a")), Unbounded),
-        (Unbounded, Excluded(Value::str(&"x".repeat(Value::MAX_INDEXED_LEN + 1)))),
+        (
+            Unbounded,
+            Excluded(Value::str(&"x".repeat(Value::MAX_INDEXED_LEN + 1))),
+        ),
     ] {
         let r = request(&snapshot, lower, upper);
         assert!(

@@ -1,6 +1,6 @@
 # Arkiv system and scalar compatibility plan
 
-Status: implementation authorized by the user on 2026-09-24; delivered as the explicit `arkiv-v2` profile. See [implementation contract and validation](arkiv-v2-compatibility.md). The original plan below is retained as design context. Later user authorization permits stopping the existing experiment and deploying fresh compatible stores; old stores must never be reinterpreted in place.
+Status: implementation authorized by the user on 2026-09-24; delivered as the node's Arkiv entity protocol (originally behind an `arkiv-v2` cargo feature, now the only build). See [implementation contract and validation](arkiv-v2-compatibility.md). The original plan below is retained as design context. Later user authorization permits stopping the existing experiment and deploying fresh compatible stores; old stores must never be reinterpreted in place.
 
 ## Recommendation
 

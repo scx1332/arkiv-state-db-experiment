@@ -556,7 +556,10 @@ fn prefilled_genesis_has_distinct_encoding_and_one_complete_height_zero_commit()
     let (g, c) = prefilled();
     let empty = genesis();
     assert_eq!(empty.initial_state, None);
-    assert_eq!(decode_exact::<EngineGenesis>(&encode(&empty)).unwrap(), empty);
+    assert_eq!(
+        decode_exact::<EngineGenesis>(&encode(&empty)).unwrap(),
+        empty
+    );
     // The empty genesis ends in the absent-option byte; a prefilled one
     // replaces it with `01 ‖ header`.
     let mut expected = encode(&empty);

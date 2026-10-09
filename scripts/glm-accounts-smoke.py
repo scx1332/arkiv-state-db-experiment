@@ -61,7 +61,7 @@ def main():
             (directory / "allocations.json").write_text(json.dumps({addresses["producer"]: str(1000 * 10**18), addresses["alice"]: str(10 * 10**18)}))
             producer = ["producer", "--run-dir", str(directory / "producer"), "--key-file", str(directory / "producer.key"),
                         "--listen", endpoints["producer"].removeprefix("http://"), "--private-listen", endpoints["private"].removeprefix("http://"),
-                        "--gas-profile", "glm-v2", "--allocations-file", str(directory / "allocations.json"), "--chain-id", "9301"]
+                        "--allocations-file", str(directory / "allocations.json"), "--chain-id", "9301"]
             start("producer", producer)
             status = request(endpoints["producer"], "status")
             assert status["capabilities"]["gas"]["feesDebited"] is True
@@ -106,7 +106,11 @@ def main():
             assert failed["executionStatus"] == "failed" and failed["gasUsed"] == "21000"
             assert account("bob")["nextNonce"] == "2"
             query = {"query": "group = u64(1)", "requireProof": True, "height": height, "namespace": "1", "limit": 64, "cursor": None}
-            assert len(request(endpoints["light"], "query/text", query)["entities"]) == 1
+            # The light node answers ServerBusy while its sync holds the node;
+            # that read-only refusal is safe to retry.
+            text = wait(lambda: (lambda r: None if r.get("error") == "ServerBusy" else r)(
+                request(endpoints["light"], "query/text", query)))
+            assert len(text["entities"]) == 1, text
             proof = request(endpoints["light"], "query/account", {"actor": addresses["bob"], "height": height})
             assert proof["verificationStatus"]["status"] == "verified"
             assert proof["balanceWei"] == account("bob")["balanceWei"]

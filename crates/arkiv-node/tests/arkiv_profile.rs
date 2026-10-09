@@ -1,5 +1,4 @@
-//! Isolated v2 producer/full/light acceptance. No running service or network.
-#![cfg(feature = "arkiv-v2")]
+//! Isolated Arkiv entity producer/full/light acceptance. No running service or network.
 use arkiv_db::{
     durable::Options,
     encode,
@@ -42,7 +41,7 @@ fn inspect(host: &Host, light: &mut Light, r: &VerifiedRequest) -> serde_json::V
     let proof = host.proof(&q).unwrap();
     let value = light.inspect(r, &q, p.as_ref(), &proof).unwrap();
     assert_eq!(value["inspection"]["version"], arkiv_db::LAYOUT_VERSION);
-    assert_eq!(value["inspection"]["proofProfile"], "eq-page-v2");
+    assert_eq!(value["inspection"]["proofProfile"], "eq-page-v1");
     let mut changed = proof.clone();
     let last = changed.len() - 1;
     changed[last] ^= 1;
@@ -287,7 +286,17 @@ async fn http_light_inspection_is_typed_bounded_and_independently_verifiable() {
         .await
         .unwrap();
     assert_eq!(status["capabilities"]["profile"], "arkiv-entity-v2");
-    assert_eq!(status["protocolVersion"], 3);
+    assert_eq!(status["protocolVersion"], 1);
+    assert_eq!(
+        status["capabilities"]["valueTypes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        arkiv_db::TypeTag::ALL.len()
+    );
+    assert_eq!(status["capabilities"]["entityNamespace"]["namespace"], "1");
+    assert!(status["capabilities"].get("scalarTypes").is_none());
+    assert!(status["capabilities"].get("queryLanguage").is_none());
     let r = request(5, "$owner", "addr", hex(&[0xb0; 20]).into(), 64);
     let response = client
         .post(format!("{local}/sim/v1/query/inspect"))

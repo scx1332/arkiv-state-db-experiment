@@ -137,8 +137,8 @@ Implemented in milestones 0 to 2 (details in the namespace contract):
   test is extended to every operator (`query_isolation.rs`).
 
 The descriptor is committed through the catalog into the state root (node
-step N3b). Still to do: carry that root in the block header (header v2) and
-prove descriptors to a verifier (point proofs, N3d). An owner filter or a
+step N3b) and every block header carries that root. Still to do: prove
+descriptors to a verifier (point proofs, N3d). An owner filter or a
 prefix applied after global enumeration
 does not provide isolation, and the shared-directory allowance stays explicit
 and bounded. Wall-clock latency remains subject to shared hardware
@@ -978,7 +978,7 @@ Evidence: `roots.rs` (every map root and the state root equal an
 independent construction over hand-built leaves; identical content gives
 one root whatever the history; old roots never change; every logical field
 changes the root) and `rehash.rs` (rehashing per block against the prepaid
-`RootUpdate` writes). The demo activates header v2; N3c adds durable
+`RootUpdate` writes). Every block header carries the state root; N3c adds durable
 manifests, bounded loading/staging and the same historical proof bytes,
 with [measured evidence](engine-storage-v1-report.md). Remaining: broader
 point-read APIs and N4 durable node integration.
@@ -1085,7 +1085,7 @@ choices and test vectors:
   schedule invariants, checked arithmetic, budget charge points, admission
   validation, rollback accounting and the receipt type, as listed above.
 - Decided in node step N0b-1: the record-key width (1 to 32 bytes), its
-  canonical encoding version 2 and the version-1 compatibility rules.
+  canonical 33-byte encoding.
 - Decided in node step N0b-2: the canonical codec version 1 (rules, layouts
   and tag tables of the engine types, strict decoders enforcing type
   invariants but not admission limits, receipts without ledgers, price
@@ -1098,7 +1098,7 @@ choices and test vectors:
   mutation serial) and the fallible `try_` surface with `StorageError`
   from the storage contract. Settled in N3b (below).
 - Decided in node step N0b-3: block format version 1 (genesis, chain
-  parameters, header version 1 without a state root, block inputs,
+  parameters, the header, block inputs,
   transaction envelopes, outcomes, their tag tables and the
   `arkiv/<object>/v1` hash domains), the genesis invariants and the expiry
   reservation (deletion reserve, sweep read bound, host expiry read),
@@ -1106,7 +1106,7 @@ choices and test vectors:
   transactions), per-transaction rollback, the host-state due schedule and
   expiry capacity, static validation, selection, request identity and
   replay validity; see [part 2 of the block format](block-format.md#part-2-block-format-version-1).
-  Implemented in the demo: header version 2 with the state root (protocol 2).
+  The header carries the terminal state root (one header layout).
 - Decided in node step N3b: the trie key encodings and leaf layouts of
   every engine map, the `StateHeader` (state format 1) and the state-root
   domain `arkiv/state/v1`; storage errors poison a branch.

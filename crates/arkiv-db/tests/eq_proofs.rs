@@ -177,10 +177,7 @@ struct Wire {
 impl Wire {
     fn parse(bytes: &[u8]) -> Self {
         let mut d = Decoder::new(bytes);
-        assert_eq!(
-            d.u32().unwrap(),
-            1
-        );
+        assert_eq!(d.u32().unwrap(), 1);
         let snapshot = d.get().unwrap();
         let digest = d.get().unwrap();
         let tag = d.u8().unwrap();
@@ -587,8 +584,8 @@ fn codecs_have_literal_version_one_vectors_and_reject_unknown_tags() {
         value: Value::I64(-2),
     };
     let expected = [
-        0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'a', 17, 127, 255, 255, 255, 255, 255, 255,
-        254, 1, 1,
+        0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'a', 17, 127, 255, 255, 255, 255, 255,
+        255, 254, 1, 1,
     ];
     assert_eq!(encode(&query), expected);
     assert_eq!(decode_exact::<EqQuery>(&expected).unwrap(), query);

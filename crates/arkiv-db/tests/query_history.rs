@@ -526,7 +526,7 @@ fn ord_value(value: &Value) -> Option<OrdValue> {
         Value::U64(number) => Some(OrdValue::U64(*number)),
         Value::Str(text) => Some(OrdValue::Str(text.to_string())),
         Value::Bytes(_) => None,
-        _ => unreachable!("legacy fixture"),
+        _ => unreachable!("the fixture uses only bool, i64, u64 and str"),
     }
 }
 

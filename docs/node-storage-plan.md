@@ -28,8 +28,8 @@ engine map is a `MerkleMap` with frozen state-format-1 encodings, every
 state has a logical state root, the `try_` surface is fallible with branch
 poisoning, and the physical literals were re-derived for the trie; its
 persistence is now implemented by N3c engine storage v1; broader point
-proofs (N3d) remain open. Protocol-2
-headers and the complete equality-proof slice are implemented by the
+proofs (N3d) remain open. Root-bearing
+headers and the complete equality-proof slice were first implemented by the
 2026-09-24 [full/light-node demo](full-light-demo.md): a continuous volatile producer, independently executing
 full followers, authenticated light followers and complete proofs for one
 bounded equality-query profile. That proof slice precedes durability. The storage work below and broader query proofs/SDK integration
@@ -362,7 +362,7 @@ instead of claiming the target solely because quick repair is enabled.
 
 The step names below remain feature groups, not a strict schedule. The
 [demo steps D0–D3](full-light-demo.md#implementation-order-and-review-gates)
-have supplied N1, protocol-2/follower transport and the narrow in-memory
+have supplied N1, root-bearing headers, follower transport and the narrow in-memory
 complete-Eq proof slice. [Engine storage v1](engine-storage-v1.md) now supplies
 N3c and the bounded unsigned-simulator N4 slice; next address broader N4 policy
 and the remaining N3d/N5 work. Engine-only durable
@@ -404,9 +404,8 @@ charges, their check order and existing read rules are unchanged. The rationale 
 the [charge table](snapshot-query-plan.md#operation-cost-is-part-of-the-first-milestone)
 (node step N3b replaced that table's path bounds with the creation bounds
 `2L + 2` and measured rehashing against them).
-`RecordKey` accepts 1 to 32 bytes; its canonical encoding version 2 is 33
-bytes, and the 32-byte version-1 form remains only for explicit migration
-(see [the record-key encoding](snapshot-query-plan.md#record-model-and-query-subset)).
+`RecordKey` accepts 1 to 32 bytes; its canonical fixed-width encoding is 33
+bytes (see [the record-key encoding](snapshot-query-plan.md#record-model-and-query-subset)).
 Evidence: the meter and record unit tests, the rewritten key vectors in
 `records.rs`, and every receipt literal and transcribed charge table in the
 engine tests and `examples/records.rs`, re-derived by hand; the memory
@@ -514,8 +513,8 @@ trie visits (17 directory nodes per lookup at most, 34 per write), and every
 structure-specific literal was re-derived by hand. Evidence: `roots.rs`,
 `storage_faults.rs`, `rehash.rs`, `trace_regression.rs`, `isolation.rs`
 and `query_isolation.rs` (see the [test strategy](testing.md)). Not done in
-N3b: persistence (N3c) and broader point proofs (N3d). Protocol 2 / header
-v2 and the bounded Eq-page proof slice now ship in the demo.
+N3b: persistence (N3c) and broader point proofs (N3d). Root-bearing headers
+and the bounded Eq-page proof slice have shipped since.
 
 N1 is the first useful runnable deliverable, explicitly volatile. N2 was a
 bounded implementation experiment, not a claim of durable engine support.

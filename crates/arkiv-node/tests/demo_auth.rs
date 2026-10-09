@@ -1,6 +1,3 @@
-#![cfg(not(feature = "arkiv-v2"))]
-// These retained fixtures pin the legacy generic/signed protocol.
-// Arkiv v2 has separate host, profile and crash acceptance suites.
 use arkiv_db::{B256, decode_exact, encode};
 use arkiv_node::demo::{
     DemoError,
@@ -33,13 +30,12 @@ fn header_chain(trust: &TrustConfig, key: &SigningKey) -> HeaderChain {
     .unwrap()
 }
 #[test]
-fn activation_empty_genesis_and_prepared_publication() {
+fn empty_genesis_root_and_prepared_publication() {
     let (trust, _) = fixture();
     let mut chain = MemoryChain::new(trust.validate().unwrap());
-    assert_eq!(chain.head().version(), 2);
     assert_eq!(
         chain.head().state_root,
-        Some(chain.snapshot(0).unwrap().state_root())
+        chain.snapshot(0).unwrap().state_root()
     );
     let initial = *chain.head();
     let prepared = chain.prepare(2000, BlockInputs::default()).unwrap();
@@ -50,22 +46,14 @@ fn activation_empty_genesis_and_prepared_publication() {
     let block = chain.produce(2000, BlockInputs::default()).unwrap();
     let mut follower = MemoryChain::new(trust.validate().unwrap());
     let mut wrong = block.clone();
-    wrong.header.state_root = Some(B256::ZERO);
+    wrong.header.state_root = B256::ZERO;
     assert!(follower.apply(&wrong).is_err());
     assert_eq!(follower.height(), 0);
     follower.apply(&block).unwrap();
     assert_eq!(chain.head(), follower.head());
-    let mut legacy = trust.genesis;
-    legacy.protocol_version = 1;
-    assert!(
-        ChainSpec::new(legacy.clone())
-            .unwrap()
-            .genesis_header()
-            .state_root
-            .is_none()
-    );
-    let mut downgraded = MemoryChain::new(ChainSpec::new(legacy).unwrap());
-    assert!(downgraded.apply(&block).is_err());
+    let mut other = trust.genesis;
+    other.protocol_version += 1;
+    assert!(ChainSpec::new(other).is_err());
 }
 #[test]
 fn literal_authentication_layout_vectors() {
@@ -74,14 +62,14 @@ fn literal_authentication_layout_vectors() {
     let signed = SignedHeader::sign(trust.genesis_hash, header, &key);
     // Hand-built widths/layout, independent of the authentication encoder.
     let mut header_bytes = Vec::new();
-    header_bytes.extend(2u32.to_be_bytes());
+    header_bytes.extend(1u32.to_be_bytes());
     header_bytes.extend(7u64.to_be_bytes());
     header_bytes.extend(0u64.to_be_bytes());
     header_bytes.extend([0; 32]);
     header_bytes.extend(1000u64.to_be_bytes());
     header_bytes.extend(header.inputs_digest.as_slice());
     header_bytes.extend(header.outcomes_digest.as_slice());
-    header_bytes.extend(header.state_root.unwrap().as_slice());
+    header_bytes.extend(header.state_root.as_slice());
     assert_eq!(header_bytes, encode(&header));
     let mut envelope = vec![0, 0, 0, 1];
     envelope.extend(trust.genesis_hash.as_slice());
@@ -107,15 +95,15 @@ fn literal_authentication_layout_vectors() {
     );
     assert_eq!(
         trust.genesis_hash.to_string(),
-        "0xfa7644f3af1f8abcccd8b82f5e5aa5192de3b96cc9b9a1ccd608ac0fef70ce65"
+        "0xf86387061dd1b349fe75c0ab569fad18de85f71d11df31e593b0fc29dd2841e0"
     );
     assert_eq!(
         signing_message(trust.genesis_hash, &header).to_string(),
-        "0xec8bc103da5c3b22315267efa35e7def570bd6985c5d3274dda1b842a2550712"
+        "0x1a2c0790e1d75de18978cb2ff60c3636f22e804d420ebc0dbae2756f6c0b8fc2"
     );
     assert_eq!(
         wire::hex(&signed.signature),
-        "0x0e795975d2f6cf0ad593cacf62318750c84f5458d8c94e2c4a17a96812d7c017ded6a718adae2496b695b71ee82bdb447ed2350f4a4dce7074eb7db8467e8f0d"
+        "0x840c0ba065fd0bcb6b8ce27810e14a22204193676e91f43240394cdfddb50cb2261c3fcc82042c3b5a51b1fde12f0a93201bd1f9269204f40c6931784e6fdb08"
     );
     assert_eq!(decode_exact::<SignedHeader>(&envelope).unwrap(), signed);
     let mut bad = envelope.clone();
@@ -157,11 +145,6 @@ fn signature_linkage_equivocation_and_false_root_trust_boundary() {
             SignedHeader::sign(trust.genesis_hash, h, &key)
         },
         {
-            let mut h = valid.header;
-            h.state_root = None;
-            SignedHeader::sign(trust.genesis_hash, h, &key)
-        },
-        {
             let mut h = valid.clone();
             h.signature[0] ^= 1;
             h
@@ -181,7 +164,7 @@ fn signature_linkage_equivocation_and_false_root_trust_boundary() {
     );
     assert_eq!(c.conflicts().len(), 2);
     let mut false_header = valid.header;
-    false_header.state_root = Some(B256::ZERO);
+    false_header.state_root = B256::ZERO;
     let false_signed = SignedHeader::sign(trust.genesis_hash, false_header, &key);
     // Authentication alone endorses a signed false root. This is explicit,
     // not described as consensus or execution verification.
@@ -289,6 +272,14 @@ fn largest_admitted_body_queue_identity_and_prepublication_failure() {
         tx_budget: 10000,
         ops: vec![op],
     };
+    // Namespace 1 is the host-controlled entity namespace; the raw write
+    // targets namespace 2.
+    let entities = tx(
+        4,
+        TxOp::CreateNamespace {
+            name: NamespaceName::new("entities").unwrap(),
+        },
+    );
     let create = tx(
         1,
         TxOp::CreateNamespace {
@@ -298,7 +289,7 @@ fn largest_admitted_body_queue_identity_and_prepublication_failure() {
     let put = tx(
         2,
         TxOp::Put {
-            namespace: NamespaceId::from_ordinal(1).unwrap(),
+            namespace: NamespaceId::from_ordinal(2).unwrap(),
             key: vec![1; 20],
             value: vec![2; 1024],
         },
@@ -315,6 +306,8 @@ fn largest_admitted_body_queue_identity_and_prepublication_failure() {
         genesis,
     };
     let mut producer = Node::producer(trust.clone(), key.clone(), 100, None).unwrap();
+    producer.submit(entities).unwrap();
+    producer.produce().unwrap();
     assert_eq!(
         producer.submit(create.clone()).unwrap()["status"],
         "pending"
@@ -335,7 +328,7 @@ fn largest_admitted_body_queue_identity_and_prepublication_failure() {
         DemoError::ProofLimitExceeded
     );
     assert_eq!(producer.status().pending, "1");
-    assert_eq!(producer.height(), 0);
+    assert_eq!(producer.height(), 1);
     producer.response_cap = wire::RESPONSE_CAP;
     producer.produce().unwrap();
     assert_eq!(producer.submit(create).unwrap()["status"], "included");
@@ -348,7 +341,7 @@ fn largest_admitted_body_queue_identity_and_prepublication_failure() {
     );
     let returned = producer
         .handle(Request::Blocks {
-            from_height: "2".into(),
+            from_height: "3".into(),
             limit: 16,
         })
         .unwrap();
@@ -367,7 +360,7 @@ fn largest_admitted_body_queue_identity_and_prepublication_failure() {
     for body in batch.blocks {
         full.apply_body(body).unwrap();
     }
-    assert_eq!(full.height(), 2);
+    assert_eq!(full.height(), 3);
     assert!(!full.apply_body(body.clone()).unwrap());
     let mut duplicate = body;
     let mut tampered_block: arkiv_node::Block =
@@ -375,7 +368,7 @@ fn largest_admitted_body_queue_identity_and_prepublication_failure() {
     tampered_block.outcomes.spent += 1;
     duplicate.block = wire::packed(&tampered_block);
     assert_eq!(full.apply_body(duplicate), Err(DemoError::InvalidHeader));
-    assert_eq!(full.height(), 2);
+    assert_eq!(full.height(), 3);
     let identity = RequestIdentity {
         scope: Scope::Tx,
         chain_id: 7,
@@ -388,7 +381,7 @@ fn largest_admitted_body_queue_identity_and_prepublication_failure() {
         })
         .unwrap();
     assert_eq!(status["status"], "included");
-    assert_eq!(status["height"], "2");
+    assert_eq!(status["height"], "3");
     let mut too_big = put;
     too_big.request_id = [3; 32];
     if let TxOp::Put { value, .. } = &mut too_big.ops[0] {

@@ -2,11 +2,10 @@
 //! record writes; and `get_record`, under model version 3.
 //!
 //! What this file establishes:
-//! - The frozen encodings: `RecordKey` (version 2: `len ‖ bytes ‖ zero
-//!   padding`, 33 bytes, keys of 1..=32 bytes; the version-1 migration
-//!   form), the term bytes of every indexable `Value`, the `TypeTag` ids
-//!   and capabilities, and the `CellName` grammar, checked against the
-//!   vectors of the milestone-2 brief.
+//! - The frozen encodings: `RecordKey` (`len ‖ bytes ‖ zero padding`, 33
+//!   bytes, keys of 1..=32 bytes), the term bytes of every indexable
+//!   `Value`, the `TypeTag` ids and capabilities, and the `CellName`
+//!   grammar, checked against literal vectors.
 //! - `CreateRecord`, `PatchRecord` and `DeleteRecord` effects and whole
 //!   receipts (ledgers included) as hand-derived literals under the FIXTURE
 //!   weights, including the charge order under every budget (a budget sweep

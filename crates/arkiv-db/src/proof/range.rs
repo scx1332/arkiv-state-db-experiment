@@ -46,7 +46,9 @@ impl RangeQuery {
         if [&self.lower, &self.upper]
             .into_iter()
             .filter_map(bound_value)
-            .any(|value| matches!(value, Value::Str(_)) && value.encoded_len() > limits.indexed_value_len())
+            .any(|value| {
+                matches!(value, Value::Str(_)) && value.encoded_len() > limits.indexed_value_len()
+            })
         {
             return Err(ProofError::InvalidRequest);
         }

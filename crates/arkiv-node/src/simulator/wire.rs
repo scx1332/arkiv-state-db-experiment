@@ -92,7 +92,7 @@ impl HeaderDto {
             height: h.height.to_string(),
             hash: hex(h.hash().as_slice()),
             parent_hash: hex(h.parent_hash.as_slice()),
-            state_root: hex(h.state_root.ok_or(Error("UnsupportedVersion"))?.as_slice()),
+            state_root: hex(h.state_root.as_slice()),
             timestamp_ms: h.timestamp_ms.to_string(),
             inputs_digest: hex(h.inputs_digest.as_slice()),
             outcomes_digest: hex(h.outcomes_digest.as_slice()),

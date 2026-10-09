@@ -127,9 +127,7 @@ pub fn capture(
     // A committed nonce is advanced once per successful create. Reconstruct
     // starting nonces from terminal state so even create-then-delete has a
     // deterministic touched key without storing a payload side channel.
-    #[cfg(feature = "arkiv-v2")]
     let mut create_nonces: BTreeMap<[u8; 20], u64> = BTreeMap::new();
-    #[cfg(feature = "arkiv-v2")]
     for (tx, result) in inputs.txs.iter().zip(&outcomes.txs) {
         if result.status == TxStatus::Committed {
             let count = tx
@@ -150,7 +148,6 @@ pub fn capture(
             }
         }
     }
-    #[cfg(feature = "arkiv-v2")]
     for (actor, count) in &mut create_nonces {
         let bytes = branch
             .try_host_get(&crate::arkiv::nonce_key(actor))?
@@ -207,9 +204,7 @@ pub fn capture(
                     _ => {}
                 }
             }
-            #[cfg(feature = "arkiv-v2")]
             let mut arkiv_key = None;
-            #[cfg(feature = "arkiv-v2")]
             if let TxOp::Arkiv { operation, .. } = op {
                 use crate::arkiv::ArkivOperation as A;
                 arkiv_key = match operation {
@@ -236,7 +231,6 @@ pub fn capture(
             }
             let kind = match op {
                 TxOp::Transfer { .. } => "transfer",
-                #[cfg(feature = "arkiv-v2")]
                 TxOp::Arkiv { operation, .. } => match operation {
                     crate::arkiv::ArkivOperation::Create { .. } => "createRecord",
                     crate::arkiv::ArkivOperation::Delete { .. } => "deleteRecord",
@@ -269,7 +263,6 @@ pub fn capture(
                 && let Some(ns) = ns
             {
                 match op {
-                    #[cfg(feature = "arkiv-v2")]
                     TxOp::Arkiv { .. } => {
                         records.insert(
                             (ns, id.ok_or_else(corrupt)?),
@@ -359,10 +352,4 @@ pub fn capture(
         });
     }
     Ok(out)
-}
-
-/// Decimal projection is only admitted by the v2 profile. Legacy callers cannot
-/// decode or commit this type; retain total diagnostic formatting for Value.
-pub fn decimal_text(value: &[u8; 32]) -> String {
-    crate::value_json::scaled_text(*value, 18)
 }

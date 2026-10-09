@@ -14,7 +14,6 @@ pub const MAX_CANONICAL_BYTES: u64 = 1024 * 1024;
 pub const MAX_STORAGE_UNITS: u64 = 8 * 1024 * 1024;
 pub const STREAM_DOMAIN: &str = "arkiv/prefill-stream/v1";
 pub const RECIPE_DOMAIN: &str = "arkiv/genesis-recipe/v1";
-pub const GENESIS_DOMAIN: &str = "arkiv/signed-genesis/v4";
 type Result<T> = std::result::Result<T, String>;
 fn invalid(reason: &'static str) -> DecodeError {
     DecodeError::Invalid {
@@ -268,9 +267,7 @@ impl PrefillLaunch {
             || self.state.catalog_len != 1
             || self.state.next_namespace != 2
             || self.recipe_hash != recipe_hash(g, self)
-            || g.accounts
-                .as_ref()
-                .is_none_or(|a| self.burned_wei > a.initial_balance(OwnerId::new(self.sponsor)))
+            || self.burned_wei > g.accounts.initial_balance(OwnerId::new(self.sponsor))
         {
             return Err("invalid prefill launch commitment".into());
         }
@@ -345,7 +342,7 @@ fn construct(
     if rows.len() as u64 > limits.max_entities || stream.len() as u64 > limits.max_canonical_bytes {
         return Err("declared prefill limit exceeded".into());
     }
-    let accounts = g.accounts.as_ref().ok_or("prefill requires accounts")?;
+    let accounts = &g.accounts;
     accounts.validate().map_err(err)?;
     let engine = Engine::with_limits(g.genesis.pricing.clone(), g.genesis.limits);
     let mut branch = engine.begin(engine.head(), None).map_err(err)?;
@@ -463,7 +460,6 @@ pub fn build_genesis(
     sponsor: [u8; 20],
     entities: &[PrefillEntity],
 ) -> Result<SignedGenesis> {
-    base.genesis.protocol_version = crate::block::PREFILL_PROTOCOL_VERSION;
     base.prefill = None;
     if base.genesis.pricing != crate::gas::schedule() {
         return Err("prefill requires pinned GLM schedule".into());
@@ -517,6 +513,6 @@ pub fn report(g: &SignedGenesis, stream: &[u8]) -> serde_json::Value {
         Ok(v) => v,
         Err(e) => return serde_json::json!({"error":e}),
     };
-    let a = g.accounts.as_ref().expect("verified accounts");
+    let a = &g.accounts;
     serde_json::json!({"genesisHash":hex(g.hash().as_slice()),"stateRoot":hex(p.state.root().as_slice()),"recipeHash":hex(p.recipe_hash.as_slice()),"streamHash":hex(p.stream_hash.as_slice()),"rowCount":p.row_count.to_string(),"canonicalBytes":p.canonical_bytes.to_string(),"storageUnits":p.storage_units.to_string(),"burnedWei":p.burned_wei.to_string(),"sponsor":hex(&p.sponsor),"sponsorBalanceWei":(a.initial_balance(OwnerId::new(p.sponsor))-p.burned_wei).to_string(),"initialSupplyWei":a.initial_supply().expect("valid supply").to_string(),"entities":built.rows})
 }

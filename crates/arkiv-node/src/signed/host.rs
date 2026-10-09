@@ -15,7 +15,7 @@ use crate::{
     },
 };
 use arkiv_db::{
-    Branch, Budget, Cost, DecodeError, Decoder, Encoder, OwnerId, SnapshotId, StorageError,
+    Budget, Cost, DecodeError, Decoder, Encoder, OwnerId, SnapshotId, StorageError,
     StorageErrorKind, decode_exact,
     durable::{
         DurableEngine, EngineGenesis, Initialization, Options, Publication, Recovery,
@@ -26,24 +26,6 @@ use arkiv_db::{
 use arkiv_db_storage::versioned::VersionedStore;
 use serde_json::{Value as Json, json};
 use std::{collections::BTreeMap, sync::Arc};
-
-pub fn nonce_key(actor: OwnerId) -> [u8; 32] {
-    let mut key = [0; 32];
-    key[..12].copy_from_slice(b"arkiv/txnon/");
-    key[12..].copy_from_slice(actor.as_bytes());
-    key
-}
-fn nonce_value(value: Option<Vec<u8>>) -> Result<u64> {
-    match value {
-        None => Ok(0),
-        Some(bytes) => Ok(u64::from_be_bytes(
-            bytes.try_into().map_err(|_| Error("StorageCorrupt"))?,
-        )),
-    }
-}
-fn branch_nonce(branch: &Branch, actor: OwnerId) -> Result<u64> {
-    nonce_value(branch.try_host_get(&nonce_key(actor))?)
-}
 
 /// Bounded metadata retained atomically alongside state. No operations or calldata.
 #[derive(Clone, Debug)]
@@ -225,10 +207,7 @@ impl Host {
         };
         let packet = SimulatorPacket {
             height: 0,
-            state_root: genesis
-                .header()
-                .state_root
-                .ok_or(Error("UnsupportedVersion"))?,
+            state_root: genesis.header().state_root,
             bytes: record.bytes()?,
             inclusions: vec![],
         };
@@ -300,7 +279,7 @@ impl Host {
         let stored = engine.simulator_block(engine.head().sequence())?;
         let record = HeaderRecord::from_bytes(&stored.bytes, &genesis, &identity)?;
         if record.certificate.header.height != stored.info.snapshot.sequence()
-            || record.certificate.header.state_root != Some(stored.info.state_root)
+            || record.certificate.header.state_root != stored.info.state_root
         {
             return Err(Error("StorageCorrupt"));
         }
@@ -333,7 +312,7 @@ impl Host {
         let stored = self.engine.simulator_block(height)?;
         let record = HeaderRecord::from_bytes(&stored.bytes, &self.genesis, &self.identity)?;
         if record.certificate.header.height != height
-            || record.certificate.header.state_root != Some(stored.info.state_root)
+            || record.certificate.header.state_root != stored.info.state_root
         {
             return Err(Error("StorageCorrupt"));
         }
@@ -360,41 +339,26 @@ impl Host {
         Ok(block)
     }
     pub fn committed_nonce(&self, actor: OwnerId) -> Result<u64> {
-        if let Some(config) = &self.genesis.accounts {
-            return Ok(config
-                .resolve(
-                    actor,
-                    self.engine
-                        .head_snapshot()
-                        .try_host_get(&crate::accounts::account_key(actor))?,
-                )?
-                .nonce);
-        }
-        nonce_value(
-            self.engine
-                .head_snapshot()
-                .try_host_get(&nonce_key(actor))?,
-        )
+        Ok(self
+            .genesis
+            .accounts
+            .resolve(
+                actor,
+                self.engine
+                    .head_snapshot()
+                    .try_host_get(&crate::accounts::account_key(actor))?,
+            )?
+            .nonce)
     }
     pub fn account(&self, height: u64, actor: OwnerId) -> Result<crate::accounts::Account> {
         let snapshot = self.engine.snapshot(SnapshotId::from_sequence(height))?;
-        if let Some(config) = &self.genesis.accounts {
-            return Ok(config.resolve(
-                actor,
-                snapshot.try_host_get(&crate::accounts::account_key(actor))?,
-            )?);
-        }
-        Ok(crate::accounts::Account {
-            nonce: nonce_value(snapshot.try_host_get(&nonce_key(actor))?)?,
-            balance: alloy_primitives::U256::ZERO,
-        })
+        Ok(self.genesis.accounts.resolve(
+            actor,
+            snapshot.try_host_get(&crate::accounts::account_key(actor))?,
+        )?)
     }
     pub fn account_response(&self, height: u64, actor: OwnerId, proof: bool) -> Result<Json> {
-        let config = self
-            .genesis
-            .accounts
-            .as_ref()
-            .ok_or(Error("UnsupportedAccountOperation"))?;
+        let config = &self.genesis.accounts;
         let certificate = self.certificate(height)?;
         let snapshot = self.engine.snapshot(SnapshotId::from_sequence(height))?;
         let account = self.account(height, actor)?;
@@ -440,7 +404,7 @@ impl Host {
                 .parse::<u64>()
                 .map_err(|_| Error("StorageCorrupt"))?;
             return Ok(
-                json!({"gasUsed":gas_used.to_string(),"gasPriceWei":if self.genesis.accounts.is_some(){crate::accounts::GAS_PRICE_WEI.to_string()}else{"0".into()},"feeChargedWei":if self.genesis.accounts.is_some(){crate::accounts::fee(gas_used).to_string()}else{"0".into()},"status":"included","actor":hex(actor.as_bytes()),"requestId":hex(&request_id),"nonce":nonce.to_string(),"transactionHash":hex(inclusion.digest.as_slice()),"height":inclusion.height.to_string(),"index":inclusion.index,"executionStatus":tx.status,"durability":"durable"}),
+                json!({"gasUsed":gas_used.to_string(),"gasPriceWei":crate::accounts::GAS_PRICE_WEI.to_string(),"feeChargedWei":crate::accounts::fee(gas_used).to_string(),"status":"included","actor":hex(actor.as_bytes()),"requestId":hex(&request_id),"nonce":nonce.to_string(),"transactionHash":hex(inclusion.digest.as_slice()),"height":inclusion.height.to_string(),"index":inclusion.index,"executionStatus":tx.status,"durability":"durable"}),
             );
         }
         if let Some(tx) = self.pool.pending(actor, request_id) {
@@ -623,34 +587,17 @@ impl Host {
             height,
             self.genesis.timestamp(height)?,
             &native,
-            self.genesis.accounts.as_ref(),
+            Some(&self.genesis.accounts),
             |branch, index, tx| {
-                if let Some(config) = &self.genesis.accounts {
-                    let mut account = config.read(branch, tx.actor)?;
-                    if account.nonce != inputs.txs[index].nonce || account.nonce == u64::MAX {
-                        return Err(StorageError::new(
-                            StorageErrorKind::Corrupt,
-                            "account nonce",
-                        ));
-                    }
-                    account.nonce += 1;
-                    return crate::accounts::put(branch, tx.actor, account);
-                }
-                let nonce = branch_nonce(branch, tx.actor).map_err(|_| {
-                    StorageError::new(StorageErrorKind::Corrupt, "transaction nonce")
-                })?;
-                if nonce != inputs.txs[index].nonce || nonce == u64::MAX {
+                let mut account = self.genesis.accounts.read(branch, tx.actor)?;
+                if account.nonce != inputs.txs[index].nonce || account.nonce == u64::MAX {
                     return Err(StorageError::new(
                         StorageErrorKind::Corrupt,
-                        "transaction nonce ordering",
+                        "account nonce",
                     ));
                 }
-                branch
-                    .try_host_put(nonce_key(tx.actor), &(nonce + 1).to_be_bytes())?
-                    .map_err(|_| {
-                        StorageError::new(StorageErrorKind::Corrupt, "transaction nonce value")
-                    })?;
-                Ok(())
+                account.nonce += 1;
+                crate::accounts::put(branch, tx.actor, account)
             },
             |branch, outcomes, expired| {
                 captured = Some(metadata::capture(branch, &native, outcomes, expired)?);
@@ -729,7 +676,7 @@ impl Host {
             .collect();
         let packet = SimulatorPacket {
             height,
-            state_root: executed.header.state_root.ok_or(Error("InvalidBlock"))?,
+            state_root: executed.header.state_root,
             bytes,
             inclusions,
         };
@@ -779,7 +726,7 @@ impl Host {
             Publication::Committed(info) => {
                 let pending = self.pending.take().ok_or(Error("StorageCorrupt"))?;
                 if info.snapshot.sequence() != pending.record.certificate.header.height
-                    || Some(info.state_root) != pending.record.certificate.header.state_root
+                    || info.state_root != pending.record.certificate.header.state_root
                 {
                     self.health = "storage-fenced";
                     return Err(Error("StorageCorrupt"));
@@ -810,7 +757,7 @@ impl Host {
         let header = self.certificate(request.snapshot.height)?.header;
         if request.snapshot.genesis_hash != self.genesis.hash()
             || request.snapshot.block_hash != header.hash()
-            || Some(request.snapshot.state_root) != header.state_root
+            || request.snapshot.state_root != header.state_root
         {
             return Err(Error("CursorMismatch"));
         }
@@ -825,7 +772,7 @@ impl Host {
         let header = self.certificate(request.snapshot.height)?.header;
         if request.snapshot.genesis_hash != self.genesis.hash()
             || request.snapshot.block_hash != header.hash()
-            || Some(request.snapshot.state_root) != header.state_root
+            || request.snapshot.state_root != header.state_root
         {
             return Err(Error("InvalidRequest"));
         }

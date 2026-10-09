@@ -1,12 +1,9 @@
-#![cfg(not(feature = "arkiv-v2"))]
-// These retained fixtures pin the legacy generic/signed protocol.
-// Arkiv v2 has separate host, profile and crash acceptance suites.
 //! The executor's failure paths and host-side rules that the fixtures do
 //! not reach through valid chains: an inconsistent due schedule in host
 //! state, a malformed `$expiresAt` cell, a branch that was not begun for
-//! the chain, blocks that do not follow their parent (height, timestamp,
-//! chain id and header version; a wrong parent hash is refused by the
-//! chain, see `replay.rs`), and the timestamp's irrelevance to execution.
+//! the chain, blocks that do not follow their parent (height, timestamp and
+//! chain id; a wrong parent hash is refused by the chain, see `replay.rs`),
+//! and the timestamp's irrelevance to execution.
 //! Every failure is an `ExecError`: no candidate, no outcome. Also the
 //! host's expiry read at the edge of the costs a schedule may have.
 
@@ -34,8 +31,10 @@ fn branch(chain: &MemoryChain) -> Branch {
         .expect("head")
 }
 
-/// A chain at height 2 whose namespace 1 holds `e` expiring at height 3
-/// (so its schedule is `D(3, 1) = 1`, `T(3) = 1`).
+/// A chain at height 2 whose namespace 2 holds `e` expiring at height 3
+/// (so its schedule is `D(3, 2) = 1`, `T(3) = 1`). Namespace 1 is the Arkiv
+/// entity namespace, which generic operations may not write; every fixture
+/// creates it first and writes generic records to namespace 2.
 fn chain_with_due_record() -> MemoryChain {
     let mut chain = MemoryChain::new(spec());
     chain
@@ -46,8 +45,9 @@ fn chain_with_due_record() -> MemoryChain {
                 1,
                 1_000,
                 vec![
+                    create_namespace("entities"),
                     create_namespace("alpha"),
-                    create(1, b"e", vec![], Some(until(3))),
+                    create(2, b"e", vec![], Some(until(3))),
                 ],
             )]),
         )
@@ -86,15 +86,15 @@ fn put_host(branch: &mut Branch, key: [u8; 32], value: &[u8]) {
 fn a_due_count_without_records_is_inconsistent() {
     let chain = chain_with_due_record();
     let mut branch = branch(&chain);
-    // Two due at height 3 in namespace 1, but only one record expires.
-    put_host(&mut branch, due_key(3, 1), &count(2));
+    // Two due at height 3 in namespace 2, but only one record expires.
+    put_host(&mut branch, due_key(3, 2), &count(2));
     put_host(&mut branch, total_key(3), &count(2));
     assert_eq!(
         run(&chain, branch, &BlockInputs::default()),
         Err(ExecError::ScheduleInconsistent(
             ScheduleFault::CountMismatch {
                 height: 3,
-                namespace: ns(1),
+                namespace: ns(2),
                 due: 2,
                 deleted: 1,
             }
@@ -137,18 +137,18 @@ fn malformed_schedule_entries_are_inconsistent() {
     let chain = chain_with_due_record();
     for value in [vec![1, 2, 3], count(0), vec![0; 9]] {
         let mut branch = branch(&chain);
-        put_host(&mut branch, due_key(3, 1), &value);
+        put_host(&mut branch, due_key(3, 2), &value);
         assert_eq!(
             run(&chain, branch, &BlockInputs::default()),
             Err(ExecError::ScheduleInconsistent(
-                ScheduleFault::MalformedEntry { key: due_key(3, 1) }
+                ScheduleFault::MalformedEntry { key: due_key(3, 2) }
             ))
         );
     }
     // A due key with nonzero padding, and one naming namespace 0.
-    let mut padded = due_key(3, 1);
+    let mut padded = due_key(3, 2);
     padded[31] = 1;
-    let mut zero = due_key(3, 1);
+    let mut zero = due_key(3, 2);
     zero[16] = 0;
     for key in [padded, zero] {
         let mut branch = branch(&chain);
@@ -191,20 +191,22 @@ fn a_missing_due_count_underflows() {
     let spec = spec();
     let mut engine = Engine::with_limits(PriceSchedule::FIXTURE, LIMITS);
     let mut setup = engine.begin(engine.head(), None).expect("head");
-    setup
-        .try_execute(
-            ALICE,
-            WriteOp::CreateNamespace {
-                name: ns_name("alpha"),
-            },
-            Budget::unlimited(),
-        )
-        .expect("memory engine")
-        .expect("created");
+    for name in ["entities", "alpha"] {
+        setup
+            .try_execute(
+                ALICE,
+                WriteOp::CreateNamespace {
+                    name: ns_name(name),
+                },
+                Budget::unlimited(),
+            )
+            .expect("memory engine")
+            .expect("created");
+    }
     setup
         .try_execute_host(
             WriteOp::CreateRecord {
-                namespace: ns(1),
+                namespace: ns(2),
                 key: key(b"h"),
                 cells: vec![(name("$expiresAt"), Cell::attribute(Value::U64(50)))],
             },
@@ -217,12 +219,12 @@ fn a_missing_due_count_underflows() {
         .begin(engine.head(), Some(Cost::new(PARAMS.block_budget)))
         .expect("head");
     let parent = *spec.genesis_header();
-    let inputs = txs(vec![tx(ALICE, 1, 1_000, vec![delete(1, b"h")])]);
+    let inputs = txs(vec![tx(ALICE, 1, 1_000, vec![delete(2, b"h")])]);
     assert_eq!(
         execute_block(&spec, branch, &parent, 1, 2_000, &inputs).err(),
         Some(ExecError::ScheduleInconsistent(ScheduleFault::Underflow {
             height: 50,
-            namespace: ns(1),
+            namespace: ns(2),
         }))
     );
 }
@@ -238,20 +240,22 @@ fn a_malformed_expiry_cell_is_an_invariant_error() {
     ] {
         let mut engine = Engine::with_limits(PriceSchedule::FIXTURE, LIMITS);
         let mut setup = engine.begin(engine.head(), None).expect("head");
-        setup
-            .try_execute(
-                ALICE,
-                WriteOp::CreateNamespace {
-                    name: ns_name("alpha"),
-                },
-                Budget::unlimited(),
-            )
-            .expect("memory engine")
-            .expect("created");
+        for name in ["entities", "alpha"] {
+            setup
+                .try_execute(
+                    ALICE,
+                    WriteOp::CreateNamespace {
+                        name: ns_name(name),
+                    },
+                    Budget::unlimited(),
+                )
+                .expect("memory engine")
+                .expect("created");
+        }
         setup
             .try_execute_host(
                 WriteOp::CreateRecord {
-                    namespace: ns(1),
+                    namespace: ns(2),
                     key: RecordKey::new(b"h").expect("key"),
                     cells: vec![(name("$expiresAt"), cell)],
                 },
@@ -268,7 +272,7 @@ fn a_malformed_expiry_cell_is_an_invariant_error() {
             1,
             1_000,
             vec![patch(
-                1,
+                2,
                 b"h",
                 vec![("x", attr(Value::U64(1)))],
                 vec![],
@@ -278,7 +282,7 @@ fn a_malformed_expiry_cell_is_an_invariant_error() {
         assert_eq!(
             execute_block(&spec, branch, spec.genesis_header(), 1, 2_000, &inputs).err(),
             Some(ExecError::Invariant(Invariant::MalformedExpiryCell {
-                namespace: ns(1)
+                namespace: ns(2)
             }))
         );
     }
@@ -350,11 +354,6 @@ fn blocks_must_follow_their_parent() {
         attempt(&foreign, 1, 2_000),
         invalid(SuccessorFault::ChainId)
     );
-    let rooted = Header {
-        state_root: Some(Default::default()),
-        ..parent
-    };
-    assert_eq!(attempt(&rooted, 1, 2_000), invalid(SuccessorFault::Version));
     let last = Header {
         height: u64::MAX,
         ..parent
@@ -373,7 +372,7 @@ fn execution_never_reads_the_timestamp() {
         ALICE,
         2,
         1_000,
-        vec![create(1, b"f", vec![], Some(until(5)))],
+        vec![create(2, b"f", vec![], Some(until(5)))],
     )]);
     let early =
         execute_block(chain.spec(), branch(&chain), &parent, 3, 3_000, &inputs).expect("executes");
@@ -429,8 +428,9 @@ fn the_host_expiry_read_cannot_overflow() {
                     1,
                     1_000,
                     vec![
+                        create_namespace("entities"),
                         create_namespace("alpha"),
-                        create(1, b"k", vec![], Some(until(50))),
+                        create(2, b"k", vec![], Some(until(50))),
                     ],
                 )],
             },
@@ -451,8 +451,8 @@ fn the_host_expiry_read_cannot_overflow() {
         .produce(
             3_000,
             txs(vec![
-                tx(BOB, 1, 1_000, vec![delete(1, b"k")]),
-                tx(ALICE, 2, 1_000, vec![delete(1, b"k")]),
+                tx(BOB, 1, 1_000, vec![delete(2, b"k")]),
+                tx(ALICE, 2, 1_000, vec![delete(2, b"k")]),
             ]),
         )
         .expect("the pre-reads do not overflow");

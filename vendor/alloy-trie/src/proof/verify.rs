@@ -27,7 +27,10 @@ where
     let mut proof = proof.into_iter().peekable();
 
     // If the proof is empty or contains only an empty node, the expected value must be None.
-    if proof.peek().is_none_or(|node| node.as_ref() == [EMPTY_STRING_CODE]) {
+    if proof
+        .peek()
+        .is_none_or(|node| node.as_ref() == [EMPTY_STRING_CODE])
+    {
         return if root == EMPTY_ROOT_HASH {
             if expected_value.is_none() {
                 Ok(())
@@ -39,7 +42,10 @@ where
                 })
             }
         } else {
-            Err(ProofVerificationError::RootMismatch { got: EMPTY_ROOT_HASH, expected: root })
+            Err(ProofVerificationError::RootMismatch {
+                got: EMPTY_ROOT_HASH,
+                expected: root,
+            })
         };
     }
 
@@ -51,7 +57,11 @@ where
         if Some(RlpNode::from_rlp(node).as_slice()) != last_decoded_node.as_deref() {
             let got = Some(Bytes::copy_from_slice(node));
             let expected = last_decoded_node.as_deref().map(Bytes::copy_from_slice);
-            return Err(ProofVerificationError::ValueMismatch { path: walked_path, got, expected });
+            return Err(ProofVerificationError::ValueMismatch {
+                path: walked_path,
+                got,
+                expected,
+            });
         }
 
         // Decode the next node from the proof.
@@ -109,7 +119,11 @@ fn process_trie_node(
             if extension.child.is_hash() {
                 Some(NodeDecodingResult::Node(extension.child))
             } else {
-                process_trie_node(TrieNode::decode(&mut &extension.child[..])?, walked_path, key)?
+                process_trie_node(
+                    TrieNode::decode(&mut &extension.child[..])?,
+                    walked_path,
+                    key,
+                )?
             }
         }
         TrieNode::Leaf(leaf) => {
@@ -215,7 +229,12 @@ mod tests {
             ProofNodes::from_iter([(Nibbles::default(), Bytes::from([EMPTY_STRING_CODE]))])
         );
         assert_eq!(
-            verify_proof(root, key, None, proof.into_nodes_sorted().iter().map(|(_, node)| node)),
+            verify_proof(
+                root,
+                key,
+                None,
+                proof.into_nodes_sorted().iter().map(|(_, node)| node)
+            ),
             Ok(())
         );
 
@@ -226,7 +245,9 @@ mod tests {
             Err(ProofVerificationError::ValueMismatch {
                 path: Nibbles::default(),
                 got: Some(Bytes::from(dummy_proof)),
-                expected: Some(Bytes::from(RlpNode::word_rlp(&EMPTY_ROOT_HASH)[..].to_vec()))
+                expected: Some(Bytes::from(
+                    RlpNode::word_rlp(&EMPTY_ROOT_HASH)[..].to_vec()
+                ))
             })
         );
     }
@@ -251,7 +272,10 @@ mod tests {
         let second_key = Nibbles::unpack(hex!("a77d3970"));
         let second_value = hex!("0x312e32").to_vec();
 
-        assert_eq!(verify_proof(root, first_key, Some(first_value.clone()), &proof), Ok(()));
+        assert_eq!(
+            verify_proof(root, first_key, Some(first_value.clone()), &proof),
+            Ok(())
+        );
         assert_eq!(
             verify_proof(root, first_key, None, &proof),
             Err(ProofVerificationError::ValueMismatch {
@@ -261,7 +285,10 @@ mod tests {
             })
         );
 
-        assert_eq!(verify_proof(root, second_key, Some(second_value.clone()), &proof), Ok(()));
+        assert_eq!(
+            verify_proof(root, second_key, Some(second_value.clone()), &proof),
+            Ok(())
+        );
         assert_eq!(
             verify_proof(root, second_key, None, &proof),
             Err(ProofVerificationError::ValueMismatch {
@@ -314,7 +341,10 @@ mod tests {
         );
 
         let proof = hash_builder.take_proof_nodes().into_nodes_sorted();
-        assert_eq!(verify_proof(root, target, None, proof.iter().map(|(_, node)| node)), Ok(()));
+        assert_eq!(
+            verify_proof(root, target, None, proof.iter().map(|(_, node)| node)),
+            Ok(())
+        );
     }
 
     #[test]
@@ -450,7 +480,10 @@ mod tests {
                 root,
                 target1,
                 Some(target1_value.to_vec()),
-                proof.matching_nodes_sorted(&target1).iter().map(|(_, node)| node)
+                proof
+                    .matching_nodes_sorted(&target1)
+                    .iter()
+                    .map(|(_, node)| node)
             ),
             Ok(())
         );
@@ -460,7 +493,10 @@ mod tests {
                 root,
                 target2,
                 Some(target2_value.to_vec()),
-                proof.matching_nodes_sorted(&target2).iter().map(|(_, node)| node)
+                proof
+                    .matching_nodes_sorted(&target2)
+                    .iter()
+                    .map(|(_, node)| node)
             ),
             Ok(())
         );
@@ -612,8 +648,13 @@ mod tests {
         let proof = vec![&root_encoded];
 
         // Node `2a`: 0x64
-        verify_proof(root_hash, Nibbles::from_nibbles([0x2, 0xa]), Some(vec![0x64]), proof.clone())
-            .unwrap();
+        verify_proof(
+            root_hash,
+            Nibbles::from_nibbles([0x2, 0xa]),
+            Some(vec![0x64]),
+            proof.clone(),
+        )
+        .unwrap();
 
         // Node `32a`: 0x64
         verify_proof(

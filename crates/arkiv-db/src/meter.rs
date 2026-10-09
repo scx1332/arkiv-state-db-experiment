@@ -18,13 +18,12 @@ use crate::{namespace::Revision, query::QueryFault, record::ArgumentFault};
 /// Version of the counting rules (which classes are charged, and when).
 ///
 /// Changing any charge point or class definition requires a new version.
-/// Version 2 added typed records, indexes and queries; the version-1 charge
-/// points of the raw byte operations are unchanged. Version 3 prepays
-/// authenticated-state maintenance: every write adds `RootUpdate` per logical
-/// map-entry write to the group it already charges, typed record writes add
-/// `RowByte` for the stored row they rewrite, and `ProofNode`/`ProofByte`
-/// are reserved for point proofs (not charged yet). Every other version-2
-/// charge point, check order and weight is unchanged.
+/// The rules cover raw byte operations, typed records, indexes and queries,
+/// and prepay authenticated-state maintenance: every write adds `RootUpdate`
+/// per logical map-entry write to the group it already charges, typed record
+/// writes add `RowByte` for the stored row they rewrite, and
+/// `ProofNode`/`ProofByte` are reserved for point proofs (not charged yet).
+/// The value is an opaque identifier of this rule set.
 pub const MODEL_VERSION: u32 = 3;
 
 /// A number of abstract cost units.

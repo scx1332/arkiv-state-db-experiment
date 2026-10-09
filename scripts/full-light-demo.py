@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Launch the volatile full/light demo using only the Python standard library."""
+"""Launch the volatile full/light demo using only the Python standard library.
+
+Set ARKIV_DEMO_BIN (with --no-build) to run an already built arkiv-demo.
+"""
 from __future__ import annotations
 
 import argparse
@@ -19,7 +22,8 @@ import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = ROOT / "target" / "debug" / "arkiv-demo"
+BINARY = Path(os.environ.get("ARKIV_DEMO_BIN", ROOT / "target" / "debug" / "arkiv-demo"))
+REQUEST_CAP = 4 * 1024 * 1024
 RESPONSE_CAP = 8 * 1024 * 1024
 
 
@@ -67,6 +71,13 @@ def build():
     subprocess.run(["cargo", "build", "-p", "arkiv-node", "--bin", "arkiv-demo"], cwd=ROOT, check=True)
 
 
+# Engine type id -> fixed term width of an indexable value (arkiv_db::TypeTag).
+VALUE_WIDTHS = {
+    1: 1, 4: 20, 8: 4, 9: 8, 10: 16, 11: 32, 12: 4, 13: 8, 14: 16, 15: 32, 16: 4, 17: 8,
+    18: 16, 19: 32, 20: 4, 21: 8, 22: 16, 23: 32, 24: 4, 25: 8, 28: 4, 29: 8, 64: 32,
+}
+
+
 def page_size(request, limit):
     """Change only the uncommitted page size in a canonical EqRequest.
 
@@ -81,13 +92,11 @@ def page_size(request, limit):
     offset += 4 + length
     tag = data[offset]
     offset += 1
-    if tag == 1:
-        offset += 1
-    elif tag in (2, 3):
-        offset += 8
-    elif tag == 4:
+    if tag == 2:  # str: u32 length-prefixed UTF-8
         length = struct.unpack_from(">I", data, offset)[0]
         offset += 4 + length
+    elif tag in VALUE_WIDTHS:
+        offset += VALUE_WIDTHS[tag]
     else:
         raise ValueError("unsupported Eq value")
     offset += 2  # ordering and full-row projection
@@ -193,7 +202,7 @@ class Cluster:
         self.close()
 
 
-def resolve(cluster, light="light", height="latest", namespace="1", value_type="u64", value="1", limit=3):
+def resolve(cluster, light="light", height="latest", namespace="2", value_type="u64", value="1", limit=3):
     return cluster.call(light, "resolveQuery", height=str(height), namespace=str(namespace), attribute="group",
                         valueType=value_type, value=str(value), limit=limit)
 
@@ -295,7 +304,7 @@ def main():
                     note = f"{name} started from local trust configuration and genesis."
                 elif command in ("query", "next"):
                     if command == "query":
-                        defaults = ["latest", "1", "u64", "1", "3"]
+                        defaults = ["latest", "2", "u64", "1", "3"]
                         defaults[:len(tail)] = tail
                         selected = resolve(cluster, height=defaults[0], namespace=defaults[1], value_type=defaults[2], value=defaults[3], limit=int(defaults[4]))
                         request = selected["request"]

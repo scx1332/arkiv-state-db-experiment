@@ -777,25 +777,21 @@ mod tests {
         use arkiv_db_memory::MemoryVersionedStore;
         use std::sync::Arc;
         let signer = Signer::from_bytes([1; 32]).unwrap();
-        let mut native = crate::demo::workload::genesis(9515, 1_000);
-        native.admins.clear();
+        let mut native = crate::signed::protocol::default_native_genesis(9515, 1_000);
         native.limits.max_page = 2;
-        native.params.max_admin_per_block = 0;
-        native.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;
-        native.params.max_block_input_bytes = INPUT_CAP;
-        native.pricing = crate::gas::schedule();
-        native.params.block_budget = 100_000_000;
-        native.params.user_budget = 90_000_000;
-        native.params.max_lifetime = 6_307_200;
-        let mut genesis =
-            SignedGenesis::new(native, [7; 16], *signer.address().as_bytes(), period_ms).unwrap();
-        genesis.accounts = Some(
-            AccountConfig::new(vec![(
+        let genesis = SignedGenesis {
+            genesis: native,
+            run_id: [7; 16],
+            proposer: *signer.address().as_bytes(),
+            block_period_ms: period_ms,
+            limits: Default::default(),
+            accounts: AccountConfig::new(vec![(
                 signer.address(),
                 U256::from(1_000_000_000_000_000_000u64),
             )])
             .unwrap(),
-        );
+            prefill: None,
+        };
         let rows = (0..4)
             .map(|n| PrefillEntity {
                 creator: *signer.address().as_bytes(),
@@ -813,7 +809,7 @@ mod tests {
                 },
             })
             .collect::<Vec<_>>();
-        genesis = build_genesis(
+        let genesis = build_genesis(
             genesis,
             PrefillLimits {
                 max_entities: 256,

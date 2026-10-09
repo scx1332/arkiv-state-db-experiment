@@ -50,11 +50,8 @@ impl RunConfig {
         let selected = crate::demo::workload::genesis(g.chain_id, g.timestamp_ms);
         // Genesis fixes the resource profile. Unindexed field values become
         // bounded descriptors in the feed. Every published feed is separately
-        // capped at4MiB, including larger v2 scalar names/strings.
-        if g.protocol_version != crate::block::DEMO_PROTOCOL_VERSION
-            || g.limits != selected.limits
-            || g.params != selected.params
-        {
+        // capped at 4 MiB.
+        if g.limits != selected.limits || g.params != selected.params {
             return Err(Error("UnsupportedVersion"));
         }
         ChainSpec::new(g.clone()).map_err(|_| Error("InvalidRequest"))
@@ -321,7 +318,7 @@ impl Host {
         };
         let packet = SimulatorPacket {
             height: 0,
-            state_root: head.state_root.unwrap(),
+            state_root: head.state_root,
             bytes: record.bytes()?,
             inclusions: vec![],
         };
@@ -379,7 +376,7 @@ impl Host {
         let stored = engine.simulator_block(engine.head().sequence())?;
         let record = StoredBlock::from_bytes(&stored.bytes, &identity, &run.genesis)?;
         if record.block.header.height != stored.info.snapshot.sequence()
-            || record.block.header.state_root != Some(stored.info.state_root)
+            || record.block.header.state_root != stored.info.state_root
         {
             return Err(Error("StorageCorrupt"));
         }
@@ -411,7 +408,7 @@ impl Host {
         let stored = self.engine.simulator_block(height)?;
         let block = StoredBlock::from_bytes(&stored.bytes, &self.identity, &self.run.genesis)?;
         if block.block.header.height != height
-            || block.block.header.state_root != Some(stored.info.state_root)
+            || block.block.header.state_root != stored.info.state_root
         {
             return Err(Error("StorageCorrupt"));
         }
@@ -674,7 +671,7 @@ impl Host {
         }
         let packet = SimulatorPacket {
             height,
-            state_root: record.block.header.state_root.unwrap(),
+            state_root: record.block.header.state_root,
             bytes,
             inclusions,
         };
@@ -689,7 +686,7 @@ impl Host {
             Publication::Committed(info) => {
                 let record = self.pending.take().ok_or(Error("StorageCorrupt"))?;
                 if record.block.header.height != info.snapshot.sequence()
-                    || record.block.header.state_root != Some(info.state_root)
+                    || record.block.header.state_root != info.state_root
                 {
                     self.health = "storage-fenced";
                     return Err(Error("StorageCorrupt"));
@@ -724,7 +721,7 @@ impl Host {
         let h = self.header(r.snapshot.height)?;
         if r.snapshot.genesis_hash != self.durable_identity.node_genesis_hash
             || r.snapshot.block_hash != h.hash()
-            || Some(r.snapshot.state_root) != h.state_root
+            || r.snapshot.state_root != h.state_root
         {
             return Err(Error("CursorMismatch"));
         }

@@ -99,7 +99,11 @@ impl RlpNode {
     /// Returns hash if this is an RLP-encoded hash
     #[inline]
     pub fn as_hash(&self) -> Option<B256> {
-        if self.is_hash() { Some(B256::from_slice(&self.0[1..])) } else { None }
+        if self.is_hash() {
+            Some(B256::from_slice(&self.0[1..]))
+        } else {
+            None
+        }
     }
 }
 

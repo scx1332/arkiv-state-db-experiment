@@ -1,5 +1,5 @@
 //! Real-socket signed submission, body replication and light proof verification.
-#![cfg(feature = "arkiv-v2")]
+use alloy_primitives::U256;
 use arkiv_db::{
     CellName, Value as DbValue,
     durable::Options,
@@ -8,6 +8,7 @@ use arkiv_db::{
 use arkiv_db_memory::MemoryVersionedStore;
 use arkiv_node::{
     Expiry, TxEnvelope, TxOp,
+    accounts::AccountConfig,
     arkiv::{ArkivOperation, entity_namespace},
     signed::{
         crypto::Signer,
@@ -57,12 +58,20 @@ fn signer(who: u8) -> Signer {
     Signer::from_bytes(key).unwrap()
 }
 fn genesis() -> SignedGenesis {
-    let mut native = arkiv_node::demo::workload::genesis(7, 1_000);
-    native.admins.clear();
-    native.params.max_admin_per_block = 0;
-    native.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;
-    native.params.max_block_input_bytes = INPUT_CAP;
-    SignedGenesis::new(native, [0x42; 16], *signer(1).address().as_bytes(), 250).unwrap()
+    let funded = [1, 2, 3].map(|who| {
+        (
+            signer(who).address(),
+            U256::from(10u64).pow(U256::from(24u64)),
+        )
+    });
+    SignedGenesis::new(
+        default_native_genesis(7, 1_000),
+        [0x42; 16],
+        *signer(1).address().as_bytes(),
+        250,
+        AccountConfig::new(funded.to_vec()).unwrap(),
+    )
+    .unwrap()
 }
 fn host(producer: bool) -> Host {
     let genesis = genesis();
@@ -96,7 +105,10 @@ fn create(who: u8, nonce: u64, salt: u128) -> SignedTx {
                 operation: ArkivOperation::Create {
                     salt,
                     flags: 0,
-                    expiry: Expiry::PERMANENT,
+                    expiry: Expiry {
+                        expires_at: 0,
+                        min_lifetime: 1_000,
+                    },
                     attributes: vec![
                         (CellName::new("group").unwrap(), DbValue::U64(1)),
                         (
@@ -216,6 +228,16 @@ async fn external_admission_full_replay_and_light_paginated_proofs() {
         status["capabilities"]["proofTrust"],
         "pinned-single-proposer-secp256k1"
     );
+    let capabilities = &status["capabilities"];
+    assert_eq!(capabilities["gas"]["profile"], GAS_PROFILE);
+    assert_eq!(capabilities["gas"]["feesDebited"], true);
+    assert_eq!(capabilities["genesisPrefill"], false);
+    assert_eq!(
+        capabilities["valueTypes"].as_array().unwrap().len(),
+        arkiv_db::TypeTag::ALL.len()
+    );
+    assert!(capabilities.get("scalarTypes").is_none());
+    assert!(capabilities.get("queryLanguage").is_none());
     let a = create(2, 0, 9);
     let b = create(2, 1, 10);
     let c = create(1, 1, 11);
@@ -345,7 +367,7 @@ async fn external_admission_full_replay_and_light_paginated_proofs() {
     assert_eq!(feed["header"]["height"], "2");
     assert_eq!(
         feed["header"]["stateRoot"],
-        hex(head(&full).state_root.unwrap().as_slice())
+        hex(head(&full).state_root.as_slice())
     );
     assert!(feed["transactions"].is_array());
     assert_eq!(
@@ -405,10 +427,7 @@ async fn external_admission_full_replay_and_light_paginated_proofs() {
             unpack(page["certificateBytes"].as_str().unwrap(), 512).unwrap();
         certificate.authenticate(&genesis()).unwrap();
         let request: EqRequest = unpack(page["canonicalRequest"].as_str().unwrap(), 4096).unwrap();
-        assert_eq!(
-            request.snapshot.state_root,
-            certificate.header.state_root.unwrap()
-        );
+        assert_eq!(request.snapshot.state_root, certificate.header.state_root);
         assert_eq!(request.snapshot.genesis_hash, genesis().hash());
         if total == 0 {
             let proof = unhex(page["canonicalProof"].as_str().unwrap(), RESPONSE_CAP).unwrap();
@@ -535,11 +554,14 @@ async fn streamed_submission_caps_private_auth_and_bounded_jobs() {
     }
     // Four unfinished reads retain all admission permits; the fifth is refused immediately.
     let address = public.url.strip_prefix("http://").unwrap();
-    let mut held = Vec::new();
-    for _ in 0..4 {
+    let hold = || async move {
         let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
         stream.write_all(format!("POST /signed/v1/transactions HTTP/1.1\r\nHost: {address}\r\nContent-Length: 1000\r\nContent-Type: application/json\r\n\r\n{{").as_bytes()).await.unwrap();
-        held.push(stream);
+        stream
+    };
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        held.push(hold().await);
     }
     let mut saturated = false;
     for _ in 0..100 {
@@ -553,6 +575,18 @@ async fn streamed_submission_caps_private_auth_and_bounded_jobs() {
         {
             saturated = true;
             break;
+        }
+        // A status probe can win the race for a permit against a held
+        // request whose headers the server has not processed yet; that held
+        // request is then answered (refused) instead of waiting for its body.
+        // Replace answered held requests so exactly four stay unfinished.
+        for stream in &mut held {
+            let mut byte = [0u8; 1];
+            if let Ok(Ok(_)) =
+                tokio::time::timeout(Duration::from_millis(1), stream.peek(&mut byte)).await
+            {
+                *stream = hold().await;
+            }
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -926,10 +960,7 @@ async fn range_inspection_exposes_only_complete_authenticated_branching_witnesse
     certificate.authenticate(&genesis()).unwrap();
     let canonical: RangeRequest =
         unpack(result["canonicalRequest"].as_str().unwrap(), 4096).unwrap();
-    assert_eq!(
-        canonical.snapshot.state_root,
-        certificate.header.state_root.unwrap()
-    );
+    assert_eq!(canonical.snapshot.state_root, certificate.header.state_root);
     let bytes = unhex(result["canonicalProof"].as_str().unwrap(), RESPONSE_CAP).unwrap();
     verify_range_inspected(
         &canonical,
@@ -1203,8 +1234,19 @@ async fn state_api_documentation_is_public_and_independent_of_storage_lock() {
     let rt = Runtime::new(Node::Full(Box::new(host(true))), None, None, None).unwrap();
     let public = serve(runtime::public_router(rt.clone())).await;
     let client = reqwest::Client::new();
-    // Documentation remains available even while the node is doing storage work.
-    let locked = rt.node.lock().unwrap();
+    // Documentation remains available even while the node is doing storage
+    // work: another thread holds the node lock until the checks are done.
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = {
+        let rt = rt.clone();
+        std::thread::spawn(move || {
+            let _locked = rt.node.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        })
+    };
+    locked_rx.recv().unwrap();
     for path in ["/docs", "/docs/"] {
         let response = client
             .get(format!("{}{path}", public.url))
@@ -1231,7 +1273,8 @@ async fn state_api_documentation_is_public_and_independent_of_storage_lock() {
     assert_eq!(response.status(), 200);
     assert_eq!(response.headers()["content-type"], "application/json");
     let spec: Value = response.json().await.unwrap();
-    drop(locked);
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
     assert_eq!(spec["openapi"], "3.1.0");
     assert_eq!(spec["servers"][0]["url"], "/");
     assert_eq!(

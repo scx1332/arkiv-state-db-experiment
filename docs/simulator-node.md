@@ -9,8 +9,8 @@ reject the flag); `--interval-ms` changes wall-clock cadence only. The default
 chain is 9001, seed is 7, genesis time is 1700000000000 ms and logical block period
 is 1000 ms. Every timestamp is checked `genesis + height * period`.
 
-This executable does not sign headers. The existing `arkiv-demo` executable and
-signed trust profile remain separate. The source UUID, random 128-bit run ID and
+This executable does not sign headers. The `arkiv-demo` executable and the
+signed `arkiv-proposer` are separate. The source UUID, random 128-bit run ID and
 canonical genesis-header hash identify a retained run. Restart never replaces
 those identities. A new directory creates a separate run; there is no reset,
 pruning or truncation API.
@@ -57,18 +57,20 @@ Control requests bind a 32-byte command ID, run ID, expected configuration revis
 and optional expected head. Pause/resume acknowledge volatile desired runtime state.
 Step commits its command digest/result height atomically with one normal block.
 Configuration is one bounded pending request, adopted by the next normal block;
-its revision and command inclusion survive restart. Only `payloadBytes` (0–1024)
-and `extraRowsPerBlock` (0–4) may change. Version, seed and logical period remain
+its revision and command inclusion survive restart. Only `payloadBytes`
+(0–131072) may change. Version, seed and logical period remain
 immutable. Duplicate committed commands return the original height, including
 after a lost acknowledgement and restart; changed content conflicts.
 
-Profile v1 admits the selected workload genesis limits and execution parameters;
-it does not advertise arbitrary smaller parameter sets as compatible with the trace.
+The workload is the finite Arkiv entity fixture (five entities created at block
+2, then transfer, patch, extension, deletion and expiry; empty blocks after
+that) in namespace 1, under the selected workload genesis limits and execution
+parameters; the simulator does not advertise arbitrary smaller parameter sets as
+compatible with the trace.
 
 The host envelope is `u32(1) || bytes(canonical Block) || bytes(feed JSON) ||
 Workload || u64(configRevision) || Vec<ControlReceipt>`. Workload is
-`u32(version) || str(seedDecimal) || str(periodDecimal) || u32(payloadBytes) ||
-u32(extraRowsPerBlock)`. A control receipt is `commandId[32] || digest[32]`.
+`u32(version) || str(seedDecimal) || str(periodDecimal) || u32(payloadBytes)`. A control receipt is `commandId[32] || digest[32]`.
 All binary lengths and integers use the existing canonical big-endian codec.
 Genesis uses an empty Block body and the existing special genesis-header digests.
 The engine adds the manifest/root framing specified in
@@ -97,8 +99,8 @@ metadata is committed by the canonical header.
 
 The whole-block metadata profile replaces section paging for this bounded genesis.
 At most 128 user operations plus 16 expiry deletions touch terminal records, with
-16 cells per row. Even 512 bytes per maximally escaped attribute, 640 per operation
-and an additional 128 × 256 bytes for namespace/key metadata remain below 2 MiB.
+at most 32 cells per row. Even 512 bytes per maximally escaped attribute, 640 per operation
+and an additional 128 × 256 bytes for namespace/key metadata remain below 3 MiB.
 A bounded serializer independently rejects feeds above 4 MiB before publication.
 Canonical bodies are capped at 1 MiB; stored node envelopes have an 8 MiB engine
 framing cap and must also fit the 8 MiB hex replication response. Engine trie and

@@ -71,7 +71,7 @@ pub(super) async fn handle(
         let certificate=host.certificate(height)?;
         let s=host.engine.snapshot(SnapshotId::from_sequence(height))?;
         let h=s.state_header();
-        if Some(h.root())!=certificate.header.state_root{return Err(Error("InvalidProof"))}
+        if h.root()!=certificate.header.state_root{return Err(Error("InvalidProof"))}
         let m=s.explore_tree(&q.map,ns,&q.path,&q.term_path)?.ok_or(Error("TreePathNotFound"))?;
         // Values can carry payloads. Bound bytes before hexadecimal/JSON amplification.
         if m.node.as_ref().is_some_and(|n|n.rlp.len()+n.value.as_ref().map_or(0,Vec::len)>384*1024){return Err(Error("ResponseTooLarge"))}

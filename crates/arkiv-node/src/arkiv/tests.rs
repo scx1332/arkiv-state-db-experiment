@@ -451,7 +451,7 @@ fn authenticated_engine_rows_with_forged_system_types_fail_arkiv_verification() 
 }
 
 #[test]
-fn legacy_generic_namespaces_cannot_receive_arkiv_entities() {
+fn generic_namespaces_without_glm_cannot_receive_arkiv_entities() {
     let (_engine, mut branch, context) = setup();
     let namespace = NamespaceId::from_bytes(2u64.to_be_bytes()).unwrap();
     branch

@@ -382,7 +382,7 @@ impl Light {
         let h = self.header(request.snapshot.height)?.header;
         if request.snapshot.genesis_hash != self.genesis.hash()
             || request.snapshot.block_hash != h.hash()
-            || Some(request.snapshot.state_root) != h.state_root
+            || request.snapshot.state_root != h.state_root
         {
             return Err(Error("InvalidRequest"));
         }
@@ -419,7 +419,7 @@ impl Light {
         let h = self.header(request.snapshot.height)?.header;
         if request.snapshot.genesis_hash != self.genesis.hash()
             || request.snapshot.block_hash != h.hash()
-            || Some(request.snapshot.state_root) != h.state_root
+            || request.snapshot.state_root != h.state_root
         {
             return Err(Error("InvalidRequest"));
         }
@@ -458,11 +458,7 @@ fn catalog_head(genesis: B256, sequence: u64, header: &crate::Header, observed: 
 fn authenticate(genesis: &SignedGenesis, certificate: &SignedHeader) -> Result<()> {
     certificate.authenticate(genesis)?;
     let h = certificate.header;
-    if h.chain_id != genesis.genesis.chain_id
-        || h.version() != genesis.header().version()
-        || h.state_root.is_none()
-        || h.timestamp_ms != genesis.timestamp(h.height)?
-    {
+    if h.chain_id != genesis.genesis.chain_id || h.timestamp_ms != genesis.timestamp(h.height)? {
         return Err(Error("InvalidHeader"));
     }
     Ok(())
@@ -481,11 +477,8 @@ pub fn verify_account(
     alloy_primitives::U256,
     alloy_primitives::U256,
 )> {
-    let config = genesis
-        .accounts
-        .as_ref()
-        .ok_or(Error("UnsupportedAccountOperation"))?;
-    let root = header.state_root.ok_or(Error("InvalidProof"))?;
+    let config = &genesis.accounts;
+    let root = header.state_root;
     let account = config.resolve(
         actor,
         arkiv_db::proof::verify_host(root, &crate::accounts::account_key(actor), account_proof)?,

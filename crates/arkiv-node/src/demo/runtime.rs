@@ -76,7 +76,7 @@ fn compatible(spec: &ChainSpec) -> Result<()> {
     if body_bound > RESPONSE_CAP as u64
         || u64::from(p.max_tx_bytes) * 2 + 1024 > REQUEST_CAP as u64
         || l.max_cells > 64
-        || l.max_payload_len() > 65536
+        || l.max_payload_len() > 128 * 1024
         || l.max_page > 4096
     {
         return Err(DemoError::InvalidRequest);
@@ -176,7 +176,7 @@ impl Node {
             genesis_hash: self.headers.trust().genesis_hash.to_string(),
             height: h.height.to_string(),
             hash: h.hash().to_string(),
-            root: h.state_root.expect("v2").to_string(),
+            root: h.state_root.to_string(),
             health: self.health.clone(),
             observed_peer_height: self.observed.to_string(),
             lag: self.observed.saturating_sub(h.height).to_string(),
@@ -190,7 +190,7 @@ impl Node {
                 "execution checked; single-producer development chain"
             }
             .into(),
-            protocol_version: 2,
+            protocol_version: crate::block::PROTOCOL_VERSION,
             authentication_version: 1,
             proof_profiles: vec!["eq-page-v1".into()],
             pending: self.queue.len().to_string(),
@@ -360,7 +360,7 @@ impl Node {
         let h = self.header(s.height)?;
         if s.genesis_hash != self.headers.trust().genesis_hash
             || s.block_hash != h.hash()
-            || Some(s.state_root) != h.state_root
+            || s.state_root != h.state_root
         {
             return Err(DemoError::InvalidRequest);
         }
@@ -402,7 +402,7 @@ impl Node {
                 genesis_hash: self.headers.trust().genesis_hash,
                 height,
                 block_hash: h.hash(),
-                state_root: h.state_root.expect("v2"),
+                state_root: h.state_root,
             },
             query: EqQuery {
                 namespace: NamespaceId::from_ordinal(number(&namespace)?)

@@ -1,6 +1,3 @@
-#![cfg(not(feature = "arkiv-v2"))]
-// These retained fixtures pin the legacy generic/signed protocol.
-// Arkiv v2 has separate host, profile and crash acceptance suites.
 //! Durable simulator model, payload whitelist, restart, uncertainty and light tests.
 use arkiv_db::{
     Budget, CellName, NamespaceId, Value,
@@ -40,7 +37,7 @@ fn request(host: &Host, height: u64, limit: u32) -> EqRequest {
             genesis_hash: host.durable_identity.node_genesis_hash,
             height,
             block_hash: h.hash(),
-            state_root: h.state_root.unwrap(),
+            state_root: h.state_root,
         },
         query: EqQuery {
             namespace: NamespaceId::from_ordinal(1).unwrap(),
@@ -112,9 +109,18 @@ fn two_hundred_blocks_match_memory_roots_receipts_history_and_proof_bytes() {
     }
     assert_eq!(follower.head, h.head);
     assert_eq!(light.head, h.head);
-    let b7 = h.block(7).unwrap();
-    assert!(b7.feed.changes.is_empty());
-    assert_eq!(b7.feed.operations[0].outcome, "rolledBack");
+    // The entity fixture: five creations at height 2, a deletion at 8 and
+    // one expiry at 14; later blocks are empty.
+    assert_eq!(
+        h.block(2)
+            .unwrap()
+            .feed
+            .changes
+            .iter()
+            .filter(|c| matches!(c, Change::RecordUpsert { .. }))
+            .count(),
+        5
+    );
     assert!(
         h.block(8)
             .unwrap()
@@ -123,14 +129,7 @@ fn two_hundred_blocks_match_memory_roots_receipts_history_and_proof_bytes() {
             .iter()
             .any(|c| matches!(c, Change::RecordDelete { .. }))
     );
-    assert!(
-        h.block(9)
-            .unwrap()
-            .feed
-            .changes
-            .iter()
-            .any(|c| matches!(c, Change::RecordUpsert { .. }))
-    );
+    assert!(h.block(20).unwrap().feed.changes.is_empty());
     assert!(
         h.block(14)
             .unwrap()
@@ -139,7 +138,7 @@ fn two_hundred_blocks_match_memory_roots_receipts_history_and_proof_bytes() {
             .iter()
             .any(|o| o.phase == "expiry" && o.record_key.is_some())
     );
-    for height in [0, 1, 6, 7, 8, 9, 14, 20, 100, 200] {
+    for height in [0, 1, 2, 6, 8, 9, 14, 20, 100, 200] {
         for limit in [1, 3, 64] {
             let mut q = request(&h, height, limit);
             let mut prior = None;
@@ -210,7 +209,6 @@ fn durable_controls_replay_exactly_after_restart_and_configuration_is_adopted_in
     let mut config = control(&h, 2, "configure");
     let mut next = h.workload.clone();
     next.payload_bytes = 1024;
-    next.extra_rows_per_block = 4;
     config.config = Some(next.clone());
     h.control(config.clone()).unwrap();
     assert_eq!(h.revision, 0);
@@ -316,7 +314,8 @@ fn light_pins_history_verifies_pages_rejects_mutations_and_persists_conflict() {
         wrong.limit = 3;
         assert_eq!(light.request(&wrong).unwrap_err().0, "CursorMismatch");
     }
-    assert!(pages >= 4);
+    // Height 20: three of the five entities remain (one deleted, one expired).
+    assert_eq!(pages, 3);
     assert!(light.continuation_count() <= 64);
     let mut bad = h.header(1).unwrap();
     bad.timestamp_ms += 1;
@@ -336,14 +335,13 @@ fn bounded_serialization_and_profile_reject_unserviceable_genesis() {
     let mut bad = run();
     bad.genesis.limits.max_cells = 17;
     assert!(bad.validate().is_err());
-    let mut bad = Workload {
-        payload_bytes: 1025,
+    let mut workload = Workload {
+        payload_bytes: 131_073,
         ..Default::default()
     };
-    assert!(bad.validate().is_err());
-    bad.payload_bytes = 1024;
-    bad.extra_rows_per_block = 5;
-    assert!(bad.validate().is_err());
+    assert!(workload.validate().is_err());
+    workload.payload_bytes = 131_072;
+    assert!(workload.validate().is_ok());
     assert!(unhex("0xAB", 1).is_err());
     assert!(number("01").is_err());
     let fields = [
@@ -395,7 +393,8 @@ fn collector_handles_same_block_recreation_rollback_id_reuse_and_every_field_typ
     use arkiv_node::{Block, BlockInputs, TxEnvelope, TxOp};
     let mut h = host(Arc::new(MemoryVersionedStore::new()));
     h.produce(None).unwrap();
-    let ns = NamespaceId::from_ordinal(1).unwrap();
+    // Namespace 1 holds Arkiv entities; generic records use namespace 2.
+    let ns = NamespaceId::from_ordinal(2).unwrap();
     let key = RecordKey::new(b"same-key").unwrap();
     let fields = [
         Value::Bool(true),
@@ -437,6 +436,12 @@ fn collector_handles_same_block_recreation_rollback_id_reuse_and_every_field_typ
     let inputs = BlockInputs {
         admin: vec![],
         txs: vec![
+            tx(
+                0,
+                vec![TxOp::CreateNamespace {
+                    name: arkiv_db::NamespaceName::new("collector").unwrap(),
+                }],
+            ),
             tx(
                 1,
                 vec![

@@ -97,11 +97,11 @@ fn historical_reads_run_concurrently_with_commits() {
             scope.spawn(move || {
                 let mut rng = SplitMix::new(reader);
                 while !done.load(Ordering::Acquire) {
-                    let head = store.head().unwrap().expect("genesis committed");
                     // Blocks are published after `Committed`, so every block
-                    // listed is at or below the head.
+                    // listed before reading the head is at or below it.
                     let batch = {
                         let list = published.read().unwrap();
+                        let head = store.head().unwrap().expect("genesis committed");
                         assert!(list.len() as u64 <= head.height + 1);
                         list[rng.below(list.len() as u64) as usize].clone()
                     };

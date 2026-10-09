@@ -24,7 +24,10 @@ pub struct BranchNode {
 impl fmt::Debug for BranchNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BranchNode")
-            .field("stack", &self.stack.iter().map(hex::encode).collect::<Vec<_>>())
+            .field(
+                "stack",
+                &self.stack.iter().map(hex::encode).collect::<Vec<_>>(),
+            )
             .field("state_mask", &self.state_mask)
             .field("first_child_index", &self.as_ref().first_child_index())
             .finish()
@@ -73,7 +76,11 @@ impl Decodable for BranchNode {
         if !bytes.is_empty() {
             return Err(alloy_rlp::Error::Custom("branch values not supported"));
         }
-        debug_assert!(bytes.is_empty(), "bytes {}", alloy_primitives::hex::encode(bytes));
+        debug_assert!(
+            bytes.is_empty(),
+            "bytes {}",
+            alloy_primitives::hex::encode(bytes)
+        );
 
         Ok(Self { stack, state_mask })
     }
@@ -108,7 +115,10 @@ pub struct BranchNodeRef<'a> {
 impl fmt::Debug for BranchNodeRef<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BranchNodeRef")
-            .field("stack", &self.stack.iter().map(hex::encode).collect::<Vec<_>>())
+            .field(
+                "stack",
+                &self.stack.iter().map(hex::encode).collect::<Vec<_>>(),
+            )
             .field("state_mask", &self.state_mask)
             .field("first_child_index", &self.first_child_index())
             .finish()
@@ -121,7 +131,11 @@ impl fmt::Debug for BranchNodeRef<'_> {
 impl Encodable for BranchNodeRef<'_> {
     #[inline]
     fn encode(&self, out: &mut dyn BufMut) {
-        Header { list: true, payload_length: self.rlp_payload_length() }.encode(out);
+        Header {
+            list: true,
+            payload_length: self.rlp_payload_length(),
+        }
+        .encode(out);
 
         // Extend the RLP buffer with the present children
         for (_, child) in self.children() {
@@ -157,7 +171,10 @@ impl<'a> BranchNodeRef<'a> {
     /// Means that the node is in inconsistent state.
     #[inline]
     pub fn first_child_index(&self) -> usize {
-        self.stack.len().checked_sub(self.state_mask.count_ones() as usize).unwrap()
+        self.stack
+            .len()
+            .checked_sub(self.state_mask.count_ones() as usize)
+            .unwrap()
     }
 
     /// Returns an iterator over children of the branch node.
@@ -304,7 +321,13 @@ impl BranchNodeCompact {
             "state_mask {state_mask:?} hash_mask: {hash_mask:?}"
         );
         assert_eq!(hash_mask.count_ones() as usize, hashes.len());
-        Self { state_mask, tree_mask, hash_mask, hashes: hashes.into(), root_hash }
+        Self {
+            state_mask,
+            tree_mask,
+            hash_mask,
+            hashes: hashes.into(),
+            root_hash,
+        }
     }
 
     /// Returns the hash associated with the given nibble.
@@ -342,14 +365,20 @@ mod tests {
         let leaf_rlp = leaf_child.as_ref().rlp(&mut buf);
         let branch_with_leaf = BranchNode::new(vec![leaf_rlp.clone()], TrieMask::new(0b0010));
         let encoded = alloy_rlp::encode(&branch_with_leaf);
-        assert_eq!(BranchNode::decode(&mut &encoded[..]).unwrap(), branch_with_leaf);
+        assert_eq!(
+            BranchNode::decode(&mut &encoded[..]).unwrap(),
+            branch_with_leaf
+        );
 
         let extension_child = ExtensionNode::new(Nibbles::from_nibbles(hex!("0203")), leaf_rlp);
         let mut buf = vec![];
         let extension_rlp = extension_child.as_ref().rlp(&mut buf);
         let branch_with_ext = BranchNode::new(vec![extension_rlp], TrieMask::new(0b00000100000));
         let encoded = alloy_rlp::encode(&branch_with_ext);
-        assert_eq!(BranchNode::decode(&mut &encoded[..]).unwrap(), branch_with_ext);
+        assert_eq!(
+            BranchNode::decode(&mut &encoded[..]).unwrap(),
+            branch_with_ext
+        );
 
         let full = BranchNode::new(
             core::iter::repeat_n(RlpNode::word_rlp(&B256::repeat_byte(23)), 16).collect(),

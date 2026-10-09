@@ -106,10 +106,7 @@ fn every_redb_mutating_boundary_atomically_keeps_state_body_outbox_and_inclusion
                 candidates += 1;
                 assert_eq!(h.head.height, 2);
                 assert_eq!(h.block(2).unwrap().bytes().unwrap(), expected);
-                assert_eq!(
-                    h.engine.head_snapshot().state_root(),
-                    h.head.state_root.unwrap()
-                );
+                assert_eq!(h.engine.head_snapshot().state_root(), h.head.state_root);
                 assert_eq!(h.control(command.clone()).unwrap()["height"], "2");
                 assert_eq!(h.head.height, 2);
                 let r = EqRequest {
@@ -117,7 +114,7 @@ fn every_redb_mutating_boundary_atomically_keeps_state_body_outbox_and_inclusion
                         genesis_hash: h.durable_identity.node_genesis_hash,
                         height: 2,
                         block_hash: h.head.hash(),
-                        state_root: h.head.state_root.unwrap(),
+                        state_root: h.head.state_root,
                     },
                     query: EqQuery {
                         namespace: NamespaceId::from_ordinal(1).unwrap(),
@@ -133,10 +130,7 @@ fn every_redb_mutating_boundary_atomically_keeps_state_body_outbox_and_inclusion
                 else {
                     panic!("namespace absent")
                 };
-                assert_eq!(
-                    page.rows.len(),
-                    if cfg!(feature = "arkiv-v2") { 5 } else { 1 }
-                );
+                assert_eq!(page.rows.len(), 5);
             }
             if outcome.is_ok() {
                 assert_eq!(h.head.height, 2);

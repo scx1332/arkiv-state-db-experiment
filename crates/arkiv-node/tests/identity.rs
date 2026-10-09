@@ -1,6 +1,3 @@
-#![cfg(not(feature = "arkiv-v2"))]
-// These retained fixtures pin the legacy generic/signed protocol.
-// Arkiv v2 has separate host, profile and crash acceptance suites.
 //! The request-identity state machine: every transition of the pending and
 //! inclusion indexes, scope separation, in-flight identities and block
 //! validity checks.

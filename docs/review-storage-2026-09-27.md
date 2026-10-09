@@ -1,5 +1,10 @@
 # Full node storage and recovery review — 2026-09-27
 
+> Historical review of 2026-09-27. At that time the node had an `arkiv-v2`
+> cargo feature, a generic default build and several gas profiles; the commands
+> and profile statements below describe that code. The node now has one build
+> (no feature flags) and `glm-v2`-only signed chains.
+
 ## Assessment
 
 The storage path is a strong part of this experimental node. The implementation separates execution, preparation, durable publication, and observation of a committed head. Failure handling distinguishes a definite non-commit from an uncertain commit; neither becomes a successful block acknowledgement. This review found no clear localized correctness defect in the durable engine or redb adapter that warranted a code change. The signed-node reviewer independently found a header-observation issue in synchronization; that finding belongs to the node review, not the adapter's atomicity contract.

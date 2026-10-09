@@ -17,7 +17,7 @@ They are copied into a checkout of the harness and built there.
 
 | File | Purpose |
 | --- | --- |
-| `harness.patch` | Changes to the harness's `crates/harness`. `Cargo.toml` adds the path dependencies on this repository and the `arkiv-v2` feature. `main.rs` adds backend selection with `GOLEMDB_BACKEND` and the `ARKIV_*` variables. `workloads.rs` skips the MDBX-only `table_log` for the arkiv backends. |
+| `harness.patch` | Changes to the harness's `crates/harness`. `Cargo.toml` adds the path dependencies on this repository. `main.rs` adds backend selection with `GOLEMDB_BACKEND` and the `ARKIV_*` variables. `workloads.rs` skips the MDBX-only `table_log` for the arkiv backends. |
 | `src/arkiv.rs` | The adapter: `ArkivDb` implements `golemdb_api::Api` on `arkiv-db`. |
 | `src/golem_tests.rs` | golem-db's facade API tests ported to the adapter, with soft checks so that one run lists every divergence. |
 | `scenarios-scaled/` | `scenarios/large/*` scaled to 1/10 of the commits, with `profile_at` removed. They have the same seeds and shapes as the originals. |
@@ -97,24 +97,19 @@ Environment variables:
   encoded-object cache. They default to `durable::Options::default()`,
   8 MiB and 16,384 entries.
 
-Build with `--features arkiv-v2` to use the deployed v2 profile:
-
-- cell names up to 32 bytes;
-- indexed values up to 128 bytes.
-
-Both profiles have every golem-db cell type (bool, str, bytes, bytes4/8/16/
+The engine admits cell names up to 32 bytes and indexed values up to 128
+bytes, and has every golem-db cell type (bool, str, bytes, bytes4/8/16/
 20/32, u32–u256, i32–i256, dec32–dec256, f32/f64, date32, timestamp64), so
-the load scenarios and the ported tests run on either profile.
+the load scenarios and the ported tests run unchanged.
 
 ## Ported golem-db tests
 
 ```sh
 cargo test -p golemdb-harness golem_tests -- --test-threads=1
-cargo test -p golemdb-harness --features arkiv-v2 golem_tests -- --test-threads=1
 ```
 
-Each test runs on both arkiv backends. Expected result on either profile:
-6 tests pass and 5 fail. Four of the passing tests are ported from golem;
+Each test runs on both arkiv backends. Expected result: 6 tests pass and 5
+fail. Four of the passing tests are ported from golem;
 two are adapter tests: `every_golem_cell_type_round_trips_as_attribute_and_field`
 (every golem type as attribute and field, read back and compared, including
 the encoded bytes, then retyped) and

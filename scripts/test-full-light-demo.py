@@ -62,7 +62,7 @@ class Proxy:
 
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", "0"))
-                if length > 1024 * 1024:
+                if length > demo.REQUEST_CAP:
                     self.send_error(413)
                     return
                 raw = self.rfile.read(length)
@@ -185,14 +185,19 @@ def chunked_request(url, size):
         connection.close()
 
 
+ENTITIES, ALPHA, BETA = 1, 2, 3
+
+
 def oracle_history(blocks, seed=7):
     """Plain logical row model, no codec, trie, engine or response-derived data.
 
     Transaction rollback releases its tentative id. Expiry runs first.
-    Namespace 2 transfers affect authorization but leave its rows intact.
+    Namespace 1 is the reserved entity namespace and stays empty; generic rows
+    live in alpha (2) and beta (3). Beta transfers affect authorization but
+    leave its rows intact.
     """
-    rows = {1: {}, 2: {}}
-    next_id = {1: 1, 2: 1}
+    rows = {ENTITIES: {}, ALPHA: {}, BETA: {}}
+    next_id = {ENTITIES: 1, ALPHA: 1, BETA: 1}
     history = {0: None}
     permanent = str(2**64 - 1)
 
@@ -217,28 +222,28 @@ def oracle_history(blocks, seed=7):
         key = lambda kind: f"{seed}-{round_}-{kind}"
         if height != 1:
             if slot == 2:
-                create(1, key("expires"), expiry=height + 12)
+                create(ALPHA, key("expires"), expiry=height + 12)
             elif slot == 3:
-                create(1, key("recreated"))
+                create(ALPHA, key("recreated"))
             elif slot == 4:
-                create(2, key("other"))
+                create(BETA, key("other"))
             elif slot in (5, 6):
-                next(c for c in rows[1][key("expires")]["cells"] if c["name"] == "group")["value"] = "2" if slot == 5 else "1"
+                next(c for c in rows[ALPHA][key("expires")]["cells"] if c["name"] == "group")["value"] = "2" if slot == 5 else "1"
             elif slot == 7:
                 pass  # create then missing delete rolls back the entire transaction
             elif slot == 8:
-                del rows[1][key("recreated")]
+                del rows[ALPHA][key("recreated")]
             elif slot == 9:
-                create(1, key("recreated"))
+                create(ALPHA, key("recreated"))
             elif slot in (10, 11):
-                next(c for c in rows[1][key("recreated")]["cells"] if c["name"] == "group")["type"] = "str" if slot == 10 else "u64"
+                next(c for c in rows[ALPHA][key("recreated")]["cells"] if c["name"] == "group")["type"] = "str" if slot == 10 else "u64"
             elif 15 <= slot <= 18:
-                create(1, key(f"stable-{slot}"))
+                create(ALPHA, key(f"stable-{slot}"))
         history[height] = copy.deepcopy(rows)
     return history
 
 
-def oracle_eq(history, height, namespace=1, value_type="u64", value="1"):
+def oracle_eq(history, height, namespace=ALPHA, value_type="u64", value="1"):
     state = history[height]
     if state is None or namespace not in state:
         return None
@@ -252,7 +257,7 @@ def produce_to(cluster, target):
         cluster.call("producer", "produceBlock")
 
 
-def query_walk(cluster, height, size, expected, *, light="light", namespace=1, value_type="u64", value="1", advance=False):
+def query_walk(cluster, height, size, expected, *, light="light", namespace=ALPHA, value_type="u64", value="1", advance=False):
     request = demo.resolve(cluster, light, height, namespace, value_type, value, size)["request"]
     rows = []
     page_number = 0
@@ -328,8 +333,8 @@ def test_run(keep=False):
         cluster.start("light", peer=producer)
         proxy = Proxy(producer)
         try:
-            check(chunked_request(producer, 1024 * 1024)["error"] is None, "exact-cap chunked request rejected")
-            check(chunked_request(producer, 1024 * 1024 + 1)["error"] == "ProofLimitExceeded", "oversized chunked request accepted")
+            check(chunked_request(producer, demo.REQUEST_CAP)["error"] is None, "exact-cap chunked request rejected")
+            check(chunked_request(producer, demo.REQUEST_CAP + 1)["error"] == "ProofLimitExceeded", "oversized chunked request accepted")
             check(cluster.call("producer", "status")["height"] == "0", "oversized request changed state")
             produce_to(cluster, 40)
             for name in ("full", "light"):
@@ -376,7 +381,7 @@ def test_run(keep=False):
                     for size in (1, 3, 64):
                         query_walk(cluster, height, size, oracle_eq(history, height), light=light)
             for height in (1, 4, 10, 14, 200):
-                for namespace, tag, value in ((2, "u64", "1"), (1, "str", "1"), (1, "u64", "999"), (999, "u64", "1")):
+                for namespace, tag, value in ((BETA, "u64", "1"), (ALPHA, "str", "1"), (ALPHA, "u64", "999"), (ENTITIES, "u64", "1"), (999, "u64", "1")):
                     query_walk(cluster, height, 3, oracle_eq(history, height, namespace, tag, value), namespace=namespace, value_type=tag, value=value)
             query_walk(cluster, 200, 3, oracle_eq(history, 200), advance=True)
             print("PASS: independent Python row oracle, historical deletion/expiry/type/rollback/recreation, page sizes 1/3/64, endpoint switches under new writes", flush=True)

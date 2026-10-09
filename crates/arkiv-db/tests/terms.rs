@@ -1594,7 +1594,7 @@ fn a_missing_name_or_tag_costs_the_seek_only() {
                     TypeTag::U64 => Value::U64(0),
                     TypeTag::Str => Value::str(""),
                     TypeTag::Bytes => unreachable!(),
-                    _ => unreachable!("legacy fixture"),
+                    _ => unreachable!("the fixture uses only bool, i64, u64 and str"),
                 }),
             ] {
                 let got = read(view, ns, &name(text), tag, lower.clone(), 200);

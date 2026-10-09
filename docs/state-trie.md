@@ -469,7 +469,7 @@ Evidence in `crates/arkiv-db/tests`:
   `Engine::from_state` and unbounded staging helpers remain test aids.
 - **Broader N3d APIs remain open.** The implemented demo composes catalog,
   term, row and key proofs with StateHeader binding for bounded complete Eq
-  pages; protocol-2 headers carry roots. General point-read/proof APIs and
+  pages; every block header carries the state root. General point-read/proof APIs and
   other complete query profiles are separate work.
 - [Engine storage measurements](engine-storage-v1-report.md) now cover
   10,000 publications, lazy opens, cache sizes, isolation and incremental

@@ -43,7 +43,11 @@ inspection and tree exploration have additional documented limits.
 
 Verified endpoints require a light node that has already synchronized the
 requested header. Equality continuations are opaque, bounded in-memory cursors
-on that same light node. Range proofs are complete and unpaged. Text-query
+on that same light node. Range proofs are complete and unpaged and cover every
+indexed type (`bool`, `str`, the fixed-width byte types and every numeric and
+time type) in the engine's byte order; see `docs/range-proofs.md`. The text
+query language and SDK JSON-RPC keep the reference Arkiv grammar, which allows
+`<`, `<=`, `>`, `>=` only on numeric values. Text-query
 failures may be HTTP 200: inspect `error` and `verificationStatus`.
 
 JSON-RPC uses a JSON-RPC 2.0 envelope at `POST /`, with an example and parameter

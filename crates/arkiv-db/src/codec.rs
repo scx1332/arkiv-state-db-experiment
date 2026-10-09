@@ -46,8 +46,8 @@ use crate::{
     namespace::{NamespaceDescriptor, NamespaceId, NamespaceName, OwnerId, Revision},
     query::QueryFault,
     record::{
-        ArgumentFault, Cell, CellKind, CellName, Limits, NameFault, RecordId,
-        RecordKey, TypeTag, Value,
+        ArgumentFault, Cell, CellKind, CellName, Limits, NameFault, RecordId, RecordKey, TypeTag,
+        Value,
     },
 };
 
@@ -59,7 +59,6 @@ pub const CODEC_VERSION: u32 = crate::LAYOUT_VERSION;
 
 // Enum tags. Every table is documented in docs/block-format.md; a tag is
 // never reused and never derived from a Rust discriminant.
-
 
 // CellKind.
 const KIND_ATTRIBUTE: u8 = 1;
@@ -82,6 +81,7 @@ const EFFECT_DELETED: u8 = 4;
 const EFFECT_RECORD_CREATED: u8 = 5;
 const EFFECT_RECORD_PATCHED: u8 = 6;
 const EFFECT_RECORD_DELETED: u8 = 7;
+const EFFECT_BALANCE_TRANSFERRED: u8 = 8;
 
 // ArgumentFault.
 const ARGUMENT_KEY_TOO_LONG: u8 = 1;
@@ -848,7 +848,10 @@ impl Decode for TypeTag {
 
 /// Decodes the payload of a value of type `tag`: `Str` and `Bytes` are
 /// length-prefixed, every other type is its fixed-width term bytes.
-pub(crate) fn decode_payload(tag: TypeTag, decoder: &mut Decoder<'_>) -> Result<Value, DecodeError> {
+pub(crate) fn decode_payload(
+    tag: TypeTag,
+    decoder: &mut Decoder<'_>,
+) -> Result<Value, DecodeError> {
     match tag {
         TypeTag::Str => decoder.str().map(|text| Value::Str(Arc::from(text))),
         TypeTag::Bytes => decoder.bytes().map(|bytes| Value::Bytes(Arc::from(bytes))),
@@ -1055,7 +1058,7 @@ impl Encode for Effect {
     fn encode_to(&self, encoder: &mut Encoder) {
         match self {
             Self::BalanceTransferred { to, amount } => {
-                encoder.u8(8);
+                encoder.u8(EFFECT_BALANCE_TRANSFERRED);
                 encoder.put(to);
                 encoder.fixed(amount);
             }
@@ -1096,7 +1099,7 @@ impl Decode for Effect {
 
     fn decode_from(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
         let effect = match decoder.u8()? {
-            8 => Self::BalanceTransferred {
+            EFFECT_BALANCE_TRANSFERRED => Self::BalanceTransferred {
                 to: decoder.get()?,
                 amount: decoder.array()?,
             },

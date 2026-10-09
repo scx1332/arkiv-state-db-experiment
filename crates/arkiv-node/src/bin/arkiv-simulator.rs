@@ -39,7 +39,7 @@ async fn run() -> Result<()> {
     let (role, args) = args()?;
     if role == "--help" {
         println!(
-            "arkiv-simulator producer|full|light --unsigned-simulator --run-dir DIR [--listen 127.0.0.1:9400] [--admin-listen 127.0.0.1:9401] [--resume | --start paused|running] [--interval-ms 1000]\nProducer: [--source-id UUID] [--chain-id 9001] [--seed 7] [--block-period-ms 1000] [--payload-bytes 64] [--extra-rows-per-block 0] [--cache-bytes 8388608]\nFollowers: --peer URL --source-id UUID --run-id HEX32 --genesis-hash 0xHEX64 [--chain-id 9001]\nPrivate listener requires SIMULATOR_ADMIN_TOKEN (>=32 bytes). Full follower additionally requires --replication-peer URL and SIMULATOR_REPLICATION_TOKEN (same private bearer).\nUnsigned source: proofs verify state against the explicitly trusted source, without consensus authentication. Restart opens retained history from one redb file; producer starts paused unless --resume (or --start running, the deployment form of the same startup policy)."
+            "arkiv-simulator producer|full|light --unsigned-simulator --run-dir DIR [--listen 127.0.0.1:9400] [--admin-listen 127.0.0.1:9401] [--resume | --start paused|running] [--interval-ms 1000]\nProducer: [--source-id UUID] [--chain-id 9001] [--seed 7] [--block-period-ms 1000] [--payload-bytes 64] [--cache-bytes 8388608]\nFollowers: --peer URL --source-id UUID --run-id HEX32 --genesis-hash 0xHEX64 [--chain-id 9001]\nPrivate listener requires SIMULATOR_ADMIN_TOKEN (>=32 bytes). Full follower additionally requires --replication-peer URL and SIMULATOR_REPLICATION_TOKEN (same private bearer).\nUnsigned source: proofs verify state against the explicitly trusted source, without consensus authentication. Restart opens retained history from one redb file; producer starts paused unless --resume (or --start running, the deployment form of the same startup policy)."
         );
         return Ok(());
     }
@@ -56,7 +56,6 @@ async fn run() -> Result<()> {
         "--seed",
         "--block-period-ms",
         "--payload-bytes",
-        "--extra-rows-per-block",
         "--cache-bytes",
         "--peer",
         "--replication-peer",
@@ -173,8 +172,6 @@ async fn run() -> Result<()> {
                 seed: get("--seed", "7"),
                 block_period_ms: get("--block-period-ms", "1000"),
                 payload_bytes: u32::try_from(number(&get("--payload-bytes", "64"))?)
-                    .map_err(|_| Error("InvalidRequest"))?,
-                extra_rows_per_block: u32::try_from(number(&get("--extra-rows-per-block", "0"))?)
                     .map_err(|_| Error("InvalidRequest"))?,
                 ..Default::default()
             };

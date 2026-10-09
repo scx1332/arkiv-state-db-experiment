@@ -130,7 +130,7 @@ pub fn classify(input: &str) -> Classification {
         ),
         Query::Gt { .. } | Query::Gte { .. } | Query::Lt { .. } | Query::Lte { .. } => (
             "range",
-            "Numeric ranges are valid Arkiv queries, but the node currently exposes only single equality execution and proofs.",
+            "Ranges are valid Arkiv queries, but this node exposes execution and proofs only for a single equality.",
         ),
         Query::StartsWith { .. } => (
             "prefix",
@@ -153,12 +153,8 @@ pub fn classify(input: &str) -> Classification {
     if contains_not(&tree) {
         notes.push("NOT means the complement within all live entities, including entities missing the attribute or carrying another type. It is not typed inequality (!=).".into());
     }
-    let eligible = matches!(tree, Query::Eq { .. }) && cfg!(feature = "arkiv-v2");
-    let reason = if !cfg!(feature = "arkiv-v2") {
-        "This node runs the legacy profile; Arkiv source-language execution requires the arkiv-entity-v2 profile."
-    } else {
-        explanation
-    };
+    let eligible = matches!(tree, Query::Eq { .. });
+    let reason = explanation;
     let selection = match &tree {
         Query::Eq { key, value } if eligible => Some(selection(key, value)),
         _ => None,
@@ -216,7 +212,7 @@ fn selection(key: &AnnotKey, value: &AttributeValue) -> Selection {
         AttributeValue::U256(v) => {
             Value::String(alloy_primitives::U256::from_be_bytes(*v).to_string())
         }
-        AttributeValue::Decimal(v) => Value::String(super::metadata::decimal_text(v)),
+        AttributeValue::Decimal(v) => Value::String(crate::value_json::scaled_text(*v, 18)),
         AttributeValue::Str(v) => Value::String(v.clone()),
         AttributeValue::Bytes32(v) | AttributeValue::EntityKey(v) => {
             Value::String(super::wire::hex(v))
@@ -297,27 +293,15 @@ mod tests {
     }
 
     #[test]
-    fn equality_maps_only_under_v2_and_does_not_coerce_types() {
+    fn equality_maps_without_coercing_types() {
         let c = classify("((a = 42)) -- comment");
         assert_eq!(c.language.status, "valid");
-        assert_eq!(
-            c.proof.status,
-            if cfg!(feature = "arkiv-v2") {
-                "supported"
-            } else {
-                "unsupported"
-            }
-        );
-        if cfg!(feature = "arkiv-v2") {
-            let s = c.selection.unwrap();
-            assert_eq!(s.value_type, "i32");
-            assert_eq!(s.value, "42");
-        } else {
-            assert!(c.selection.is_none());
-        }
+        assert_eq!(c.proof.status, "supported");
+        let s = c.selection.unwrap();
+        assert_eq!(s.value_type, "i32");
+        assert_eq!(s.value, "42");
     }
 
-    #[cfg(feature = "arkiv-v2")]
     #[test]
     fn canonical_selections_pass_existing_engine_request_validation() {
         for query in [
@@ -357,7 +341,7 @@ mod tests {
                 timestamp_ms: 0,
                 inputs_digest: arkiv_db::B256::ZERO,
                 outcomes_digest: arkiv_db::B256::ZERO,
-                state_root: Some(arkiv_db::B256::ZERO),
+                state_root: arkiv_db::B256::ZERO,
             };
             assert!(
                 super::super::light::resolve(&identity, &header, &request).is_ok(),

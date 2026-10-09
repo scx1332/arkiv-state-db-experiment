@@ -1,6 +1,6 @@
 # Genesis bundle authoring example
 
-These inputs build the bounded protocol-4 profile described in the
+These inputs build the bounded height-zero prefill profile described in the
 [genesis bundle design](../../genesis-bundle-design.md). The addresses are
 synthetic, with no signing keys or deployment configuration. Building and
 verifying these fixtures does not start a node.
@@ -20,7 +20,7 @@ Supplied hashes and byte lengths are assertions; refresh does not waive them.
 Build the CLI from the repository root:
 
 ```sh
-cargo build -p arkiv-node --features arkiv-v2 --bin arkiv-proposer
+cargo build -p arkiv-node --bin arkiv-proposer
 ```
 
 Copy this source directory to a scratch location before generating its lock.
@@ -55,7 +55,7 @@ The output is:
 
 ```text
 built/
-  genesis.bin          canonical signed-genesis-v4 launch record
+  genesis.bin          canonical signed-genesis launch record
   prefill.bin          canonical typed entity stream
   genesis.lock.toml    exact source pins, expanded profile and resolved recipe
   report.json          independently reproduced keys, roots, counts and rent
@@ -98,7 +98,7 @@ two finite rents from its 9,000 GLM allocation; `report.json` contains the exact
 burn and remaining sponsor balance. Both account transaction nonces remain 0.
 The creator's next entity-creation nonce is 2. The `entities` namespace and
 both rows exist at height 0, with creation/update heights 0 and explicit expiry
-heights 86,400 and 86,401. Protocol 4 treats block 1 as an ordinary block.
+heights 86,400 and 86,401. A prefilled chain treats block 1 as an ordinary block.
 
 The supported envelope is 256 rows, 1 MiB canonical bytes, 8 MiB logical storage
 units, and 256 allocations. Every input document/payload is at most 1 MiB;

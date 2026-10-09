@@ -1,4 +1,3 @@
-#![cfg(feature = "arkiv-v2")]
 //! Storage outcomes and trust boundaries for retained bodies and light headers.
 use alloy_primitives::keccak256;
 use arkiv_db::{
@@ -17,19 +16,16 @@ use arkiv_node::signed::{
     crypto::Signer,
     history::{BODY_CAP, BodyRef, History},
     light::Light,
-    protocol::{INPUT_CAP, SIGNED_TX_OVERHEAD, SignedGenesis, SignedHeader, TX_CAP},
+    protocol::{SignedGenesis, SignedHeader},
 };
 use std::sync::Arc;
 
+mod signed_support;
 fn signed_genesis() -> (SignedGenesis, Signer) {
-    let signer = Signer::from_bytes([1; 32]).unwrap();
-    let mut native = arkiv_node::demo::workload::genesis(9003, 1000);
-    native.admins.clear();
-    native.params.max_admin_per_block = 0;
-    native.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;
-    native.params.max_block_input_bytes = INPUT_CAP;
-    let genesis = SignedGenesis::new(native, [7; 16], *signer.address().as_bytes(), 100).unwrap();
-    (genesis, signer)
+    (
+        signed_support::genesis(9003, 1000, [7; 16], 1, 100, &[1]),
+        signed_support::signer(1),
+    )
 }
 fn certificate(genesis: &SignedGenesis, signer: &Signer) -> SignedHeader {
     SignedHeader::sign(genesis, genesis.header(), signer).unwrap()
@@ -697,7 +693,7 @@ fn light_verifies_native_eq_bytes_only_for_the_authenticated_snapshot() {
             genesis_hash: genesis.hash(),
             height: 1,
             block_hash: first.header.hash(),
-            state_root: first.header.state_root.unwrap(),
+            state_root: first.header.state_root,
         },
         query: EqQuery {
             namespace: NamespaceId::from_ordinal(1).unwrap(),

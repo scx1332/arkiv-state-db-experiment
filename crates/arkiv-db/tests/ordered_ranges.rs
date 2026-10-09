@@ -100,12 +100,21 @@ fn fixture(values: &[Value]) -> Fixture {
         RecordId::from_ordinal(ordinal).unwrap()
     };
     for (index, value) in values.iter().enumerate() {
-        let id = create(&mut branch, vec![(name("v"), Cell::attribute(value.clone()))]);
+        let id = create(
+            &mut branch,
+            vec![(name("v"), Cell::attribute(value.clone()))],
+        );
         model.push((id, value.clone()));
         if index % 3 == 0 {
             create(&mut branch, vec![(name("v"), Cell::field(value.clone()))]);
-            create(&mut branch, vec![(name("w"), Cell::attribute(value.clone()))]);
-            create(&mut branch, vec![(name("v"), Cell::attribute(Value::U64(7)))]);
+            create(
+                &mut branch,
+                vec![(name("w"), Cell::attribute(value.clone()))],
+            );
+            create(
+                &mut branch,
+                vec![(name("v"), Cell::attribute(Value::U64(7)))],
+            );
         }
     }
     engine.publish(&branch.seal()).unwrap();
@@ -185,9 +194,13 @@ impl Fixture {
             .prove_range(&request, RangeProofLimits::default(), Budget::unlimited())
             .unwrap()
             .bytes;
-        let VerifiedRange::Complete(result) =
-            verify_range(&request, &bytes, RangeProofLimits::default(), Limits::DEFAULT).unwrap()
-        else {
+        let VerifiedRange::Complete(result) = verify_range(
+            &request,
+            &bytes,
+            RangeProofLimits::default(),
+            Limits::DEFAULT,
+        )
+        .unwrap() else {
             panic!("the namespace exists")
         };
         for row in &result.rows {
@@ -299,7 +312,9 @@ fn str_ranges_order_by_utf8_bytes_with_prefixes_first() {
         .collect();
     assert_eq!(between, a_nul);
     assert_eq!(
-        fixture.paged(&Unbounded, &Included(Value::str("")), 3).len(),
+        fixture
+            .paged(&Unbounded, &Included(Value::str("")), 3)
+            .len(),
         1
     );
     // Nothing is below the empty string: an excluded "" upper bound is
@@ -393,7 +408,12 @@ fn fixed_byte_ranges_order_as_unsigned_big_endian_strings() {
         *nudged.last_mut().unwrap() ^= 1;
         let nudged = Value::from_term_bytes(make(0).tag(), &nudged).unwrap();
         fixture.check_all(&[nudged]);
-        assert!(!fixture.expected(&Included(make(0x80)), &Unbounded).is_empty(), "{label}");
+        assert!(
+            !fixture
+                .expected(&Included(make(0x80)), &Unbounded)
+                .is_empty(),
+            "{label}"
+        );
     }
 }
 

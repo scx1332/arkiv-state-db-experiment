@@ -21,8 +21,8 @@ atomic in-process publication, deterministic metering, a host block map,
 typed records with per-namespace indexes, the declared query subset with
 snapshot-pinned keyset pagination and host-executed expiry are implemented,
 and since node step N3b every state has a deterministic logical state root;
-complete equality-page proofs, verification and protocol-2 roots in headers
-now exist in the bounded demo. N3c persists engine snapshots and the same
+complete equality-page proofs, verification and state roots in every block
+header now exist. N3c persists engine snapshots and the same
 proof material; durable node/block integration and broader proof profiles
 remain open. Requirements in this
 document are targets; where the prototype meets one, the

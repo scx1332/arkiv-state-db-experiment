@@ -711,17 +711,8 @@ fn a_deep_term_path_rehashes_its_whole_path() {
     )]);
     assert_within_bounds(&measurement, "insert on the deep term path");
     assert_eq!(measurement.writes[&MapKind::Terms], 2);
-    assert_eq!(
-        measurement.hashed(MapKind::Terms),
-        177
-    );
-    assert_eq!(
-        measurement.staged(MapKind::Terms),
-        177
-    );
-    assert_eq!(
-        measurement.allowed(MapKind::Terms),
-2 * 330
-    );
+    assert_eq!(measurement.hashed(MapKind::Terms), 177);
+    assert_eq!(measurement.staged(MapKind::Terms), 177);
+    assert_eq!(measurement.allowed(MapKind::Terms), 2 * 330);
     report("a record added to the 175-node term path", &measurement);
 }

@@ -1,10 +1,11 @@
 # Signed proposer v1
 
-`arkiv-proposer` is an explicit Arkiv-v2 execution profile with signed native
+`arkiv-proposer` runs the Arkiv entity protocol with signed native
 transactions, a bounded volatile pool, independently executing full followers,
-and signed-header light followers. The existing unsigned simulator, engine
-formats, native header encoding, query parser/classifier and Eq proof encoding
-remain intact. The current implementation also accepts a limited Ethereum
+and signed-header light followers. It shares the engine formats, native header
+encoding, query parser/classifier and Eq proof encoding with the unsigned
+simulator. Every signed chain runs the `glm-v2` gas profile (GLM pricing with
+funded accounts; see [GLM accounts](glm-accounts-v1.md)). The implementation also accepts a limited Ethereum
 transaction/RPC compatibility surface: replay-protected legacy and type-2
 transactions, native GLM transfers, and Arkiv ABI operations. It is not an EVM;
 its roots and block hashes remain native commitments. This profile does not
@@ -13,14 +14,14 @@ provide consensus, finality, fair ordering or availability.
 The [design plan](signed-proposer-v1-plan.md) records the protocol and dependency
 decision. Implementation uses the existing locked Alloy primitives 1.7.3 and
 k256 0.13.4. Reth's Ethereum transaction pool is not added. `cargo +1.90.0 check
--p arkiv-node --features arkiv-v2 --locked` succeeds with the existing MSRV.
+-p arkiv-node --locked` succeeds with the existing MSRV.
 
 ## Run locally
 
 Build and run the isolated subprocess acceptance scenario:
 
 ```sh
-cargo build -p arkiv-node --features arkiv-v2 --bin arkiv-proposer
+cargo build -p arkiv-node --bin arkiv-proposer
 python3 scripts/signed-proposer-smoke.py
 ```
 
@@ -36,8 +37,14 @@ For manual use:
 target/debug/arkiv-proposer keygen --out /tmp/proposer.key
 target/debug/arkiv-proposer producer \
   --run-dir /tmp/signed-producer --key-file /tmp/proposer.key \
+  --allocations-file allocations.json \
   --listen 127.0.0.1:9500 --private-listen 127.0.0.1:9501
 ```
+
+`allocations.json` maps addresses to decimal base-unit balances and must fund
+the proposer for its block-1 bootstrap transaction (see
+[GLM accounts](glm-accounts-v1.md#cli)); `--bundle BUNDLE` creates the producer
+from a [genesis bundle](genesis-bundle-v1.md) instead.
 
 Set `ARKIV_PROPOSER_TOKEN` to a private bearer of at least 32 bytes before
 enabling the private listener or running a full follower. Key generation writes
@@ -57,8 +64,8 @@ Timestamps remain deterministic (`genesis start + height × block period`), so a
 operator aligning an existing chain after downtime must explicitly pause, step
 the missing blocks, and resume. This retains the signed genesis and history.
 
-The first block contains exactly one proposer-signed nonce-zero transaction
-creating the `entities` namespace. External admission returns
+Without a genesis prefill, the first block contains exactly one proposer-signed
+nonce-zero transaction creating the `entities` namespace. External admission returns
 `ChainInitializing` until that block commits. No implicit demo keys or synthetic
 unsigned transactions are inserted. Normal transactions, including the signed
 bootstrap, pass through the pool and the native executor.
@@ -200,12 +207,10 @@ tests include real redb reopen and missing/corrupt restore cases. Existing redb
 crash suites test the underlying immediate-commit storage contract.
 
 ```sh
-cargo test -p arkiv-node --features arkiv-v2 \
+cargo test -p arkiv-node \
   --test signed_protocol --test signed_pool --test signed_history \
   --test signed_host --test signed_http
 cargo test --workspace --exclude reth-trie --exclude alloy-trie
-cargo test --workspace --features arkiv-node/arkiv-v2 \
-  --exclude reth-trie --exclude alloy-trie
 ```
 
 Fault injection exercises cuts before/during history acknowledgment and engine
@@ -231,16 +236,15 @@ light process, not in the browser.
 
 ## Named sample namespaces
 
-GLM profiles admit native `CreateNamespace` transactions. Creation pays the
+Signed chains admit native `CreateNamespace` transactions. Creation pays the
 normal transaction intrinsic gas and metered namespace-directory/create/root
 charges, debited from the signer's balance and burned like other transactions.
-The namespace belongs to the signer. Existing bootstrap validation is unchanged.
-Generic record writes remain disabled under GLM: Arkiv entities and their
-storage-rent/ownership rules still use namespace `1`.
+The namespace belongs to the signer. Generic record writes are disabled under
+GLM pricing; Arkiv entity operations, with their storage-rent and ownership
+rules, may address namespace `1` or any other namespace.
 
-To add an **empty** `bricks` namespace to an existing sample chain without
-resetting genesis, update its producer and full replay followers to this version,
-then use a funded local signer:
+To add an **empty** `bricks` namespace to a running sample chain, use a funded
+local signer:
 
 ```sh
 python3 scripts/create-sample-namespace.py \
@@ -256,5 +260,4 @@ it never assumes namespace ID `2`. Use a dedicated signer without concurrent
 submissions. A timed-out submission must be checked by request ID before retry.
 In State Tree Explorer, refresh the snapshot and open **Catalog**, then follow
 the `bricks` leaf. Its records, keys, rows and terms maps are initially empty.
-Creation requires no explorer frontend change. Older full-node binaries cannot
-replay the new operation and must be upgraded before it is submitted.
+Creation requires no explorer frontend change.

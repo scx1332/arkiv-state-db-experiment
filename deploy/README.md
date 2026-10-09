@@ -23,8 +23,9 @@ without replacing or restarting a node:
 4. Run `nginx -t`, then reload Nginx. Verify `/docs`, `/openapi.json`, and a
    read-only request from Scalar's client.
 
-The specification describes Arkiv v2 path limits. The signed-node API and its
-documentation routes require the `arkiv-v2` build feature.
+The specification describes the Arkiv entity protocol's path limits. The
+signed-node API and its documentation routes are part of the `arkiv-proposer`
+binary.
 
 Scalar's JavaScript is loaded from the version-pinned jsDelivr URL in the HTML.
 The schema and API calls stay on the node origin. Publishing these assets does
@@ -36,7 +37,8 @@ Published at <https://full-node.rogue-one.eu/docs>, with the specification at
 <https://full-node.rogue-one.eu/openapi.json>. `/docs/` redirects to `/docs`.
 
 - The two focused Rust HTTP tests passed with
-  `cargo test -p arkiv-node --features arkiv-v2 --test signed_http state_`.
+  `cargo test -p arkiv-node --test signed_http state_` (then run with the
+  since-removed `--features arkiv-v2`).
 - OpenAPI 3.1 structural validation passed. Real full-node responses for all six
   map kinds matched the response schema at one pinned height, including decoded
   catalog, key, row, term and posting leaves and an empty records map.
@@ -52,7 +54,7 @@ The same URLs now cover 30 paths / 33 HTTP operations, all 31 HTTP JSON-RPC
 methods, and WebSocket subscription messages.
 
 - Three documentation coverage tests and all ten signed HTTP integration tests
-  passed with `--features arkiv-v2`.
+  passed (then with the since-removed `--features arkiv-v2`).
 - OpenAPI structure and all 31 RPC request examples validated. Live checks
   matched 25 native REST responses and 23 read-only JSON-RPC method results to
   their schemas, including populated feeds, included transactions, account

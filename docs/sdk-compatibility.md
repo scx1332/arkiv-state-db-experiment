@@ -118,8 +118,8 @@ producer/full replay tests, real prefilled-state query tests, RPC simulation and
 rollback/event tests, and an unchanged-SDK end-to-end harness:
 
 ```sh
-cargo test --workspace --features arkiv-v2
-cargo build -p arkiv-node --features arkiv-v2 --bin arkiv-proposer
+cargo test --workspace
+cargo build -p arkiv-node --bin arkiv-proposer
 python3 scripts/sdk-compat-smoke.py
 ```
 
@@ -185,8 +185,9 @@ reference repository is modified.
 Validated on 2026-09-25: 31 applicable unchanged upstream SDK integration tests
 passed over HTTP/WebSocket; the single permanent-entity case was explicitly
 filtered out. The complete unfiltered run identified that deliberate policy
-difference. Workspace regression tests passed with `arkiv-v2` (947 tests) and
-without feature flags (907 tests), including dependency/doctest suites, and
+difference. Workspace regression tests passed (947 tests in the build that then
+carried the Arkiv entity protocol, 907 in the generic build; the node now has a
+single build), including dependency/doctest suites, and
 workspace/all-target Clippy passed with warnings denied. Existing genesis-bundle
 and GLM-account real-process smoke tests also passed against the release binary.
 

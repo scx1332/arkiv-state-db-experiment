@@ -87,7 +87,11 @@ mod ethereum {
     /// Hashes storage keys, sorts them and them calculates the root hash of the storage trie.
     /// See [`storage_root_unsorted`] for more info.
     pub fn storage_root_unhashed(storage: impl IntoIterator<Item = (B256, U256)>) -> B256 {
-        storage_root_unsorted(storage.into_iter().map(|(slot, value)| (keccak256(slot), value)))
+        storage_root_unsorted(
+            storage
+                .into_iter()
+                .map(|(slot, value)| (keccak256(slot), value)),
+        )
     }
 
     /// Sorts and calculates the root hash of account storage trie.
@@ -121,7 +125,9 @@ mod ethereum {
         state: impl IntoIterator<Item = (&'a Address, &'a A)>,
     ) -> B256 {
         state_root_unsorted(
-            state.into_iter().map(|(address, account)| (keccak256(address), account.clone())),
+            state
+                .into_iter()
+                .map(|(address, account)| (keccak256(address), account.clone())),
         )
     }
 
@@ -132,7 +138,9 @@ mod ethereum {
         state: impl IntoIterator<Item = (Address, A)>,
     ) -> B256 {
         state_root_unsorted(
-            state.into_iter().map(|(address, account)| (keccak256(address), account)),
+            state
+                .into_iter()
+                .map(|(address, account)| (keccak256(address), account)),
         )
     }
 

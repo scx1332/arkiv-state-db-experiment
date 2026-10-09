@@ -337,7 +337,7 @@ pub fn execute_block_observed(
 }
 
 /// Internal host bookkeeping after each transaction's rollback decision.
-/// Legacy execution uses a no-op; the signed profile advances its account nonce.
+/// Unsigned chains use a no-op; signed hosts advance the account nonce.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_block_hooked(
     spec: &ChainSpec,
@@ -474,8 +474,7 @@ fn execute_block_inner(
         timestamp_ms,
         inputs_digest: inputs.digest(),
         outcomes_digest: outcomes.digest(),
-        state_root: crate::block::root_bearing_protocol(spec.protocol_version())
-            .then(|| candidate.state_root()),
+        state_root: candidate.state_root(),
     };
     Ok(ExecutedBlock {
         candidate,
@@ -705,7 +704,6 @@ impl Executor<'_> {
         let mut ops = Vec::with_capacity(tx.ops.len());
         let mut spent = 0u64;
         let mut failed = None;
-        #[cfg(feature = "arkiv-v2")]
         if crate::gas::is_active(self.branch.pricing()) {
             match self
                 .branch
@@ -854,7 +852,6 @@ impl Executor<'_> {
                 Step::Failed(outcome)
             });
         }
-        #[cfg(feature = "arkiv-v2")]
         if let TxOp::Arkiv {
             namespace,
             operation,
@@ -880,7 +877,6 @@ impl Executor<'_> {
                 Step::Failed(outcome)
             });
         }
-        #[cfg(feature = "arkiv-v2")]
         if crate::gas::is_active(self.branch.pricing())
             // Namespace creation pays the intrinsic fee plus the existing
             // metered directory/create/root charges. Other generic writes stay

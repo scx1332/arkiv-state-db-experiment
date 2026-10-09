@@ -14,11 +14,7 @@ use arkiv_db_storage::versioned::{CommitBatch, CommitOutcome, Head, Table, Versi
 use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, sync::Arc};
 
-const PROFILE: &[u8] = if cfg!(feature = "arkiv-v2") {
-    b"ARKSIMLIGHT2"
-} else {
-    b"ARKSIMLIGHT1"
-};
+const PROFILE: &[u8] = b"ARKSIMLIGHT1";
 const PROFILE_KEY: &[u8] = b"sim-light/profile";
 const ID_KEY: &[u8] = b"sim-light/identity";
 const CONFLICT_KEY: &[u8] = b"sim-light/conflict";
@@ -44,70 +40,21 @@ pub fn resolve(
     let namespace =
         NamespaceId::from_ordinal(number(&r.namespace)?).ok_or(Error("InvalidRequest"))?;
     let attribute = CellName::new(&r.attribute).map_err(|_| Error("InvalidRequest"))?;
-    let value = match r.value_type.as_str() {
-        "bool" => Value::Bool(r.value.as_bool().ok_or(Error("InvalidRequest"))?),
-        "u64" => Value::U64(number(r.value.as_str().ok_or(Error("InvalidRequest"))?)?),
-        "i64" if !cfg!(feature = "arkiv-v2") => {
-            let text = r.value.as_str().ok_or(Error("InvalidRequest"))?;
-            let n: i64 = text.parse().map_err(|_| Error("InvalidRequest"))?;
-            if n.to_string() != text {
-                return Err(Error("InvalidRequest"));
-            }
-            Value::I64(n)
+    // `bytes` is field-only and never indexed, so it has no equality proof.
+    if r.value_type == "bytes" {
+        return Err(Error("UnsupportedProof"));
+    }
+    let value = crate::value_json::from_json(&r.value_type, &r.value).ok_or_else(|| {
+        if arkiv_db::TypeTag::from_name(&r.value_type).is_some() {
+            Error("InvalidRequest")
+        } else {
+            Error("UnsupportedProof")
         }
-        "str" => {
-            let s = r.value.as_str().ok_or(Error("InvalidRequest"))?;
-            if s.len() > Value::MAX_INDEXED_LEN {
-                return Err(Error("InvalidRequest"));
-            }
-            Value::str(s)
-        }
-        "i32" => {
-            let text = r.value.as_str().ok_or(Error("InvalidRequest"))?;
-            let n: i32 = text.parse().map_err(|_| Error("InvalidRequest"))?;
-            if n.to_string() != text {
-                return Err(Error("InvalidRequest"));
-            }
-            Value::I32(n)
-        }
-        "u256" => {
-            let text = r.value.as_str().ok_or(Error("InvalidRequest"))?;
-            let n: alloy_primitives::U256 = text.parse().map_err(|_| Error("InvalidRequest"))?;
-            if n.to_string() != text {
-                return Err(Error("InvalidRequest"));
-            }
-            Value::U256(n.to_be_bytes())
-        }
-        #[cfg(feature = "arkiv-v2")]
-        "dec" if cfg!(feature = "arkiv-v2") => Value::Dec(
-            crate::arkiv::parse_decimal(r.value.as_str().ok_or(Error("InvalidRequest"))?)
-                .map_err(|_| Error("InvalidRequest"))?,
-        ),
-        "bytes32" | "key" => {
-            let bytes: [u8; 32] = unhex(r.value.as_str().ok_or(Error("InvalidRequest"))?, 32)?
-                .try_into()
-                .map_err(|_| Error("InvalidRequest"))?;
-            if r.value_type == "key" {
-                Value::Key(bytes)
-            } else {
-                Value::Bytes32(bytes)
-            }
-        }
-        "addr" => Value::Addr(
-            unhex(r.value.as_str().ok_or(Error("InvalidRequest"))?, 20)?
-                .try_into()
-                .map_err(|_| Error("InvalidRequest"))?,
-        ),
-        // The golem-grid scalars (and dec in the generic profile) use the
-        // shared JSON forms of value_json.
-        "dec" | "bytes4" | "bytes8" | "bytes16" | "u32" | "u128" | "i128" | "i256" | "dec32"
-        | "dec64" | "dec128" | "f32" | "f64" | "date32" | "timestamp64" => {
-            crate::value_json::from_json(&r.value_type, &r.value).ok_or(Error("InvalidRequest"))?
-        }
-        _ => return Err(Error("UnsupportedProof")),
-    };
-    #[cfg(feature = "arkiv-v2")]
-    if namespace.ordinal() == 1 {
+    })?;
+    if matches!(&value, Value::Str(s) if s.len() > Value::MAX_INDEXED_LEN) {
+        return Err(Error("InvalidRequest"));
+    }
+    if namespace == crate::arkiv::entity_namespace() {
         use arkiv_db::TypeTag;
         let valid = match attribute.as_str() {
             "$key" => value.tag() == TypeTag::Key,
@@ -126,7 +73,7 @@ pub fn resolve(
             genesis_hash: hash(&identity.genesis_hash)?,
             height: header.height,
             block_hash: header.hash(),
-            state_root: header.state_root.ok_or(Error("UnsupportedVersion"))?,
+            state_root: header.state_root,
         },
         query: EqQuery {
             namespace,
@@ -239,7 +186,6 @@ impl Light {
         let header: crate::Header = decode_exact(&bytes).map_err(|_| Error("StorageCorrupt"))?;
         if header.height != height
             || header.chain_id != self.run.genesis.chain_id
-            || header.state_root.is_none()
             || self
                 .store
                 .read_record_bounded(Table::BlockIndex, header.hash().as_slice(), 8)?
@@ -289,7 +235,7 @@ impl Light {
         if headers.len() > HEADER_BATCH {
             return Err(Error("InvalidRequest"));
         }
-        if sampled.chain_id != self.run.genesis.chain_id || sampled.state_root.is_none() {
+        if sampled.chain_id != self.run.genesis.chain_id {
             return Err(Error("ChainConflict"));
         }
         self.observed = self.observed.max(sampled.height);
@@ -324,7 +270,6 @@ impl Light {
             .map_err(|_| Error("ChainConflict"))?;
             if h.parent_hash != current.hash()
                 || h.chain_id != self.run.genesis.chain_id
-                || h.state_root.is_none()
                 || h.timestamp_ms
                     != self
                         .run
@@ -462,14 +407,7 @@ impl Light {
             VerifiedEq::NamespaceAbsent => return Err(Error("NamespaceNotFound")),
             VerifiedEq::Page(p) => p,
         };
-        #[cfg(feature = "arkiv-v2")]
-        if request.query.namespace.ordinal() == 1 {
-            for row in &page.rows {
-                crate::arkiv::validate_proven_row(row).map_err(|_| Error("InvalidProof"))?;
-            }
-        }
-        #[cfg(feature = "arkiv-v2")]
-        let entities = if request.query.namespace.ordinal() == 1 {
+        let entities = if request.query.namespace == crate::arkiv::entity_namespace() {
             page.rows.iter().map(|row| {
                 let p=crate::arkiv::project(row).map_err(|_| Error("InvalidProof"))?;
                 if p.created_at > h.height || p.updated_at > h.height || (p.expires_at != u64::MAX && p.expires_at <= h.height) { return Err(Error("InvalidProof")); }
@@ -498,12 +436,9 @@ impl Light {
                 .push_back((cursor.clone(), request.clone(), token));
             cursor
         });
-        let mut response = serde_json::json!({"verification":"proof verified against trusted simulator root; unsigned source","sourceId":self.identity.source_id,"runId":self.identity.run_id,"genesisHash":self.identity.genesis_hash,"chainId":self.identity.chain_id,"snapshot":{"height":h.height.to_string(),"hash":hex(h.hash().as_slice()),"stateRoot":hex(h.state_root.unwrap().as_slice())},"query":{"namespace":r.namespace,"attribute":r.attribute,"valueType":r.value_type,"value":r.value,"limit":r.limit},"rows":rows,"continuation":cursor,"postingCount":page.posting_count});
-        #[cfg(feature = "arkiv-v2")]
-        {
-            response["profile"] = serde_json::json!("arkiv-entity-v2");
-            response["entities"] = serde_json::json!(entities);
-        }
+        let mut response = serde_json::json!({"verification":"proof verified against trusted simulator root; unsigned source","sourceId":self.identity.source_id,"runId":self.identity.run_id,"genesisHash":self.identity.genesis_hash,"chainId":self.identity.chain_id,"snapshot":{"height":h.height.to_string(),"hash":hex(h.hash().as_slice()),"stateRoot":hex(h.state_root.as_slice())},"query":{"namespace":r.namespace,"attribute":r.attribute,"valueType":r.value_type,"value":r.value,"limit":r.limit},"rows":rows,"continuation":cursor,"postingCount":page.posting_count});
+        response["profile"] = serde_json::json!("arkiv-entity-v2");
+        response["entities"] = serde_json::json!(entities);
         if let Some(inspection) = inspection {
             let object = response.as_object_mut().ok_or(Error("InvalidProof"))?;
             object.insert("canonicalRequest".into(), serde_json::json!(pack(request)));

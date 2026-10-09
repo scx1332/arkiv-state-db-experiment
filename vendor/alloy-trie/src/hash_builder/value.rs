@@ -17,7 +17,10 @@ pub struct HashBuilderValue {
 
 impl Default for HashBuilderValue {
     fn default() -> Self {
-        Self { buf: Vec::with_capacity(128), kind: HashBuilderValueKind::default() }
+        Self {
+            buf: Vec::with_capacity(128),
+            kind: HashBuilderValueKind::default(),
+        }
     }
 }
 
@@ -108,7 +111,10 @@ impl HashBuilderValue {
 /// The kind of the current hash builder value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "arbitrary", derive(derive_arbitrary::Arbitrary, proptest_derive::Arbitrary))]
+#[cfg_attr(
+    feature = "arbitrary",
+    derive(derive_arbitrary::Arbitrary, proptest_derive::Arbitrary)
+)]
 enum HashBuilderValueKind {
     /// Value of the leaf node.
     #[default]

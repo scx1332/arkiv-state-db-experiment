@@ -1,15 +1,16 @@
 # Arkiv entity v2 compatibility profile
 
-Implemented as an explicit `arkiv-v2` Cargo feature. The default build remains the
-legacy generic profile. These binaries must use separate stores: there is no
-in-place migration, no historical root rewrite, and no live height activation.
+The node (`arkiv-node`) implements the Arkiv v2 SDK entity model as its host
+protocol (`arkiv-entity-v2` in status capabilities). There is one build and
+one protocol: every chain reserves namespace 1 for Arkiv entities, and the
+database engine (`arkiv-db`) has a single layout.
 
 ## Contract
 
 | Area | Implemented behavior |
 | --- | --- |
 | Names | 32 ASCII bytes, protocol Ident32 grammar; SDK-safe authoring rejects reserved words and `--`; namespace names remain 20 bytes |
-| Scalars | Distinct bool, i32, u64, u256, dec, bytes32, str, addr, key; payload-only bytes; generic i64 rejected at Arkiv boundary |
+| Scalars | Distinct bool, i32, u64, u256, dec, bytes32, str, addr, key; payload-only bytes; other engine types (i64, the golem-db grid types) rejected at the Arkiv boundary |
 | Strings | 128 UTF-8 bytes, C0 and DEL rejected |
 | Payload | 128 KiB per entity, separate block/proof/response limits |
 | Encodings | Explicit SDK IDs 1–10; separate ABI, natural-width storage, canonical engine values and ordered index bytes |
@@ -17,7 +18,7 @@ in-place migration, no historical root rewrite, and no live height activation.
 | Identity | SDK-compatible Keccak derivation using chain ID, contract address, creator, committed creation nonce, salt |
 | Lifecycle | Per-entity owner checks; immutable creator/key/createdAt/flags; readonly content; permissionless extension; transfer; delete; no revival; transaction rollback includes nonces and expiry schedules |
 | Expiry | Checked minimum-lifetime resolution, no shortening, purge before publication; permanent MAX; equal-expiry successful extension stamps updatedAt |
-| Queries | Bounded single typed equality with complete postings; `$key` equality gives point lookup; no full query language or RPC compatibility claim |
+| Queries | Proven: bounded single typed equality with complete postings (`eq-page-v1`) and complete ranges (`range-complete-v1`); `$key` equality gives point lookup. The signed node additionally serves unverified SDK JSON-RPC queries |
 | Proofs | All indexable scalars, profile-bound requests and continuation tokens, real Patricia paths and full posting reconstruction, verified entity projection |
 | Trust | Unsigned internal producer; light verifies against configured headers; full independently reexecutes; proof alone does not attest historical authorization |
 
@@ -43,26 +44,25 @@ or database metadata.
 
 ## Version inventory
 
-| Boundary | Default | Arkiv feature |
-| --- | --- | --- |
-| Engine layout, canonical codec, state format | 1 | 2 |
-| Name/indexed-value/term-key bytes | 20 / 64 / 88 | 32 / 128 / 164 |
-| Proof and inspection | eq-page-v1 / 1 | eq-page-v2 / 2 |
-| Node block format / protocol / header | 1 / 2 / 2 | 2 / 3 / 3 |
-| Durable engine magic | ARKENG01 | ARKENG02 |
-| Simulator run / light store | 1 / ARKSIMLIGHT1 | 2 / ARKSIMLIGHT2 |
-| Record-key encoding | 2 (33 bytes) | 2 (unchanged) |
+| Boundary | Value |
+| --- | --- |
+| Engine layout, canonical codec, state format | 1 |
+| Name / indexed-value / term-key bytes (hard caps) | 32 / 128 / 164 |
+| Proof profiles | `eq-page-v1`, `range-complete-v1` |
+| Node block format / protocol | 1 / 1 (every header carries the state root) |
+| Durable engine magic | ARKENG01 |
+| Simulator run / light store | 1 / ARKSIMLIGHT1 |
+| Record-key encoding | 33 bytes |
 
-The storage backend format itself is unchanged. Engine manifests and state
-headers gate the logical layout, and node genesis/header domains gate the chain.
-Scalar type ids are shared by both profiles: the default build now also admits
-ids 6–11 and the golem-db grid ids 12–25 in generic namespaces (additive, no
-existing encoding or root changes; see `docs/block-format.md`, "Value types").
-The Arkiv entity namespace still admits only the SDK scalars above.
-Retained legacy golden vectors are exercised by default builds. Shared database
-tests run under both profiles; node v2 uses dedicated host, HTTP, full/light and
-crash suites because the preserved generic/signed node fixtures describe another
-protocol.
+The cell limits within the hard caps are chain parameters (`Limits`, set in
+the genesis): the entity profile sets 32-byte names, 128-byte indexed
+strings and 128 KiB values. Engine manifests and state headers gate the
+logical layout, and node genesis/header domains gate the chain. Scalar type
+ids are golem-db's cell type ids (see `docs/block-format.md`); generic
+namespaces admit all of them, and the Arkiv entity namespace admits only the
+SDK scalars above. Status reports both lists: `capabilities.valueTypes`
+(every engine type) and `capabilities.entityNamespace.valueTypes` (the SDK
+ABI types).
 
 ## Isolated demonstration
 
@@ -70,10 +70,10 @@ protocol.
 python3 scripts/arkiv-v2-demo.py --run-dir /tmp/my-arkiv-v2
 ```
 
-The script builds into `target/arkiv-v2`, starts producer at 19400, private
+The script builds `arkiv-simulator` in the normal target directory, starts producer at 19400, private
 replication at 19401, light at 19402 and full at 19403, all loopback-only. Use
 `--base-port` to choose another four-port range, or `--binary` for an already built
-v2 simulator. Ctrl-C stops all three processes. Repeating the command resumes the
+simulator. Ctrl-C stops all three processes. Repeating the command resumes the
 same identity and durable history. It never resets data or points at existing
 production stores. Private bearer material stays in a mode-0600 file.
 
@@ -81,8 +81,8 @@ Deterministic history creates five entities at block 2. At block 4 the first
 entity transfers from address `a1` repeated 20 bytes to `b0` repeated 20 bytes;
 block 5 patches it; block 6 performs a permissionless equal-expiry extension on
 the fifth entity; block 8 deletes the fourth; block 14 expires the fifth. Empty
-blocks then continue advancing. This finite trace intentionally rejects nonzero
-`extraRowsPerBlock`; production workload growth is not implied.
+blocks then continue advancing. The trace is finite; it does not model
+production workload growth.
 
 Example POST to `http://127.0.0.1:19402/sim/v1/query/inspect`:
 
@@ -100,12 +100,8 @@ canonical request/proof bytes and versioned actual witness paths.
 ## Verification
 
 ```
-cargo test -p arkiv-db
-cargo test -p arkiv-db --features arkiv-v2
-cargo test -p arkiv-node
-cargo test -p arkiv-node --features arkiv-v2
-cargo clippy -p arkiv-db -p arkiv-node --all-targets -- -D warnings
-cargo clippy -p arkiv-db -p arkiv-node --features arkiv-v2 --all-targets -- -D warnings
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 SDK-derived fixtures record the source revision in
@@ -119,11 +115,8 @@ of a five-entity creation block, including creator counters and expiry schedules
 
 ## Deployment
 
-Build the simulator image with `--features arkiv-v2`, provision fresh producer,
-full and light volumes, bootstrap their new source/run/genesis identity, and
-point the debug panels at those peers. A compatible explorer feed validator must
-understand the new metadata types and projection version before a fresh explorer
-index is attached. Old volumes can remain offline for rollback with the old
-binary. Never open them with a changed logical layout. The user has authorized
-stopping the existing experimental chain and replacing it after validation;
-operational deployment evidence belongs in the deployment report.
+Deploy the simulator image on fresh producer, full and light volumes,
+bootstrap their source/run/genesis identity, and point the debug panels at
+those peers. An explorer feed validator must understand the metadata types
+and projection version before an explorer index is attached. Stores are not
+migrated: a changed logical layout requires fresh volumes.

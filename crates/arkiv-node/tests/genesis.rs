@@ -1,6 +1,3 @@
-#![cfg(not(feature = "arkiv-v2"))]
-// These retained fixtures pin the legacy generic/signed protocol.
-// Arkiv v2 has separate host, profile and crash acceptance suites.
 //! Genesis invariants, the expiry reservation and the sweep read bound,
 //! against hand-derived values.
 
@@ -247,7 +244,7 @@ fn versions_are_checked() {
         ChainSpec::new(bad).err(),
         Some(GenesisError::UnsupportedFormat(2))
     );
-    for protocol in [0, 3] {
+    for protocol in [0, 2, 4] {
         let mut bad = genesis();
         bad.protocol_version = protocol;
         assert_eq!(
@@ -262,7 +259,6 @@ fn the_spec_exposes_the_genesis() {
     let spec = spec(PARAMS, LIMITS).expect("valid");
     assert_eq!(spec.chain_id(), CHAIN);
     assert_eq!(spec.protocol_version(), 1);
-    assert_eq!(spec.header_version(), 1);
     assert!(spec.is_admin(&ADMIN));
     assert!(!spec.is_admin(&ALICE));
     assert_eq!(spec.genesis_header(), &genesis().header());

@@ -265,13 +265,18 @@ mod tests {
 
     fn runtime() -> Shared {
         let signer = Signer::from_bytes([1; 32]).unwrap();
-        let mut native = crate::demo::workload::genesis(9405, 1000);
-        native.admins.clear();
-        native.params.max_admin_per_block = 0;
-        native.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;
-        native.params.max_block_input_bytes = INPUT_CAP;
-        let genesis =
-            SignedGenesis::new(native, [1; 16], *signer.address().as_bytes(), 1000).unwrap();
+        let genesis = SignedGenesis::new(
+            default_native_genesis(9405, 1000),
+            [1; 16],
+            *signer.address().as_bytes(),
+            1000,
+            crate::accounts::AccountConfig::new(vec![(
+                signer.address(),
+                alloy_primitives::U256::from(10u128.pow(21)),
+            )])
+            .unwrap(),
+        )
+        .unwrap();
         let certificate = SignedHeader::sign(&genesis, genesis.header(), &signer).unwrap();
         let history =
             History::create(Arc::new(MemoryVersionedStore::new()), genesis.hash()).unwrap();

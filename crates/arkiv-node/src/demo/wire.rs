@@ -3,7 +3,7 @@ use super::{DemoError, Result};
 use arkiv_db::{Decode, Encode, decode_exact, encode};
 use serde::{Deserialize, Serialize};
 
-pub const REQUEST_CAP: usize = 1024 * 1024;
+pub const REQUEST_CAP: usize = 4 * 1024 * 1024;
 pub const RESPONSE_CAP: usize = 8 * 1024 * 1024;
 pub const HEADER_BATCH: u32 = 128;
 pub const BLOCK_BATCH: u32 = 16;

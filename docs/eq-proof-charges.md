@@ -62,7 +62,7 @@ checks the remaining response-byte and supplied-node capacity. Only actual
 visited nodes and emitted bytes are charged. Fixed metadata maps reserve
 1,024 bytes per possible node, which bounds both metadata leaves and the
 532-byte largest branch. Row nodes reserve the larger of 1,024 and
-`min(genesis.max_cells, 64) * (max(genesis.max_value_len, 8) + 32) + 128`.
+`min(genesis.max_cells, 64) * (max(max_str_len, max_bytes_len, 32) + 44) + 128`.
 All reservation arithmetic is checked.
 
 Before a full row lookup the server reserves the same row-size capacity

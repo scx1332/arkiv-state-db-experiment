@@ -1,31 +1,30 @@
 # Native GLM accounts (`glm-v2`)
 
-The signed `glm-v2` profile activates balances and actual fee burning on a fresh
-chain. It uses the existing [GLM gas schedule](glm-gas-v1.md), a 100M block gas
+Every signed chain runs the `glm-v2` profile: balances and actual fee burning. It
+uses the [GLM gas schedule](glm-gas-v1.md), a 100M block gas
 limit (90M user budget), and a fixed **1,000,000,000 base units per gas**. GLM has
 18 decimals. These are native experimental-chain balances; no bridge, mint API,
 faucet, rewards or backing relationship is introduced.
 
-The separate [genesis bundle v1 profile](genesis-bundle-v1.md) uses these account
-rules with signed genesis version 4 and sponsored finite-rent prefills. It creates
-the namespace at height 0, leaves transaction nonces at zero, and makes block 1
-ordinary. Version-3 bootstrap rules below continue to apply to existing chains.
+A chain created from a [genesis bundle](genesis-bundle-v1.md) adds a sponsored
+finite-rent prefill to the same account rules. It creates the namespace at height
+0, leaves transaction nonces at zero, and makes block 1 ordinary. A chain created
+from an allocations file follows the block-1 bootstrap described below.
 
 ## Chain identity and account state
 
-Signed genesis wire version 3 appends an account configuration to the version-2
-fields: `gas_price_wei: u64`, allocation count `u32`, then `(address: 20 bytes,
-balance: 32-byte big-endian u256)` pairs. At most 256 positive allocations are
+The signed genesis (version 1) carries an account configuration after the signed
+limits: `gas_price_wei: u64`, allocation count `u32`, then `(address: 20 bytes,
+balance: 32-byte big-endian u256)` pairs, followed by the optional prefill. At most 256 positive allocations are
 allowed, sorted by address without duplicates. Their sum must fit u256. The
 price must equal 1 gwei. The proposer must cover the bootstrap transaction's
-maximum fee (`user_budget * price`). Invalid configurations fail before startup.
+maximum fee (`user_budget * price`) unless the genesis carries a prefill. Invalid
+configurations fail before startup.
 
 Both the price and allocations are committed by the signed genesis hash, which
-every signed transaction and certificate binds. Versions 1 (legacy) and 2
-(`glm-v1`, gas accounting without payment) retain their encodings and behavior.
-Older binaries reject version 3. Existing stores cannot be converted by changing
-CLI flags: use a new run directory/genesis. A supplied allocation file must also
-match the retained configuration on restart.
+every signed transaction and certificate binds. Stores cannot be converted by
+changing CLI flags: use a new run directory/genesis. A supplied allocation file
+must also match the retained configuration on restart.
 
 An account consists of a u64 next transaction nonce and a u256 balance. Host key
 `arkiv/glm/a/ || address` stores `version:u32=1 || nonce:u64 || balance:32 bytes`.
@@ -37,7 +36,7 @@ never removed, including zero-balance accounts: their nonces and spent allocatio
 must not be reset by falling back to genesis. The independent Arkiv entity creation
 counter is unchanged.
 
-Block 1 still creates the `entities` namespace using the proposer's signed nonce-0
+Without a prefill, block 1 creates the `entities` namespace using the proposer's signed nonce-0
 transaction. It pays its actual gas fee and advances the proposer to nonce 1.
 Other allocations remain at nonce 0 until their first included transaction.
 
@@ -68,9 +67,9 @@ refunds. Unused reserved transaction gas is refunded.
 Native transfer effects use engine effect tag 8 (`recipient:20 || amount:32`);
 charged account rejections use operation-outcome tag 7 (`fault || receipt`),
 and unsupported account operations use host-fault tag 5. Account fault subtags
-are 1 insufficient balance, 2 overflow, and 3 unsupported. Existing tags retain
-their encodings. The legacy status `refunds:false` means no storage refunds;
-explicit `storageRefunds` and `unusedGasRefunds` fields distinguish the two.
+are 1 insufficient balance, 2 overflow, and 3 unsupported. The status field
+`refunds:false` means no storage refunds; explicit `storageRefunds` and
+`unusedGasRefunds` fields distinguish the two.
 
 The volatile pool reserves the sum of maximum fees **plus gross non-self outgoing
 transfer values** for every pending transaction from a sender, including nonce
@@ -100,7 +99,7 @@ amounts, and out-of-range amounts are rejected.
 
 ```sh
 arkiv-proposer producer --run-dir NEW_DIR --key-file PROPOSER_KEY \
-  --gas-profile glm-v2 --allocations-file allocations.json --chain-id 9005
+  --allocations-file allocations.json --chain-id 9005
 
 arkiv-proposer transfer --key-file SENDER_KEY --genesis-file NEW_DIR/genesis.bin \
   --nonce 0 --request-id 0xREQUEST_ID_32_BYTES --to 0xRECIPIENT_ADDRESS \
@@ -109,10 +108,10 @@ arkiv-proposer transfer --key-file SENDER_KEY --genesis-file NEW_DIR/genesis.bin
 arkiv-proposer submit --peer http://127.0.0.1:9500 --transaction-file transfer.bin
 ```
 
-The producer starts paused unless `--start running` is provided. Existing private
-control endpoints can advance the bootstrap and later blocks. The `create` and
-`sign` commands also use the funded account's transaction nonce. The existing
-`accounts/ADDRESS/nonce` endpoint remains available.
+The producer starts paused unless `--start running` is provided. The private
+control endpoints advance the bootstrap and later blocks. The `create` and
+`sign` commands also use the funded account's transaction nonce, which
+`accounts/ADDRESS/nonce` reports.
 
 ## Account reads, proofs and receipts
 
@@ -135,11 +134,11 @@ control endpoints can advance the bootstrap and later blocks. The `create` and
 - Included submission/request receipts expose decimal-string `gasUsed`,
   `gasPriceWei` and `feeChargedWei`. Their values are derived from retained execution
   gas and the immutable account profile. Duplicate submissions/restarts return the
-  original receipt. Older profiles report zero actual price/fee charged.
+  original receipt.
 
 ## Validation
 
-`cargo test -p arkiv-node --features arkiv-v2 --test accounts` covers fee/refund
+`cargo test -p arkiv-node --test accounts` covers fee/refund
 arithmetic, maximum u256 supply, transfers, self/zero transfers, insufficient
 funds, pending reservations, failure rollback, replay, membership/nonmembership,
 malformed proofs, identity/version pinning, restart and uncertain-publication

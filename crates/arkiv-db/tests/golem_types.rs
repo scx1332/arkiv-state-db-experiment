@@ -145,7 +145,10 @@ fn every_type_id_is_admitted_and_named() {
         assert_eq!(TypeTag::from_id(id), None, "{id}");
     }
     let ids: Vec<u8> = TypeTag::ALL.iter().map(|tag| tag.id()).collect();
-    assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "ALL is in id order");
+    assert!(
+        ids.windows(2).all(|pair| pair[0] < pair[1]),
+        "ALL is in id order"
+    );
     let mut seen: Vec<_> = one_of_each().iter().map(Value::tag).collect();
     seen.sort();
     assert_eq!(seen, TypeTag::ALL.to_vec());

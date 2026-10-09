@@ -22,6 +22,16 @@ Boolean keywords are case-insensitive; attribute names are case-sensitive.
 `NOT` is the complement of the entire predicate, including missing attributes
 and different types. No DNF conversion is performed.
 
+Comparisons (`<`, `<=`, `>`, `>=`) are accepted on numeric values only
+(`i32`, `u64`, `u256`, `dec`): that is the reference Arkiv grammar's rule,
+and this parser stays pinned to it, so `name > str('a')` is a type error
+here and in the SDK's `arkiv_query`. The engine underneath orders every
+indexed type (`bool`, `str`, `bytes32`, `addr`, `key` and the rest, in
+golem-db's byte order), and the native range proof API
+(`/signed/v1/query/range/*`, `docs/range-proofs.md`) accepts all of them.
+Widening the text grammar would be an SDK-facing change, made in the
+reference grammar first.
+
 For this release, only one equality predicate (with optional grouping) executes
 through the text API and fits the existing Eq page proof. Valid range, prefix,
 Boolean and all-entity expressions receive explicit unsupported execution and
@@ -46,11 +56,11 @@ Errors include classification and an actual verification outcome:
 `not_executed`, `resource_limit` for `ProofLimitExceeded`/`BudgetExceeded`, or
 `failed` for a failed request/verification. None returns a successful proof
 badge or unverified replacement rows. Invalid language returns
-`QueryLanguageError`. The original typed Eq endpoints remain available.
+`QueryLanguageError`. The typed Eq endpoints are available alongside.
 
 The parser is pinned to the current reference node grammar, not every SDK
 helper. In particular `$updatedAt` and `$creationFlags` are projection-only in
 that grammar and `$payload` is not queryable, even though the playground has
-additional internal indexed fields exposed by the older typed debug controls.
+additional internal indexed fields exposed by the typed debug controls.
 This deliberate distinction is reported by the classifier, not silently
 expanded into an incompatible text language.

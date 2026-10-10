@@ -460,7 +460,7 @@ Evidence in `crates/arkiv-db/tests`:
 ## Durable integration and remaining work
 
 - **N3c is implemented.** `DurableEngine` supplies a gated store context,
-  bounded encoded cache, manifests, durable head and lazy historical
+  bounded decoded-node cache, manifests, durable head and lazy historical
   snapshots over redb. `preflight_with` checks new node/value bounds before
   encoding/hashing; `try_stage_with` stops on work/sink failures and visits
   nested maps synchronously. Physical batch deduplication does not skip

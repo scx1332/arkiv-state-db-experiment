@@ -72,7 +72,7 @@ impl History {
             .put_record(Table::Meta, PROFILE_KEY, PROFILE)
             .put_record(Table::Meta, ID_KEY, identity)
             .put_record(Table::Manifests, 0u64.to_be_bytes(), vec![0]);
-        match store.commit(batch) {
+        match store.commit(&batch) {
             CommitOutcome::Committed => {}
             CommitOutcome::NotCommitted(_) => return Err(Error("StorageUnavailable")),
             CommitOutcome::Indeterminate(_) => return Err(Error("CommitUncertain")),
@@ -305,7 +305,7 @@ impl History {
                 encode(certificate),
             )
             .put_record(Table::Manifests, sequence.to_be_bytes(), entry);
-        match self.store.commit(batch) {
+        match self.store.commit(&batch) {
             CommitOutcome::Committed => {
                 self.head = next;
                 Ok(None)
@@ -339,7 +339,7 @@ impl History {
 
     fn commit_pending(&mut self) -> Result<BodyRef> {
         let pending = self.pending.as_ref().ok_or(Error("NoPendingHistory"))?;
-        match self.store.commit(pending.batch.clone()) {
+        match self.store.commit(&pending.batch) {
             CommitOutcome::Committed => {
                 let pending = self.pending.take().expect("pending checked");
                 self.head = pending.batch.new_head;
@@ -393,7 +393,7 @@ impl History {
         batch
             .put_record(Table::Meta, CONFLICT_KEY, evidence)
             .put_record(Table::Manifests, sequence.to_be_bytes(), entry);
-        match self.store.commit(batch) {
+        match self.store.commit(&batch) {
             CommitOutcome::Committed => {
                 self.head = next;
                 Ok(())

@@ -127,7 +127,7 @@ fn head_is_parent_until_the_commit_call_returns_into_its_final_phase() {
         let disk = CrashDisk::from_image(image.clone());
         let store = crash_store(&disk, config(true));
         disk.crash_after(k);
-        let _ = store.commit(candidate.clone());
+        let _ = store.commit(&candidate);
         let image = disk.crash(store, CrashMode::AllUnsynced);
         let holds = check_image(
             image,

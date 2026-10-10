@@ -102,7 +102,7 @@ Environment variables:
   every backend.
 - `ARKIV_REDB_CACHE_MIB`: redb page cache. Default 256.
 - `ARKIV_OBJECT_CACHE_MIB` and `ARKIV_OBJECT_CACHE_ENTRIES`: the engine's
-  encoded-object cache. They default to `durable::Options::default()`,
+  decoded-node cache. They default to `durable::Options::default()`,
   8 MiB and 16,384 entries.
 
 ### `table_log` on the arkiv backends
@@ -116,7 +116,7 @@ in the harness's `table,entries,depth,pages,mib` shape:
 | `records` | the other redb tables (metadata, manifests, block index) |
 | `unaccounted` | allocated pages outside the tables: redb's table directory, allocator state, pages freed by recent commits |
 | `free`, `file` | file pages not allocated, and the whole file |
-| `object-cache` | the engine's encoded-object cache: entries and payload MiB |
+| `object-cache` | the engine's decoded-node cache: entries and payload MiB |
 | `live:records`, `live:terms`, `snapshots` | engine counts at head: records, index terms, retained snapshots (entries only) |
 
 The memory backend logs only the last three rows.

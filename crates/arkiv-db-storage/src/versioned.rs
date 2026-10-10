@@ -670,7 +670,7 @@ pub trait VersionedStore: ObjectReader {
     ) -> Result<Option<Vec<u8>>, StorageError>;
 
     /// Applies a batch atomically against the expected head.
-    fn commit(&self, batch: CommitBatch) -> CommitOutcome;
+    fn commit(&self, batch: &CommitBatch) -> CommitOutcome;
 
     /// Whether calls are served or a failure has latched.
     fn health(&self) -> Health;
@@ -721,7 +721,7 @@ impl<T: VersionedStore + ?Sized> VersionedStore for Arc<T> {
     ) -> Result<Option<Vec<u8>>, StorageError> {
         (**self).read_record_bounded(table, key, max_bytes)
     }
-    fn commit(&self, batch: CommitBatch) -> CommitOutcome {
+    fn commit(&self, batch: &CommitBatch) -> CommitOutcome {
         (**self).commit(batch)
     }
     fn health(&self) -> Health {
@@ -767,7 +767,7 @@ impl<T: VersionedStore + ?Sized> VersionedStore for Box<T> {
     ) -> Result<Option<Vec<u8>>, StorageError> {
         (**self).read_record_bounded(table, key, max_bytes)
     }
-    fn commit(&self, batch: CommitBatch) -> CommitOutcome {
+    fn commit(&self, batch: &CommitBatch) -> CommitOutcome {
         (**self).commit(batch)
     }
     fn health(&self) -> Health {

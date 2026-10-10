@@ -429,17 +429,14 @@ fn reconciliation() {
         let disk = CrashDisk::from_image(image.clone());
         let store = crash_store(&disk, RedbConfig::default());
         disk.fail(*op, skip, io::ErrorKind::Other);
-        let outcome = store.commit(candidate.clone());
+        let outcome = store.commit(&candidate);
         assert!(!matches!(outcome, CommitOutcome::Committed));
         match reconcile(&store, &candidate).unwrap() {
             Reconciliation::Committed => committed += 1,
             Reconciliation::NotCommitted => {
                 absent += 1;
                 commit(&store, candidate.clone());
-                if matches!(
-                    store.commit(candidate.clone()),
-                    CommitOutcome::NotCommitted(_)
-                ) {
+                if matches!(store.commit(&candidate), CommitOutcome::NotCommitted(_)) {
                     once += 1;
                 }
             }

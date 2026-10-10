@@ -16,7 +16,6 @@ pub struct PreparationStats {
     pub payload_bytes: usize,
     pub batch_container_bytes: usize,
     pub dedup_entry_bytes: usize,
-    pub commit_clone_payload_bytes: usize,
     pub emitted_by_map: BTreeMap<MapKind, u64>,
 }
 
@@ -203,8 +202,15 @@ impl TryObjectSink for Staging {
             return Err(DurableError::ResourceLimit("staged byte cap".into()));
         }
         self.seen.insert(key, self.objects.len());
+        // Grow geometrically, never past the object cap: amortized O(1)
+        // pushes and a container bounded by `prepare_objects` slots.
         if self.objects.len() == self.objects.capacity() {
-            self.objects.reserve_exact(1);
+            let grow = self
+                .objects
+                .len()
+                .max(16)
+                .min(self.options.prepare_objects - self.objects.len());
+            self.objects.reserve_exact(grow);
         }
         self.objects.push((self.space, id.0, bytes.to_vec()));
         self.stats.payload_bytes = payload;

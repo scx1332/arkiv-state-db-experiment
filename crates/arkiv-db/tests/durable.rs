@@ -223,7 +223,7 @@ fn ten_thousand_publications_retain_no_resident_history_or_dirty_committed_nodes
         assert_eq!(engine.stats().pending_payload_bytes, 0);
         assert_eq!(engine.head().sequence(), sequence);
         assert!(engine.head_snapshot().staged_objects().is_empty());
-        assert!(engine.stats().cache.payload_capacity <= 64 * 1024);
+        assert!(engine.stats().cache.retained_bytes <= 64 * 1024);
         assert_eq!(engine.stats().last_preparation.unique_objects, 1);
     }
     assert_eq!(engine.snapshot_count().unwrap(), 10_001);

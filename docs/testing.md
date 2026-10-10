@@ -22,13 +22,19 @@ workload sizes, backend counters, memory accounting and limitations.
   failed-health cache gating and recovery, exact retry ownership versus
   stale caller candidates, invalid/missing metadata and correctly hashed
   malformed objects, sequence overflow, resource-cap boundaries, cache
-  payload/entry/container bounds and namespace isolation.
-- Unit tests in `arkiv-db/src/durable/cache.rs`: the object cache's O(1)
-  key index beside its FIFO. A hit after an insert, entry- and byte-limit
-  eviction removing exactly the evicted key's slot, a duplicate insert
-  skipped without changing entries or accounting, recovery clearing the
-  index and restarting the FIFO, and hits equal to a linear scan through
-  long churn with the FIFO and index capacities bounded.
+  payload/entry/container bounds and namespace isolation; concurrent
+  readers inside store reads at the same time, recovery waiting for an
+  in-flight reader whose node it then clears, a latch in the middle of an
+  8-reader burst failing every later read until recovery, and identical
+  receipts from cold, warm and disabled caches.
+- Unit tests in `arkiv-db/src/durable/cache.rs`: the decoded-node cache. A
+  second load returns the same `Arc`, map kinds and spaces stay separate
+  entries, a decode failure is never retained and repeats, entry- and
+  byte-limit eviction keeps every shard's index consistent, an oversize
+  node is never retained, CLOCK keeps a hot key through scan churn, shard
+  limits add up to the configured bounds, recovery clears every shard,
+  evicted or cleared nodes are released, and hits equal a linear scan
+  through long churn with charges, entries and capacities bounded.
 - `arkiv-db-trie/tests/bounded_stage.rs` and private ownership tests:
   preflight before encoding/hashing, full RLP size bounds, bounded new-node
   walks, fallible sinks, nested-map traversal despite object deduplication,

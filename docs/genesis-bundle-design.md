@@ -383,7 +383,7 @@ semantic hash. Inventory files have explicit bounded counts/bytes. Build version
 escapes, links, duplicate entries and decompression bombs and enforce expanded
 size caps. Every required file must be included for an offline portable bundle.
 
-The existing durable defaults are an 8 MiB encoded cache, 16,384 cache entries,
+The existing durable defaults are an 8 MiB decoded-node cache, 16,384 cache entries,
 32 MiB prepared payload budget, 100,000 staged objects and 1,000,000 staging
 visits. These are runtime policies and do not establish a bound for an entire
 import. Local sort/cache/staging budgets may change batching or cause a resource

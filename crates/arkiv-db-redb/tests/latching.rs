@@ -93,10 +93,7 @@ fn a_read_error_latches_every_call_until_recover() {
         1,
         &[(SpaceId::Namespace(1), 1, 50)],
     );
-    assert_eq!(
-        store.commit(next.clone()),
-        CommitOutcome::NotCommitted(error)
-    );
+    assert_eq!(store.commit(&next), CommitOutcome::NotCommitted(error));
 
     assert_eq!(store.recover().unwrap(), Some(genesis.new_head));
     assert_eq!(store.health(), Health::Available);
@@ -118,7 +115,7 @@ fn a_write_error_in_a_commit_latches_until_recover() {
         &[(SpaceId::Namespace(1), 10, 200)],
     );
     disk.fail(DiskOp::Write, 2, io::ErrorKind::Other);
-    let outcome = store.commit(next.clone());
+    let outcome = store.commit(&next);
     let error = match outcome {
         CommitOutcome::NotCommitted(error) | CommitOutcome::Indeterminate(error) => error,
         CommitOutcome::Committed => panic!("the write error must fail the commit"),
@@ -126,7 +123,7 @@ fn a_write_error_in_a_commit_latches_until_recover() {
     assert_eq!(error.kind, StorageErrorKind::Io);
     assert!(matches!(store.health(), Health::Failed(_)));
     assert!(matches!(
-        store.commit(next.clone()),
+        store.commit(&next),
         CommitOutcome::NotCommitted(_)
     ));
     assert_eq!(store.recover().unwrap(), Some(genesis.new_head));
@@ -158,7 +155,7 @@ fn recover_is_retryable_while_the_device_fails() {
             error
         );
         assert_eq!(
-            store.commit(block(Some(genesis.new_head), 1, 1, &[])),
+            store.commit(&block(Some(genesis.new_head), 1, 1, &[])),
             CommitOutcome::NotCommitted(error)
         );
     }

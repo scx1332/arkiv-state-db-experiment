@@ -120,21 +120,29 @@ including nested namespace/posting maps, before leaf encoding or root
 hashing. Fallible staging stops at configured object, payload and visit
 limits; stored subtrees incur no staging reads.
 
-Runtime defaults are an 8 MiB/16,384-entry FIFO encoded-object cache and a
+Runtime defaults are an 8 MiB/16,384-entry decoded-node cache and a
 32 MiB/100,000-object preparation with at most 1,000,000 new-node visits per
 preflight/staging pass. Zero cache bytes or entries disables retention.
-Cache hits still check the store's health. Recovery holds the context gate
-against loads and clears cached bytes before reopening. The cache stores no
-decoded trees, misses, errors, or uncommitted objects. A key index beside
-the FIFO makes lookups O(1); the FIFO grows geometrically up to the entry
-limit, and a second load of a retained key is not inserted again.
+The cache keeps decoded committed nodes keyed by space, map kind and object
+id, charged by their estimated retained heap bytes; a hit returns the
+shared node without hashing or decoding again. It stores no misses, errors,
+bytes that failed verification or decoding, or uncommitted nodes. Eviction
+is CLOCK (second chance) over up to 16 shards, each a bounded queue with an
+O(1) key index; the queues grow geometrically up to their entry limits.
+Reads run concurrently: loads share a lifecycle read lock and hold a shard
+lock only for a lookup or an insert, never across a store read or a decode.
+Cache hits still check the store's health. Recovery takes the lifecycle
+write lock, so it waits for in-flight loads, and clears every shard before
+reopening.
 
-`stats()` separates retained cache buffer capacity, entry/container bytes,
-the key index's approximate bytes, hits/misses, generation, resident
-manifests, pending payload, and the last preparation's visits, objects, bytes and map-kind counts. The consuming
-adapter commit API currently requires one temporary clone of the bounded
-batch; its payload is reported explicitly. The temporary dedup B-tree's
-entry payload is reported separately from its allocator/node overhead.
+`stats()` separates the cache's charged bytes, entries and their peaks,
+queue and index container bytes, hits and misses (also per map kind),
+inserts, evictions, second chances, oversize rejections, insert races,
+shard count and contended shard locks, total miss read and decode time,
+generation, resident manifests, pending payload, and the last preparation's
+visits, objects, bytes and map-kind counts. The store commits the prepared
+batch by reference, without a copy. The temporary dedup B-tree's entry
+payload is reported separately from its allocator/node overhead.
 `VersionedStore::stats()` records storage calls independently.
 
 These bounds describe engine-owned committed state and preparation, not

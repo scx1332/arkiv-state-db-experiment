@@ -2,36 +2,36 @@
 
 Evidence for [engine storage v1](engine-storage-v1.md). The tables below are the output of the checked-in [measurement runner](../crates/arkiv-db-redb/examples/engine_storage_experiment.rs); the integration tests add failure evidence after the measurements. These are engine publications, not persisted node blocks.
 
-- Date: 2026-09-24 10:41 UTC
+- Date: 2026-10-09 19:24 UTC
 - Command: `cargo run --release --offline -p arkiv-db-redb --example engine_storage_experiment`
-- rustc 1.96.0 (ac68faa20 2026-05-25)
-- CPU: 13th Gen Intel(R) Core(TM) i9-13900; logical CPUs available: 32
-- Kernel: 7.0.0-31-generic
-- Filesystem: ext4; path: /home/ubuntu/arkiv-network/arkiv-db-pure-astra/crates/arkiv-db-redb/../../target/bench
-- redb 4.3.0; quick repair on; redb page cache 8 MiB. Object-cache options are stated per experiment.
+- rustc 1.90.0 (1159e78c4 2025-09-14)
+- CPU: AMD Ryzen 5 3600 6-Core Processor; logical CPUs available: 12
+- Kernel: 7.0.0-34-generic
+- Filesystem: ext4; path: /home/ubuntu/arkiv-network/arkiv-state-db-experiment/target/perf-bench/esx
+- redb 4.3.0; quick repair on; redb page cache 8 MiB. Node-cache options are stated per experiment.
 - This measures engine snapshots, not node block/body/signing restart. No pruning or compaction.
 
 ## Retained history and resident state
 
 Each commit changes one of 64 raw keys and one host key; 16 typed rows remain fixed. Both caches start cold after each checkpoint reopen. Candidate/branch owners are dropped each commit.
 
-| sequence | object cache bytes | cache container bytes | cache entries | resident manifests | last staged objects | last payload bytes | commit clone bytes | RSS KiB | process HWM KiB | file bytes | elapsed s |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 100 | 65513 | 50600 | 502 | 1 | 8 | 1934 | 1934 | 5164 | 5164 | 606208 | 0.037 |
-| 1000 | 65369 | 40744 | 461 | 1 | 8 | 1934 | 1934 | 7752 | 7752 | 4820992 | 0.325 |
-| 10000 | 65369 | 40744 | 461 | 1 | 8 | 1934 | 1934 | 14156 | 14156 | 38539264 | 3.557 |
+| sequence | node cache retained bytes | cache container bytes | cache entries | cache hits | cache misses | resident manifests | last staged objects | last payload bytes | RSS KiB | process HWM KiB | file bytes | elapsed s |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 62733 | 11264 | 78 | 297 | 768 | 1 | 8 | 1934 | 5344 | 5344 | 606208 | 0.707 |
+| 1000 | 62733 | 11264 | 78 | 2700 | 7200 | 1 | 8 | 1934 | 7880 | 7880 | 4820992 | 7.496 |
+| 10000 | 62733 | 11264 | 78 | 27000 | 72000 | 1 | 8 | 1934 | 14260 | 14260 | 43339776 | 78.284 |
 
-Peak prepared payload: 10380 bytes; batch-vector capacity: 6048 bytes; dedup entry payload: 4704 bytes; commit clone payload: 10380 bytes. The dedup entry figure excludes bounded B-tree allocator/node overhead. Preparation retains one batch, never a batch per historical snapshot.
+Peak prepared payload: 11480 bytes; batch-vector capacity: 9216 bytes; dedup entry payload: 4704 bytes. The dedup entry figure excludes bounded B-tree allocator/node overhead. Preparation retains one batch, never a batch per historical snapshot, and the store commits it by reference.
 
-At all three quiescent checkpoints, retained decoded trie nodes/bytes are **0/0 by ownership invariant**, not an allocator census: the head contains stored roots, the cache owns encoded bytes, no caller branch/candidate survives, and the runner asserts the head stages zero objects after every publication. Direct weak-reference tests separately check dirty graph/value release and that read-decoded nodes do not become owned by stored handles. Active calls may allocate decoded nodes; their peak is not measured by this invariant.
+At all three quiescent checkpoints, the only retained decoded trie nodes are the decoded-node cache's, bounded by its configured bytes (the retained-bytes column is the sum of their estimated heap ownership) and entries: the head contains stored roots, no caller branch/candidate survives, and the runner asserts the head stages zero objects after every publication. Direct weak-reference tests separately check dirty graph/value release and that evicted or cleared cache nodes are released. Active calls may hold further decoded nodes; their peak is not measured here.
 
 The following redb layout diagnostics measure disk allocation, including retained history. They run after each checkpoint's counters/RSS and before the cold reopen. They do not attribute resident metadata heap bytes.
 
 | sequence | tables | directory height | page bytes | allocated pages | allocated disk bytes | historical object entries | object key/value bytes |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 100 | 9 | 1 | 4096 | 82 | 335872 | 859 | 129577 |
-| 1000 | 9 | 1 | 4096 | 680 | 2785280 | 8059 | 1379677 |
-| 10000 | 9 | 1 | 4096 | 6652 | 27246592 | 80059 | 13880677 |
+| 100 | 9 | 1 | 4096 | 85 | 348160 | 859 | 130677 |
+| 1000 | 9 | 1 | 4096 | 686 | 2809856 | 8059 | 1380777 |
+| 10000 | 9 | 1 | 4096 | 6649 | 27234304 | 80059 | 13881777 |
 
 ## Cold application open
 
@@ -39,33 +39,33 @@ The OS page cache is warm; application and redb caches are new. `unclean` disabl
 
 | sequence | close | app records | app head reads | app trie objects | app μs | redb open μs | redb reads | redb read bytes | full repair |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 100 | clean | 7 | 1 | 0 | 33 | 60 | 8 | 24905 | false |
-| 100 | unclean | 7 | 1 | 0 | 27 | 74 | 8 | 24905 | false |
-| 1000 | clean | 7 | 1 | 0 | 36 | 63 | 8 | 24905 | false |
-| 1000 | unclean | 7 | 1 | 0 | 27 | 71 | 8 | 24905 | false |
-| 10000 | clean | 7 | 1 | 0 | 48 | 83 | 8 | 24905 | false |
-| 10000 | unclean | 7 | 1 | 0 | 31 | 79 | 8 | 24905 | false |
+| 100 | clean | 7 | 1 | 0 | 108 | 3073 | 8 | 24905 | false |
+| 100 | unclean | 7 | 1 | 0 | 98 | 6026 | 8 | 24905 | false |
+| 1000 | clean | 7 | 1 | 0 | 106 | 3145 | 8 | 24905 | false |
+| 1000 | unclean | 7 | 1 | 0 | 113 | 6372 | 8 | 24905 | false |
+| 10000 | clean | 7 | 1 | 0 | 188 | 3317 | 8 | 24905 | false |
+| 10000 | unclean | 7 | 1 | 0 | 149 | 6564 | 8 | 24905 | false |
 
 ## Historical proofs under bounded caches
 
-Snapshot 1 reopens after 10,000 publications. Proof bytes equal the memory engine and verify independently. Cold and warm refer to the engine's encoded-object cache.
+Snapshot 1 reopens after 10,000 publications. Proof bytes equal the memory engine and verify independently. Cold and warm refer to the engine's decoded-node cache.
 
-| cache bytes | cold object reads | warm object reads | cold backend bytes | warm backend bytes | proof bytes | retained payload | entries |
+| cache bytes | cold object reads | warm object reads | cold backend bytes | warm backend bytes | proof bytes | retained bytes | entries |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 28 | 28 | 126976 | 0 | 3114 | 0 | 0 |
-| 65536 | 16 | 0 | 126976 | 0 | 3114 | 2532 | 16 |
-| 8388608 | 16 | 0 | 126976 | 0 | 3114 | 2532 | 16 |
+| 0 | 28 | 28 | 131072 | 0 | 3190 | 0 | 0 |
+| 65536 | 16 | 0 | 131072 | 0 | 3190 | 7359 | 16 |
+| 8388608 | 16 | 0 | 131072 | 0 | 3190 | 7359 | 16 |
 
 Logical path visits are the traced `ProofNode` ledger count, including inline nodes visited while building witness paths. They exclude preliminary value lookups and posting iteration, whose aggregate trie visits are not exposed by the proof API. Witness nodes are emitted encodings; hits plus misses count stored-object loader calls, not all logical visits. Charges, path visits, witnesses and posting count are asserted equal across all six runs. Generation and independent verification are timed separately; single-call microsecond results are observations, not latency benchmarks.
 
 | cache bytes | pass | cache hits | cache misses | logical proof-path visits | witness nodes | posting IDs | proof charge | generate μs | verify μs |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | cold | 0 | 28 | 15 | 15 | 1 | 3251 | 140 | 15 |
-| 0 | warm | 0 | 28 | 15 | 15 | 1 | 3251 | 94 | 13 |
-| 65536 | cold | 12 | 16 | 15 | 15 | 1 | 3251 | 100 | 15 |
-| 65536 | warm | 28 | 0 | 15 | 15 | 1 | 3251 | 36 | 13 |
-| 8388608 | cold | 12 | 16 | 15 | 15 | 1 | 3251 | 95 | 14 |
-| 8388608 | warm | 28 | 0 | 15 | 15 | 1 | 3251 | 35 | 13 |
+| 0 | cold | 0 | 28 | 15 | 15 | 1 | 3327 | 384 | 64 |
+| 0 | warm | 0 | 28 | 15 | 15 | 1 | 3327 | 252 | 60 |
+| 65536 | cold | 12 | 16 | 15 | 15 | 1 | 3327 | 288 | 68 |
+| 65536 | warm | 28 | 0 | 15 | 15 | 1 | 3327 | 29 | 68 |
+| 8388608 | cold | 12 | 16 | 15 | 15 | 1 | 3327 | 289 | 69 |
+| 8388608 | warm | 28 | 0 | 15 | 15 | 1 | 3327 | 31 | 61 |
 
 ## Historical handle ownership and memory
 
@@ -73,21 +73,21 @@ Logical path visits are the traced `ProofNode` ledger count, including inline no
 
 | phase | process RSS KiB |
 | --- | ---: |
-| before handles | 10568 |
-| after creation, before reads | 10568 |
-| after reading through all handles | 12440 |
-| after dropping handles | 12440 |
+| before handles | 10500 |
+| after creation, before reads | 10500 |
+| after reading through all handles | 12508 |
+| after dropping handles | 12508 |
 
-Creation changes process RSS by 0.0 bytes per handle on average. This includes allocator/backend effects and reuse, so it is not an isolated per-handle heap cost. Linux-reported process `VmHWM` changes 12140 → 12440 KiB; it is process-wide and is **not** peak live decode memory. Cache after reads: 65507 bytes/569 entries; engine resident manifests: 1. Handles retain roots/header/context state; allocator RSS need not fall on drop.
+Creation changes process RSS by 0.0 bytes per handle on average. This includes allocator/backend effects and reuse, so it is not an isolated per-handle heap cost. Linux-reported process `VmHWM` changes 13124 → 13124 KiB; it is process-wide and is **not** peak live decode memory. Cache after reads: 65370 bytes/115 entries; engine resident manifests: 1. Handles retain roots/header/context state; allocator RSS need not fall on drop.
 
 ## Namespace isolation
 
-Namespace 1 remains at 128 rows; namespace 2 grows from 1,000 to 10,000 rows. Each probe runs after closing/reopening redb and with the object cache disabled.
+Namespace 1 remains at 128 rows; namespace 2 grows from 1,000 to 10,000 rows. Each probe runs after closing/reopening redb and with the node cache disabled.
 
 | snapshot | target object reads | foreign object reads | catalog reads | backend bytes | proof charge | proof bytes |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 11 | 108 | 0 | 6 | 73728 | 18156 | 17226 |
-| 103 | 108 | 0 | 6 | 77824 | 18156 | 17226 |
+| 11 | 108 | 0 | 6 | 69632 | 18232 | 17302 |
+| 103 | 108 | 0 | 6 | 73728 | 18232 | 17302 |
 
 ## Incremental fixed-size updates as live state grows
 
@@ -96,14 +96,14 @@ A single field update in namespace 2; namespace 1 is untouched. Empty successors
 | growing rows | staged objects | batch payload bytes | preflight visits | staging visits | staging object reads | foreign objects written | namespace object bytes written | backend bytes written |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 1000 | 8 | 2517 | 8 | 8 | 0 | 0 | 1370 | 90752 |
-| 10000 | 9 | 3049 | 9 | 9 | 0 | 0 | 1870 | 119424 |
+| 10000 | 9 | 3049 | 9 | 9 | 0 | 0 | 1870 | 123520 |
 
 The two records are the manifest and manifest-digest index. Their bytes include keys and values, measured by reading those exact bounded records after commit. All staged object IDs are asserted newly written, so encoded object bytes + 32-byte IDs + record bytes must equal the prepared batch payload. Amplification is backend write bytes / this logical payload, following `CommitBatch::logical_bytes`; the separate 40-byte head value is excluded from that denominator. The immutable metadata is not rewritten in a successor.
 
 | growing rows | all encoded object bytes | object ID bytes | record key/value bytes | head bytes | logical payload bytes | backend write calls | backend write bytes | syncs | amplification × |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 1000 | 1716 | 256 | 545 | 40 | 2517 | 24 | 90752 | 2 | 36.06 |
-| 10000 | 2216 | 288 | 545 | 40 | 3049 | 31 | 119424 | 2 | 39.17 |
+| 10000 | 2216 | 288 | 545 | 40 | 3049 | 32 | 123520 | 2 | 40.51 |
 
 ## Interpretation and unavailable attribution
 
@@ -141,14 +141,14 @@ These are a finite fault model and process-kill tests on the stated platform, no
 
 The history workload has 16 typed rows, 64 changing raw keys and one host key, with up to 10,000 retained publications. The live-state workload compares 1,000 and 10,000 rows in one growing namespace against a fixed 128-row target. The large crash candidate is about 1.7 MiB of raw values. These are bounded acceptance workloads, not production-capacity estimates.
 
-The object cache has a separate 16,384-entry ceiling. Preparation uses the default 32 MiB payload, 100,000-object and 1,000,000-visit limits, with a persisted 1 MiB maximum encoded object. The report includes actual cache container capacity and preparation batch/dedup payloads; B-tree allocation overhead remains bounded by the object cap but is not claimed to be exactly measured. The consuming adapter commit temporarily clones one bounded batch, and that extra payload is reported.
+The decoded-node cache has a separate 16,384-entry ceiling; its byte figures are the cached nodes' estimated retained heap bytes. Preparation uses the default 32 MiB payload, 100,000-object and 1,000,000-visit limits, with a persisted 1 MiB maximum encoded object. The report includes actual cache container capacity and preparation batch/dedup payloads; B-tree allocation overhead remains bounded by the object cap but is not claimed to be exactly measured. The store commits the prepared batch by reference, so publication adds no batch copy.
 
 Preflight bounds every reachable new node and traversal work before any
 nested root hashing. A node caches its fixed-size `RlpNode` reference
 (`ArrayVec<u8, 33>`), not its full encoding. Hashing scratch consists of one
 bounded leaf-value encoding and its bounded node encoding, plus traversal
 frames bounded by fixed key widths and map nesting. This transient memory
-is separate from the staged 32 MiB payload and its commit clone. Hashing
+is separate from the staged 32 MiB payload. Hashing
 may still visit all new nodes up to the visit cap before staging rejects
 the aggregate byte cap; the preparation byte limit is not a claim that
 all earlier hashing work was avoided.
@@ -181,7 +181,7 @@ and empty publications. Receipts, spent units and roots agree throughout.
 
 The real adapter and engine are dropped before reopening the file.
 Snapshots 1, 2, 11, 30, 48 and 65 are then compared against the ordinary
-memory engine with 0, 64 KiB and 8 MiB object caches. Each is checked twice
+memory engine with 0, 64 KiB and 8 MiB node caches. Each is checked twice
 to exercise cold and warm access: descriptors, raw scans, typed rows,
 queries/counts, pagination, namespace/state roots and host data agree;
 supported historical proof bytes/receipts agree and verify independently.

@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, RwLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -201,6 +201,11 @@ pub struct RedbStore {
     database_id: DatabaseId,
     slot: RwLock<Slot>,
     failure: Mutex<Option<StorageError>>,
+    /// Whether `failure` holds an error: lets the healthy path of
+    /// [`VersionedStore::health`] and every read skip the mutex. Set after
+    /// the error is stored and cleared before it is removed, both under the
+    /// mutex, so a set flag always finds the latched error.
+    failed: AtomicBool,
     writer: Mutex<()>,
     stats: StatsRecorder,
     timings: [OperationTiming; 5],
@@ -317,6 +322,7 @@ impl RedbStore {
                 epoch: 0,
             }),
             failure: Mutex::new(None),
+            failed: AtomicBool::new(false),
             writer: Mutex::new(()),
             stats: StatsRecorder::new(),
             timings: Default::default(),
@@ -379,14 +385,33 @@ impl RedbStore {
             .epoch
     }
 
+    /// The latched failure. The flag is read first, so the healthy path
+    /// takes no lock; the mutex is consulted only once a failure latched.
     fn failure(&self) -> Option<StorageError> {
+        if !self.failed.load(Ordering::Acquire) {
+            return None;
+        }
         lock(&self.failure).clone()
+    }
+
+    /// Latches `error` unless a failure is already latched.
+    fn latch(&self, error: &StorageError) {
+        let mut failure = lock(&self.failure);
+        failure.get_or_insert_with(|| error.clone());
+        self.failed.store(true, Ordering::Release);
+    }
+
+    /// Replaces the latched failure (recovery's outcome).
+    fn set_failure(&self, error: Option<StorageError>) {
+        let mut failure = lock(&self.failure);
+        self.failed.store(error.is_some(), Ordering::Release);
+        *failure = error;
     }
 
     /// Latches `error` if it is an I/O failure and nothing latched yet.
     fn observe(&self, error: &StorageError) {
         if latches(error) {
-            lock(&self.failure).get_or_insert_with(|| error.clone());
+            self.latch(error);
         }
     }
 
@@ -502,7 +527,7 @@ impl RedbStore {
                 // redb refuses further writes on this handle whatever the
                 // cause, so the store fails until it is reopened.
                 let error = Fault::from(error).0;
-                lock(&self.failure).get_or_insert_with(|| error.clone());
+                self.latch(&error);
                 (CommitOutcome::Indeterminate(error), Vec::new(), 0)
             }
         }
@@ -1001,9 +1026,9 @@ impl VersionedStore for RedbStore {
         Ok(found)
     }
 
-    fn commit(&self, batch: CommitBatch) -> CommitOutcome {
+    fn commit(&self, batch: &CommitBatch) -> CommitOutcome {
         let mut timing = self.timings[3].start();
-        let (outcome, objects, records) = self.commit_batch(&batch);
+        let (outcome, objects, records) = self.commit_batch(batch);
         self.stats.commit(&outcome, &objects, records);
         if matches!(outcome, CommitOutcome::Committed) {
             timing.success();
@@ -1052,10 +1077,10 @@ impl VersionedStore for RedbStore {
                 slot.db = Some(db);
                 slot.epoch += 1;
                 *lock(&self.last_open) = report;
-                *lock(&self.failure) = None;
+                self.set_failure(None);
             }
             Err(error) => {
-                *lock(&self.failure) = Some(error.clone());
+                self.set_failure(Some(error.clone()));
                 return Err(error);
             }
         }
@@ -1106,12 +1131,9 @@ mod metrics_tests {
         let id = keccak256(&bytes).0;
         let mut batch = CommitBatch::new(None, head);
         batch.put_object(SpaceId::Host, id, bytes.clone());
+        assert!(matches!(store.commit(&batch), CommitOutcome::Committed));
         assert!(matches!(
-            store.commit(batch.clone()),
-            CommitOutcome::Committed
-        ));
-        assert!(matches!(
-            store.commit(batch),
+            store.commit(&batch),
             CommitOutcome::NotCommitted(_)
         ));
         assert!(store.read_object_bounded(SpaceId::Host, &id, 1).is_err());

@@ -329,7 +329,7 @@ pub fn run_seeded_history(
             compare(&memory.snapshot(id).unwrap(), &snapshot);
             compare(&memory.snapshot(id).unwrap(), &snapshot);
             assert!(snapshot.staged_objects().is_empty());
-            assert!(engine.stats().cache.payload_capacity <= cap);
+            assert!(engine.stats().cache.retained_bytes <= cap);
             assert!(engine.stats().cache.entries <= Options::default().cache_entries);
         }
     }

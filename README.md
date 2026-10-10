@@ -161,7 +161,7 @@ are now implemented in memory as the **block engine** (`Engine`):
 - **Durable engine storage (N3c).** `durable::DurableEngine` persists the
   actual engine through the versioned store/redb adapter: atomic genesis,
   manifests and head, incremental trie objects, lazy historical snapshots,
-  bounded encoded-object caching and preparation, and conservative recovery
+  bounded decoded-node caching and preparation, and conservative recovery
   of uncertain commits. Committed handles retain stored roots and no history
   vector. Existing Eq proof bytes and receipts survive reopen unchanged.
   See [usage and lifecycle](docs/engine-storage-run.md) and the

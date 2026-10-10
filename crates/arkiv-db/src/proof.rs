@@ -809,7 +809,7 @@ impl Serving<'_> {
         self.bytes += bytes;
         Ok(())
     }
-    fn path<K: TrieKey, V: TrieValue>(
+    fn path<K: TrieKey, V: TrieValue + Send + Sync + 'static>(
         &mut self,
         map: &MerkleMap<K, V>,
         key: &K,

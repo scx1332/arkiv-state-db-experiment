@@ -108,7 +108,7 @@ pub fn sweep(space: Space) -> Sweep {
         let disk = CrashDisk::from_image(image.clone());
         let store = crash_store(&disk, config());
         space.limit(&disk, Some(quota));
-        let outcome = store.commit(candidate.clone());
+        let outcome = store.commit(&candidate);
         match &outcome {
             CommitOutcome::Committed => {
                 sweep.committed += 1;
@@ -131,7 +131,7 @@ pub fn sweep(space: Space) -> Sweep {
         assert_absent(&store, &candidate);
         assert_applied(&store, &genesis);
         assert!(
-            full(&store.commit(candidate.clone())),
+            full(&store.commit(&candidate)),
             "{space:?} quota {quota}: retry while full"
         );
         assert_eq!(
@@ -152,7 +152,7 @@ pub fn sweep(space: Space) -> Sweep {
         commit(&store, candidate.clone());
         assert_applied(&store, &candidate);
         assert!(matches!(
-            store.commit(candidate.clone()),
+            store.commit(&candidate),
             CommitOutcome::NotCommitted(error) if error.kind == StorageErrorKind::HeadMismatch
         ));
     }

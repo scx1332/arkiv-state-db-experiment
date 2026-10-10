@@ -344,7 +344,7 @@ impl VersionedStore for Overlay {
         }
         self.inner.read_record_bounded(t, k, n)
     }
-    fn commit(&self, b: CommitBatch) -> CommitOutcome {
+    fn commit(&self, b: &CommitBatch) -> CommitOutcome {
         self.inner.commit(b)
     }
     fn health(&self) -> Health {
@@ -583,7 +583,7 @@ fn prefilled_genesis_has_distinct_encoding_and_one_complete_height_zero_commit()
     assert_eq!(store.stats().records_written, 6);
     assert!(engine.stats().last_preparation.unique_objects > 0);
     assert!(engine.stats().last_preparation.preflight_visits > 0);
-    assert!(engine.stats().last_preparation.commit_clone_payload_bytes > 0);
+    assert!(engine.stats().last_preparation.payload_bytes > 0);
     let before = store.stats();
     let mut reopened =
         DurableEngine::open_simulator(store.clone(), g.clone(), Options::default(), identity())

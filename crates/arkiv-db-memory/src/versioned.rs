@@ -120,7 +120,7 @@ impl VersionedStore for MemoryVersionedStore {
         Ok(found)
     }
 
-    fn commit(&self, batch: CommitBatch) -> CommitOutcome {
+    fn commit(&self, batch: &CommitBatch) -> CommitOutcome {
         let outcome = self.apply(batch);
         match outcome {
             Ok((new_objects, new_records)) => {
@@ -168,7 +168,7 @@ fn copy_bounded(bytes: &[u8], max_bytes: usize) -> Result<Vec<u8>, StorageError>
 impl MemoryVersionedStore {
     /// Checks the whole batch against the current state, then applies it.
     /// Returns the objects and the number of records newly stored.
-    fn apply(&self, batch: CommitBatch) -> Result<(Vec<(SpaceId, usize)>, u64), StorageError> {
+    fn apply(&self, batch: &CommitBatch) -> Result<(Vec<(SpaceId, usize)>, u64), StorageError> {
         batch.validate()?;
         let mut state = self.write();
         if state.head != batch.expected_head {
@@ -190,20 +190,20 @@ impl MemoryVersionedStore {
         }
         // Nothing below can fail: the batch applies completely.
         let mut new_objects = Vec::new();
-        for (space, id, bytes) in batch.objects {
-            let objects = state.objects.entry(space).or_default();
-            if let std::collections::hash_map::Entry::Vacant(slot) = objects.entry(id) {
-                new_objects.push((space, bytes.len()));
-                slot.insert(bytes.into());
+        for (space, id, bytes) in &batch.objects {
+            let objects = state.objects.entry(*space).or_default();
+            if let std::collections::hash_map::Entry::Vacant(slot) = objects.entry(*id) {
+                new_objects.push((*space, bytes.len()));
+                slot.insert(bytes.as_slice().into());
             }
         }
         let mut new_records = 0;
-        for (table, key, value) in batch.records {
+        for (table, key, value) in &batch.records {
             if let std::collections::btree_map::Entry::Vacant(slot) =
-                state.records.entry((table, key))
+                state.records.entry((*table, key.clone()))
             {
                 new_records += 1;
-                slot.insert(value);
+                slot.insert(value.clone());
             }
         }
         state.head = Some(batch.new_head);
@@ -238,14 +238,14 @@ mod tests {
         let store = MemoryVersionedStore::new();
         let mut first = CommitBatch::new(None, head(0));
         first.put_object(SpaceId::Namespace(1), [1; 32], b"one".to_vec());
-        assert_eq!(store.commit(first), CommitOutcome::Committed);
+        assert_eq!(store.commit(&first), CommitOutcome::Committed);
 
         // Same bytes again: idempotent, stored once.
         let mut again = CommitBatch::new(Some(head(0)), head(1));
         again
             .put_object(SpaceId::Namespace(1), [1; 32], b"one".to_vec())
             .put_object(SpaceId::Namespace(2), [1; 32], b"other space".to_vec());
-        assert_eq!(store.commit(again), CommitOutcome::Committed);
+        assert_eq!(store.commit(&again), CommitOutcome::Committed);
         let stats = store.stats();
         assert_eq!(stats.space(SpaceId::Namespace(1)).objects_written, 1);
         assert_eq!(stats.space(SpaceId::Namespace(2)).objects_written, 1);
@@ -264,7 +264,7 @@ mod tests {
             .put_object(SpaceId::Host, [2; 32], b"new".to_vec())
             .put_object(SpaceId::Namespace(1), [1; 32], b"changed".to_vec());
         assert_eq!(
-            kind(store.commit(conflict)),
+            kind(store.commit(&conflict)),
             Some(StorageErrorKind::Conflict)
         );
         assert_eq!(store.read_object(SpaceId::Host, &[2; 32]).unwrap(), None);
@@ -276,11 +276,11 @@ mod tests {
         let store = MemoryVersionedStore::new();
         let mut first = CommitBatch::new(None, head(0));
         first.put_record(Table::Blocks, height_key(0), b"b0".to_vec());
-        assert_eq!(store.commit(first), CommitOutcome::Committed);
+        assert_eq!(store.commit(&first), CommitOutcome::Committed);
 
         let mut same = CommitBatch::new(Some(head(0)), head(1));
         same.put_record(Table::Blocks, height_key(0), b"b0".to_vec());
-        assert_eq!(store.commit(same), CommitOutcome::Committed);
+        assert_eq!(store.commit(&same), CommitOutcome::Committed);
         assert_eq!(store.stats().records_written, 1);
 
         let mut different = CommitBatch::new(Some(head(1)), head(2));
@@ -288,7 +288,7 @@ mod tests {
             .put_record(Table::Blocks, height_key(2), b"b2".to_vec())
             .put_record(Table::Blocks, height_key(0), b"rewritten".to_vec());
         assert_eq!(
-            kind(store.commit(different)),
+            kind(store.commit(&different)),
             Some(StorageErrorKind::Conflict)
         );
         assert_eq!(
@@ -305,23 +305,23 @@ mod tests {
     fn head_is_compare_and_set() {
         let store = MemoryVersionedStore::new();
         assert_eq!(
-            kind(store.commit(CommitBatch::new(Some(head(0)), head(1)))),
+            kind(store.commit(&CommitBatch::new(Some(head(0)), head(1)))),
             Some(StorageErrorKind::HeadMismatch)
         );
         assert_eq!(
-            store.commit(CommitBatch::new(None, head(0))),
+            store.commit(&CommitBatch::new(None, head(0))),
             CommitOutcome::Committed
         );
         assert_eq!(
-            kind(store.commit(CommitBatch::new(None, head(1)))),
+            kind(store.commit(&CommitBatch::new(None, head(1)))),
             Some(StorageErrorKind::HeadMismatch)
         );
         assert_eq!(
-            store.commit(CommitBatch::new(Some(head(0)), head(1))),
+            store.commit(&CommitBatch::new(Some(head(0)), head(1))),
             CommitOutcome::Committed
         );
         assert_eq!(
-            kind(store.commit(CommitBatch::new(Some(head(0)), head(2)))),
+            kind(store.commit(&CommitBatch::new(Some(head(0)), head(2)))),
             Some(StorageErrorKind::HeadMismatch)
         );
         assert_eq!(store.head().unwrap(), Some(head(1)));
@@ -336,9 +336,9 @@ mod tests {
         batch
             .put_object(SpaceId::Catalog, [5; 32], b"catalog".to_vec())
             .put_record(Table::Inclusions, b"request".to_vec(), b"0".to_vec());
-        assert_eq!(store.commit(batch.clone()), CommitOutcome::Committed);
+        assert_eq!(store.commit(&batch), CommitOutcome::Committed);
         assert_eq!(
-            kind(store.commit(batch)),
+            kind(store.commit(&batch)),
             Some(StorageErrorKind::HeadMismatch)
         );
         let stats = store.stats();

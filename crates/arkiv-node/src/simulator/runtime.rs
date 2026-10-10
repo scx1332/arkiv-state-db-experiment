@@ -126,7 +126,7 @@ pub fn status(node: &Node) -> Json {
                 h.revision,
                 &h.workload,
                 h.observed,
-                json!({"engineCacheBytes":stats.cache.payload_capacity.to_string(),"engineCacheEntries":stats.cache.entries,"residentManifests":stats.resident_manifests}),
+                json!({"engineCacheBytes":stats.cache.retained_bytes.to_string(),"engineCacheEntries":stats.cache.entries,"engineCacheHits":stats.cache.hits.to_string(),"engineCacheMisses":stats.cache.misses.to_string(),"residentManifests":stats.resident_manifests}),
             )
         }
         Node::Light(h) => (
@@ -138,7 +138,7 @@ pub fn status(node: &Node) -> Json {
             0,
             &h.run.workload,
             h.observed,
-            json!({"engineCacheBytes":"0","engineCacheEntries":0,"residentManifests":0}),
+            json!({"engineCacheBytes":"0","engineCacheEntries":0,"engineCacheHits":"0","engineCacheMisses":"0","residentManifests":0}),
         ),
     };
     json!({"apiVersion":1,"feedVersion":1,"sourceId":id.source_id,"runId":id.run_id,"genesisHash":id.genesis_hash,"chainId":id.chain_id,"sourceKind":"arkiv-native-simulator","authentication":"unsigned-simulator-v1","durability":"durable","head":head_json(head),"paused":paused,"health":health,"role":role,"configRevision":revision.to_string(),"projectionVersion":arkiv_db::LAYOUT_VERSION,"blockFormatVersion":crate::block::FORMAT_VERSION,"protocolVersion":crate::block::PROTOCOL_VERSION,"coverage":{"from":"0","through":head.height.to_string(),"complete":true},"proofProfiles":[super::profile::PROOF_PROFILE],"capabilities":super::profile::capabilities(&crate::demo::workload::genesis(0, 0).limits),"limits":{"feedPageBytes":FEED_CAP.to_string(),"pageItems":HEADER_BATCH},"workload":workload,"memory":memory,"observedPeerHeight":observed.to_string()})

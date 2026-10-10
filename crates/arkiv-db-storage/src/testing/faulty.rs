@@ -356,7 +356,7 @@ impl<S: VersionedStore> VersionedStore for FaultyStore<S> {
         self.inner.read_record_bounded(table, key, max_bytes)
     }
 
-    fn commit(&self, batch: CommitBatch) -> CommitOutcome {
+    fn commit(&self, batch: &CommitBatch) -> CommitOutcome {
         let fault = {
             let mut state = self.lock();
             if let Some(error) = state.latched() {

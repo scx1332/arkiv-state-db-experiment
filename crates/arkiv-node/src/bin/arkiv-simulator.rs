@@ -127,7 +127,7 @@ async fn run() -> Result<()> {
             }
             Node::Full(host) => {
                 let stats = host.engine.stats();
-                serde_json::json!({"role":"full","sourceId":host.identity.source_id,"runId":host.identity.run_id,"genesisHash":host.identity.genesis_hash,"height":host.head.height.to_string(),"residentManifests":stats.resident_manifests,"cachePayloadBytes":stats.cache.payload_capacity,"cacheEntries":stats.cache.entries})
+                serde_json::json!({"role":"full","sourceId":host.identity.source_id,"runId":host.identity.run_id,"genesisHash":host.identity.genesis_hash,"height":host.head.height.to_string(),"residentManifests":stats.resident_manifests,"cacheRetainedBytes":stats.cache.retained_bytes,"cacheEntries":stats.cache.entries})
             }
         };
         let reads = store.stats().since(&before);

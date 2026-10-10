@@ -3,11 +3,16 @@
 
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
 use arkiv_db::{
-    B256, Budget, CellName, Engine, EngineError, NamespaceId, NamespaceName, OwnerId,
+    B256, Budget, CellName, Engine, EngineError, MapKind, NamespaceId, NamespaceName, OwnerId,
     PriceSchedule, Projection, Query, RecordKey, SealedCandidate, Snapshot, SnapshotId,
     StateHeader, StorageError, StorageErrorKind, Term, Value, WriteOp, decode_exact,
     durable::{
@@ -139,7 +144,7 @@ fn failed_health_cannot_be_bypassed_by_a_warm_cache_and_recovery_clears_it() {
     assert!(engine.begin(engine.head(), None).is_err());
     assert_eq!(engine.recover().unwrap(), Recovery::Ready);
     assert_eq!(engine.stats().cache.entries, 0);
-    assert_eq!(engine.stats().cache.payload_capacity, 0);
+    assert_eq!(engine.stats().cache.retained_bytes, 0);
     assert_eq!(engine.stats().cache.generation, 1);
     assert_eq!(value(&pinned), b"old");
     assert!(store.stats().object_reads() > reads);
@@ -436,7 +441,7 @@ impl VersionedStore for Corruptible {
         }
         self.inner.read_record_bounded(table, key, max)
     }
-    fn commit(&self, batch: CommitBatch) -> CommitOutcome {
+    fn commit(&self, batch: &CommitBatch) -> CommitOutcome {
         self.inner.commit(batch)
     }
     fn health(&self) -> Health {
@@ -631,7 +636,7 @@ fn unexpected_head_during_recovery_is_fenced_and_cannot_rebase_pending_work() {
     let parent = store.inner().head().unwrap().unwrap();
     // Deliberately violate exclusive-writer ownership to test the CAS fence.
     assert_eq!(
-        store.inner().commit(CommitBatch::new(
+        store.inner().commit(&CommitBatch::new(
             Some(parent),
             Head {
                 height: parent.height + 7,
@@ -886,7 +891,13 @@ fn encoded_object_ceiling_includes_trie_framing_and_persists_on_reopen() {
 
 #[test]
 fn cache_payload_entries_and_container_metadata_stay_within_configured_bounds() {
-    let entry_bytes = std::mem::size_of::<((DatabaseId, SpaceId, ObjectId), Vec<u8>)>();
+    // Key, erased node, charge and reference bit of one queue slot.
+    let entry_bytes = std::mem::size_of::<(
+        (SpaceId, MapKind, ObjectId),
+        Arc<dyn std::any::Any + Send + Sync>,
+        usize,
+        bool,
+    )>();
     for (bytes, entries) in [(0, 0), (512, 1), (512, 3), (2048, 17)] {
         let store = Arc::new(MemoryVersionedStore::new());
         let options = Options {
@@ -932,8 +943,8 @@ fn cache_payload_entries_and_container_metadata_stay_within_configured_bounds() 
             let stats = engine.stats().cache;
             assert!(stats.entries <= entries);
             assert!(stats.peak_entries <= entries);
-            assert!(stats.payload_capacity <= bytes);
-            assert!(stats.peak_payload_capacity <= bytes);
+            assert!(stats.retained_bytes <= bytes);
+            assert!(stats.peak_retained_bytes <= bytes);
             assert!(stats.container_bytes <= entries * entry_bytes);
         }
     }
@@ -1047,7 +1058,7 @@ fn crafted_engine(
     batch.objects = objects;
     batch.put_record(Table::Manifests, 1_u64.to_be_bytes(), manifest.envelope());
     batch.put_record(Table::BlockIndex, manifest.id().0, 1_u64.to_be_bytes());
-    assert_eq!(store.commit(batch), CommitOutcome::Committed);
+    assert_eq!(store.commit(&batch), CommitOutcome::Committed);
     let before = store.stats().object_reads();
     let engine = DurableEngine::open(store.clone(), genesis(), options).unwrap();
     assert_eq!(store.stats().object_reads(), before);
@@ -1081,7 +1092,7 @@ fn zero_cache_bytes_never_retains_even_hash_valid_empty_objects() {
     let stats = engine.stats().cache;
     assert_eq!(stats.entries, 0);
     assert_eq!(stats.container_bytes, 0);
-    assert_eq!(stats.payload_capacity, 0);
+    assert_eq!(stats.retained_bytes, 0);
 }
 
 fn catalog(handles: [(B256, u64); 4]) -> MerkleMap<u64, Vec<u8>> {
@@ -1220,4 +1231,352 @@ fn sequence_exhaustion_fails_before_hashing_staging_or_commit() {
     assert_eq!(store.stats().object_reads(), before.object_reads());
     assert_eq!(store.stats().committed, before.committed);
     assert_eq!(engine.head(), id(u64::MAX));
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent reads through the durable context
+// ---------------------------------------------------------------------------
+
+type ReadHook = Arc<dyn Fn() + Send + Sync>;
+
+/// A latching faulty store whose object reads first run a test hook, and
+/// which logs when recovery reaches the store.
+struct Hooked {
+    inner: Faults,
+    hook: Mutex<Option<ReadHook>>,
+    events: Mutex<Vec<&'static str>>,
+}
+
+impl Hooked {
+    fn new() -> Self {
+        Self {
+            inner: FaultyStore::latching(MemoryVersionedStore::new()),
+            hook: Mutex::new(None),
+            events: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn set_hook(&self, hook: Option<ReadHook>) {
+        *self.hook.lock().unwrap() = hook;
+    }
+
+    fn log(&self, event: &'static str) {
+        self.events.lock().unwrap().push(event);
+    }
+}
+
+impl ObjectReader for Hooked {
+    fn read_object(&self, space: SpaceId, id: &ObjectId) -> Result<Option<Vec<u8>>, StorageError> {
+        self.read_object_bounded(space, id, usize::MAX)
+    }
+    fn read_object_bounded(
+        &self,
+        space: SpaceId,
+        id: &ObjectId,
+        max: usize,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let hook = self.hook.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.inner.read_object_bounded(space, id, max)
+    }
+}
+
+impl VersionedStore for Hooked {
+    fn database_id(&self) -> DatabaseId {
+        self.inner.database_id()
+    }
+    fn head(&self) -> Result<Option<Head>, StorageError> {
+        self.inner.head()
+    }
+    fn read_record(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.read_record(table, key)
+    }
+    fn read_record_bounded(
+        &self,
+        table: Table,
+        key: &[u8],
+        max: usize,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.read_record_bounded(table, key, max)
+    }
+    fn commit(&self, batch: &CommitBatch) -> CommitOutcome {
+        self.inner.commit(batch)
+    }
+    fn health(&self) -> Health {
+        self.inner.health()
+    }
+    fn recover(&self) -> Result<Option<Head>, StorageError> {
+        self.log("store recover");
+        self.inner.recover()
+    }
+    fn stats(&self) -> StoreStats {
+        self.inner.stats()
+    }
+}
+
+/// An engine over a [`Hooked`] store holding `keys` raw records, with a
+/// cold cache.
+fn hooked(keys: u8) -> (Arc<Hooked>, DurableEngine) {
+    let store = Arc::new(Hooked::new());
+    let mut engine = initialize(store.clone(), genesis(), Options::default());
+    let mut branch = engine.begin(engine.head(), None).unwrap();
+    branch
+        .execute(
+            OWNER,
+            WriteOp::CreateNamespace {
+                name: NamespaceName::new("alpha").unwrap(),
+            },
+            Budget::unlimited(),
+        )
+        .unwrap();
+    for i in 0..keys {
+        branch
+            .execute(
+                OWNER,
+                WriteOp::Put {
+                    namespace: namespace(),
+                    key: vec![i],
+                    value: vec![i; 48],
+                },
+                Budget::unlimited(),
+            )
+            .unwrap();
+    }
+    commit(&mut engine, branch.seal());
+    assert_eq!(engine.recover().unwrap(), Recovery::Ready);
+    assert_eq!(engine.stats().cache.entries, 0);
+    (store, engine)
+}
+
+fn get(snapshot: &Snapshot, key: u8) -> Result<Vec<u8>, StorageErrorKind> {
+    snapshot
+        .try_get(namespace(), &[key], Budget::unlimited())
+        .map(|record| record.unwrap().value.unwrap())
+        .map_err(|error| error.kind)
+}
+
+/// Waits until `count` threads arrived, or `timeout` passed; true if all did.
+struct Rendezvous {
+    arrived: Mutex<usize>,
+    all: Condvar,
+    count: usize,
+}
+
+impl Rendezvous {
+    fn new(count: usize) -> Arc<Self> {
+        Arc::new(Self {
+            arrived: Mutex::new(0),
+            all: Condvar::new(),
+            count,
+        })
+    }
+
+    fn arrive(&self, timeout: Duration) -> bool {
+        let mut arrived = self.arrived.lock().unwrap();
+        *arrived += 1;
+        self.all.notify_all();
+        let (arrived, _) = self
+            .all
+            .wait_timeout_while(arrived, timeout, |arrived| *arrived < self.count)
+            .unwrap();
+        *arrived >= self.count
+    }
+}
+
+#[test]
+fn concurrent_readers_are_inside_the_store_read_at_the_same_time() {
+    let (store, engine) = hooked(16);
+    let snapshot = engine.head_snapshot();
+    let rendezvous = Rendezvous::new(2);
+    let met = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(AtomicUsize::new(0));
+    let hook = {
+        let (rendezvous, met, entered) = (rendezvous.clone(), met.clone(), entered.clone());
+        // Only each thread's first read waits: a serialized context would
+        // let the second reader in only after the first gave up.
+        move || {
+            thread_local!(static WAITED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+            if !WAITED.with(|waited| waited.replace(true)) {
+                entered.fetch_add(1, Ordering::SeqCst);
+                if rendezvous.arrive(Duration::from_secs(10)) {
+                    met.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+    };
+    store.set_hook(Some(Arc::new(hook)));
+    thread::scope(|scope| {
+        let readers: Vec<_> = [3_u8, 11]
+            .into_iter()
+            .map(|key| {
+                let snapshot = snapshot.clone();
+                scope.spawn(move || get(&snapshot, key))
+            })
+            .collect();
+        for (reader, key) in readers.into_iter().zip([3_u8, 11]) {
+            assert_eq!(reader.join().unwrap(), Ok(vec![key; 48]));
+        }
+    });
+    store.set_hook(None);
+    assert_eq!(entered.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        met.load(Ordering::SeqCst),
+        2,
+        "both readers were inside a store read at once"
+    );
+    // Racing misses of one node keep one retained copy.
+    let stats = engine.stats().cache;
+    assert!(stats.entries > 0 && stats.hits + stats.misses > 0);
+}
+
+#[test]
+fn recovery_waits_for_an_in_flight_reader() {
+    let (store, mut engine) = hooked(16);
+    store.events.lock().unwrap().clear();
+    let snapshot = engine.head_snapshot();
+    let entered = Rendezvous::new(2);
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let blocked = Arc::new(AtomicBool::new(false));
+    let hook = {
+        let (entered, release, blocked, store_events) = (
+            entered.clone(),
+            release.clone(),
+            blocked.clone(),
+            store.clone(),
+        );
+        move || {
+            // Only the first read blocks.
+            if blocked.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            entered.arrive(Duration::from_secs(10));
+            let (released, wake) = &*release;
+            let guard = released.lock().unwrap();
+            let _guard = wake
+                .wait_timeout_while(guard, Duration::from_secs(10), |released| !*released)
+                .unwrap();
+            store_events.log("blocked read returns");
+        }
+    };
+    store.set_hook(Some(Arc::new(hook)));
+    let recovered = AtomicBool::new(false);
+    thread::scope(|scope| {
+        let reader = scope.spawn(|| get(&snapshot, 5));
+        assert!(
+            entered.arrive(Duration::from_secs(10)),
+            "reader entered the store"
+        );
+        let recovery = scope.spawn(|| {
+            let outcome = engine.recover();
+            recovered.store(true, Ordering::SeqCst);
+            outcome
+        });
+        thread::sleep(Duration::from_millis(200));
+        assert!(
+            !recovered.load(Ordering::SeqCst),
+            "recovery completed while a load was in flight"
+        );
+        let (released, wake) = &*release;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+        assert_eq!(recovery.join().unwrap().unwrap(), Recovery::Ready);
+        assert_eq!(reader.join().unwrap(), Ok(vec![5; 48]));
+    });
+    store.set_hook(None);
+    let events = store.events.lock().unwrap().clone();
+    assert_eq!(events, ["blocked read returns", "store recover"]);
+    let stats = engine.stats().cache;
+    assert_eq!(stats.generation, 2);
+    // The node of the blocked read (the catalog root, read first) was
+    // retained before the recovery and cleared by it, so reading again
+    // misses it. (The reader's later loads may run on either side of the
+    // recovery.)
+    assert_eq!(get(&snapshot, 5), Ok(vec![5; 48]));
+    let catalog = MapKind::Catalog.index();
+    let again = engine.stats().cache;
+    assert_eq!(stats.misses_by_map[catalog], 1);
+    assert_eq!(again.misses_by_map[catalog], 2);
+}
+
+#[test]
+fn a_latch_in_a_burst_of_readers_fails_every_later_read_until_recovery() {
+    let (store, mut engine) = hooked(64);
+    let snapshot = engine.head_snapshot();
+    let generation = engine.stats().cache.generation;
+    let latched = AtomicBool::new(false);
+    let reads = AtomicUsize::new(0);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    thread::scope(|scope| {
+        for reader in 0..8_u8 {
+            let (snapshot, latched, reads) = (snapshot.clone(), &latched, &reads);
+            scope.spawn(move || {
+                let mut key = reader;
+                loop {
+                    let after_latch = latched.load(Ordering::SeqCst);
+                    let result = get(&snapshot, key % 64);
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    if after_latch {
+                        assert_eq!(result, Err(StorageErrorKind::Io), "read after the latch");
+                        return;
+                    }
+                    if let Ok(value) = result {
+                        assert_eq!(value, vec![key % 64; 48]);
+                    }
+                    assert!(Instant::now() < deadline);
+                    key = key.wrapping_add(7);
+                }
+            });
+        }
+        while reads.load(Ordering::SeqCst) < 200 {
+            thread::yield_now();
+        }
+        store
+            .inner
+            .latch(StorageError::new(StorageErrorKind::Io, "latched mid-burst"));
+        latched.store(true, Ordering::SeqCst);
+    });
+    assert!(
+        engine.stats().cache.entries > 0,
+        "the burst warmed the cache"
+    );
+    assert_eq!(get(&snapshot, 1), Err(StorageErrorKind::Io));
+    assert_eq!(engine.recover().unwrap(), Recovery::Ready);
+    let stats = engine.stats().cache;
+    assert_eq!((stats.entries, stats.retained_bytes), (0, 0));
+    assert_eq!(stats.generation, generation + 1);
+    assert_eq!(get(&snapshot, 1), Ok(vec![1; 48]));
+}
+
+#[test]
+fn cold_warm_and_disabled_caches_report_identical_logical_work() {
+    let store = Arc::new(MemoryVersionedStore::new());
+    let mut engine = initialize(store.clone(), genesis(), Options::default());
+    let candidate = put_candidate(&engine, b"value");
+    commit(&mut engine, candidate);
+    let disabled = DurableEngine::open(
+        store.clone(),
+        genesis(),
+        Options {
+            cache_bytes: 0,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    let probe = |snapshot: &Snapshot| {
+        let read = snapshot
+            .try_get(namespace(), b"key", Budget::unlimited().traced())
+            .unwrap()
+            .unwrap();
+        (read.value, read.receipt)
+    };
+    assert_eq!(engine.recover().unwrap(), Recovery::Ready);
+    let cold = probe(&engine.head_snapshot());
+    let warm = probe(&engine.head_snapshot());
+    assert!(engine.stats().cache.hits > 0);
+    let uncached = probe(&disabled.head_snapshot());
+    assert_eq!(disabled.stats().cache.entries, 0);
+    assert_eq!(cold, warm);
+    assert_eq!(cold, uncached);
 }

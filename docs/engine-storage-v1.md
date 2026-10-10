@@ -232,41 +232,71 @@ A retry/reopen cannot silently treat uncertainty as an empty new database.
 
 ## Loader and bounded cache
 
-V1 uses a bounded **encoded-object cache**, not a decoded-node cache.
-This deliberately keeps ownership and accounting simple. Key it by
-`(DatabaseId, SpaceId, ObjectId)`; a byte cache has no map type, so no
-`MapKind` key is necessary. A future decoded cache must include map kind
-and account inline nodes, values and nested allocations separately.
+V1 uses a bounded **decoded-node cache**. Key it by
+`(SpaceId, MapKind, ObjectId)`: the maps of a namespace share its object
+space and decode to different node types, so the map kind is part of the
+key; the database is fixed per engine context. Entries are type-erased
+`Arc<NodeBox<V>>` values downcast on a hit. A hit is an `Arc` clone with no
+re-hash and no re-decode; the bytes were verified (`keccak256(bytes) == id`)
+and decoded once, on the miss that inserted them.
 
-Store only content-hash-verified immutable byte buffers; the `Nodes` loader still
-calls `NodeBox::decode_stored` in the correct map context on every load.
-No errors, missing-object answers, uncommitted objects, or partially
-decoded values are cached. Cross-namespace deduplication is forbidden even
-for equal hashes. All query and proof paths use the same loader. Cache
-warmth cannot change logical trie probes, receipts or charged work.
+Insert only after a successful `NodeBox::decode_stored` in the correct map
+context. No errors, missing-object answers, uncommitted (dirty) nodes, or
+bytes that fail hashing or decoding are cached. A decoded node references
+other committed nodes only by id, and values decoded from the store hold
+nested maps only as stored roots, so a cached node never keeps a larger
+graph alive. Cross-namespace deduplication is forbidden even for equal
+hashes. All query and proof paths use the same loader. Cache warmth cannot
+change logical trie probes, receipts or charged work. Entries are
+content-addressed, so every snapshot, branch and historical state shares
+them and commits invalidate nothing. Engines built with `Engine::from_state`
+over a plain `ObjectReader` read and decode on every load, uncached.
 
 Expose runtime cache bytes and entry count limits, including zero to
-disable it; recommended defaults are 8 MiB encoded payload and 16,384
-entries. Evict before retaining an insertion that would exceed either
-bound; bypass caching for an individual larger object. Count owned buffer
-capacity and bounded entry/container overhead separately, including key
-and eviction metadata. Use a simple bounded policy whose metadata cannot
-accumulate obsolete access records. No unbounded negative cache, per-space
-registry or manifest cache. redb's independent page cache is separately
-configured (default 8 MiB), and quick repair remains on for real durable
-use. These options are runtime policy and can change on reopen without
-altering genesis or logical results.
+disable it; defaults are 8 MiB and 16,384 entries. Charge each entry its
+`NodeBox::retained_bytes`: the node's `Arc` allocation, path, a branch's
+child array, inline children and each value's `TrieValue::heap_bytes`
+(an estimate of owned heap, not an allocator census). Evict before
+retaining an insertion that would exceed either bound; never retain a node
+larger than its shard's byte budget. Report queue and index container
+bytes separately from the charged bytes. Eviction is CLOCK (second
+chance): a hit marks its entry, and eviction re-queues a marked entry once
+before evicting an unmarked one, so upper trie levels stay resident while
+scans churn leaves. Its metadata is one bounded queue slot and index slot
+per entry and cannot accumulate obsolete access records. No unbounded
+negative cache, per-space registry or manifest cache. Nodes callers still
+hold after eviction or recovery belong to those callers. redb's
+independent page cache is separately configured (default 8 MiB), and quick
+repair remains on for real durable use. These options are runtime policy
+and can change on reopen without altering genesis or logical results.
+
+Concurrency: the engine has a single writer, and reads run concurrently.
+Each load holds a read guard of the context's lifecycle `RwLock` from its
+health check through the store read and the insert; recovery takes the
+write guard. The cache is split into up to 16 shards (a power of two, each
+keeping at least 64 KiB and 32 entries; shard limits add up exactly to the
+configured bounds), selected by the first byte of the object id. A shard's
+mutex is held only for a lookup or an insert; store reads and decoding
+never run under it. Counters are atomics and `stats()` takes no lifecycle
+lock. Lock order: lifecycle, then one shard, then the store's own locks.
+Concurrent misses of one node each read it once; the second insert returns
+the node already retained.
 
 Check the context and `VersionedStore::health` before answering a hit and
-after an underlying read before admitting its result. Recovery holds a
-context gate against in-flight loads, marks the context unavailable,
-increments its own generation, and clears the cache before reopening.
-Clear/invalidate again on failed recovery; do not insert a result from an
-older generation. Candidate generation checks reject work begun before
-recovery. Already pinned immutable snapshots may read again through the
-new healthy context after successful recovery, but poisoned branches stay
-poisoned. Root/header-only accessors need not touch storage. Never serve
-cached data as a way around a latched failed store.
+after an underlying read before admitting its result. `RedbStore` keeps an
+atomic flag beside its latched failure, so the healthy check takes no lock
+while a latched failure is still seen by every later hit. Recovery waits
+for in-flight loads (write guard), marks the context unavailable,
+increments its generation, and clears every shard before reopening. A
+failed recovery leaves the context fenced; no result from an older
+generation can be inserted because no load spans a recovery. A panic in
+recovery's validation poisons the lifecycle lock, which then reports
+`Closed`; a panic in a reader does not fence the context. Candidate
+generation checks reject work begun before recovery. Already pinned
+immutable snapshots may read again through the new healthy context after
+successful recovery, but poisoned branches stay poisoned. Root/header-only
+accessors need not touch storage. Never serve cached data as a way around
+a latched failed store.
 
 Read transient allocations are not cache entries. Add a bounded-object
 read seam: the real redb path checks the value guard's length against the
@@ -413,13 +443,13 @@ Publish a ledger with these separate categories and peaks:
 | --- | --- |
 | Current head/genesis/config | Constant number of small headers/records and stored roots |
 | Historical manifests | Zero resident history catalog; transient one manifest per lookup |
-| Encoded-object cache | Configured payload and entry bounds, plus measured fixed-per-entry/container overhead |
-| Prepared/pending commit | One payload/object/work-bounded batch and explicit dedup/serialization/clone peaks |
+| Decoded-node cache | Configured charged-bytes and entry bounds over estimated retained node bytes, plus measured queue/index container overhead |
+| Prepared/pending commit | One payload/object/work-bounded batch and explicit dedup/serialization peaks; the store commits it by reference |
 | Caller-held snapshots | Small root/header/context handles, O(number of live handles), no retained loaded tree from read-only access |
 | Branches/checkpoints/candidate clones | Caller-owned dirty paths, receipts and rollback history; counted/documented separately and released on drop |
 | Active reads/proofs | Decode/traversal/output work, bounded by object and existing request/proof limits where those limits apply |
 | redb | Separate page cache, allocator/table metadata, transaction dirty pages and backend recovery work |
-| OS/runtime | Allocator retention, filesystem page cache and thread/process overhead; observed RSS, not attributed to the object cache |
+| OS/runtime | Allocator retention, filesystem page cache and thread/process overhead; observed RSS, not attributed to the node cache |
 
 Do not invent total-process boundedness from `block_budget`: zero-priced
 operations, unbounded caller branch count, receipts, checkpoints and raw
@@ -467,7 +497,7 @@ Implement in reviewable slices; code and meaningful tests travel together.
    constructors, sequential lookup, initialization/open validation. No
    memory `Engine` behavior changes.
 2. **Loader/cache and bounded reads.** Shared context health/generation
-   gate, encoded cache, pre-copy size checks in redb and wrappers, counters.
+   gate, decoded-node cache, pre-copy size checks in redb and wrappers, counters.
    Test zero/tiny cache, eviction, DB/space isolation, missing/corrupt bytes,
    and cached reads after failed-store/recovery transitions.
 3. **Bounded incremental preparation and publication.** Read-free preflight,
@@ -513,7 +543,7 @@ Measured acceptance is deliberately separated from timing assertions:
 | Experiment | Hard functional gate | Measurements to record |
 | --- | --- | --- |
 | Cold open at 100, 1,000 and 10,000 snapshots | Bounded metadata/manifest reads; zero trie object reads and no replay/namespace/index scan | Application open reads/time versus redb open/allocator/repair reads/time, file bytes |
-| Old snapshot open/read/proof with 0, 64 KiB and 8 MiB object caches | Manifest lookup only until first walk; exact historical answers/proofs; cache limits never exceeded | Object/cache hits/misses, logical visits, backend reads, proof bytes/time |
+| Old snapshot open/read/proof with 0, 64 KiB and 8 MiB node caches | Manifest lookup only until first walk; exact historical answers/proofs; cache limits never exceeded | Object/cache hits/misses, logical visits, backend reads, proof bytes/time |
 | Fixed small update as live state/history grow by at least 10x | No untouched-space object writes; no stored-subtree staging reads; empty commit has zero object writes | New-node visits/unique bytes, record bytes, physical writes/syncs/amplification; compare with trie path-size growth rather than demand a false fixed byte count |
 | 10,000 bounded publications with external candidates dropped | Only current stored-root head retained; no resident manifest/history vector; old dirty nodes drop | Live trie nodes/bytes, cache payload/entries, staging peak, redb metadata, process RSS at checkpoints |
 | Retain many historical snapshot handles, then read and drop them | Read-only handles retain roots/header/context only; loaded objects reside solely in bounded cache or active call temporaries | Per-handle overhead, node drop evidence, peak live decode memory |
@@ -548,7 +578,7 @@ from N2 adapter-only evidence and list any commands not run.
 
 Fixed: engine-only profile, separate durable facade, empty explicit genesis,
 stable per-file snapshot sequences, existing state hashes/encodings,
-encoded-byte cache, direct manifest lookup, one prepared/pending commit,
+bounded decoded-node cache, direct manifest lookup, one prepared/pending commit,
 bounded preparation, root-only publication, no protocol block/body
 persistence, fail-closed uncertain durability, no pruning/compaction, and
 honest separation of caller/adapter/application memory.

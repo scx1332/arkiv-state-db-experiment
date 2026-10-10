@@ -25,10 +25,11 @@ use crate::{NodeBox, ObjectId, TrieError, TrieValue, stage::Staged};
 ///
 /// [`load`](Self::load) has a default that reads the bytes and calls
 /// [`NodeBox::decode_stored`]. A host with a bounded decoded-node cache
-/// overrides it to consult the cache (keyed by its database id, space, map
-/// kind and object id) before reading, and to insert the decoded node after
-/// a miss. Cache hits and loads are indistinguishable to the map, so
-/// canonical costs cannot depend on cache warmth.
+/// overrides it to consult the cache (keyed by object space, map kind and
+/// object id) before reading, and to insert the decoded node after a
+/// successful decode, charging [`NodeBox::retained_bytes`]. Cache hits and
+/// loads are indistinguishable to the map, so canonical costs cannot depend
+/// on cache warmth.
 pub trait NodeLoader<V: TrieValue> {
     /// The loader's failure type.
     type Error: From<TrieError>;

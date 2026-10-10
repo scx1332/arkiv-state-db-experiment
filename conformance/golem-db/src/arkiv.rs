@@ -594,7 +594,7 @@ impl ArkivDb {
                 lines.push(format!(
                     "object-cache,{},,,{:.3}",
                     stats.cache.entries,
-                    mib(stats.cache.payload_capacity as u64)
+                    mib(stats.cache.retained_bytes as u64)
                 ));
                 d.engine.snapshot_count().map_err(durable)?
             }

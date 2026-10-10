@@ -119,7 +119,7 @@ impl Light {
                 head.hash().as_slice(),
                 0u64.to_be_bytes(),
             );
-        match store.commit(batch) {
+        match store.commit(&batch) {
             CommitOutcome::Committed => {}
             CommitOutcome::NotCommitted(_) => return Err(Error("StorageUnavailable")),
             CommitOutcome::Indeterminate(_) => return Err(Error("CommitUncertain")),
@@ -220,7 +220,7 @@ impl Light {
             },
         );
         batch.put_record(Table::Meta, CONFLICT_KEY, encode(header));
-        match self.store.commit(batch) {
+        match self.store.commit(&batch) {
             CommitOutcome::Committed => Err(Error("ChainConflict")),
             _ => {
                 self.health = "storage-fenced";
@@ -311,7 +311,7 @@ impl Light {
                         h.height.to_be_bytes(),
                     );
             }
-            match self.store.commit(batch) {
+            match self.store.commit(&batch) {
                 CommitOutcome::Committed => self.head = current,
                 CommitOutcome::NotCommitted(_) => {
                     self.health = "storage-fenced";

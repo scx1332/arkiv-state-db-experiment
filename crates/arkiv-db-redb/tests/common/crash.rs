@@ -215,7 +215,7 @@ pub fn check_image(
             commit(&store, candidate.clone());
             assert_applied(&store, candidate);
             assert!(matches!(
-                store.commit(candidate.clone()),
+                store.commit(candidate),
                 CommitOutcome::NotCommitted(error) if error.kind == StorageErrorKind::HeadMismatch
             ));
         }
@@ -302,7 +302,7 @@ pub fn run_crash_points(
         }
         let (disk, store) = start.open(config, parents);
         disk.crash_after(k);
-        let outcome = store.commit(candidate.clone());
+        let outcome = store.commit(candidate);
         match &outcome {
             CommitOutcome::Committed => tally.committed_outcomes += 1,
             CommitOutcome::Indeterminate(_) => tally.indeterminate_outcomes += 1,

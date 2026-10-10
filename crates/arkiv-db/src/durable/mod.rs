@@ -5,7 +5,7 @@
 //! Callers grant it exclusive writer/recovery authority over the store.
 //! This profile stores no node blocks, receipts or signing state.
 
-mod cache;
+pub(crate) mod cache;
 mod format;
 mod prepare;
 pub mod simulator;
@@ -573,7 +573,7 @@ impl DurableEngine {
             instance,
             genesis.limits,
             &manifest.state,
-            Nodes::stored(context.clone()),
+            Nodes::durable(context.clone()),
         )?;
         Ok(Self {
             context,
@@ -627,7 +627,7 @@ impl DurableEngine {
             self.instance,
             self.genesis.limits,
             &manifest.state,
-            Nodes::stored(self.context.clone()),
+            Nodes::durable(self.context.clone()),
         )
         .map_err(Into::into)
     }
@@ -754,7 +754,7 @@ impl DurableEngine {
             self.instance,
             self.genesis.limits,
             &manifest.state,
-            Nodes::stored(self.context.clone()),
+            Nodes::durable(self.context.clone()),
         )?;
         self.last_preparation = staging.stats;
         Ok(Prepared {
@@ -777,8 +777,7 @@ impl DurableEngine {
         if pending.generation != generation {
             return Err(DurableError::StaleGeneration);
         }
-        self.last_preparation.commit_clone_payload_bytes = pending.batch.logical_bytes() as usize;
-        match self.context.store.commit(pending.batch.clone()) {
+        match self.context.store.commit(&pending.batch) {
             CommitOutcome::Committed => {
                 let p = self.pending.take().expect("prepared checked");
                 self.head = p.snapshot;
@@ -917,15 +916,11 @@ impl fmt::Debug for InitializationPending {
     }
 }
 impl InitializationPending {
-    pub fn commit(mut self) -> Result<Initialization, DurableError> {
+    pub fn commit(self) -> Result<Initialization, DurableError> {
         if !self.retry_allowed {
             return Err(DurableError::WriterUnavailable);
         }
-        if self.engine.genesis.initial_state.is_some() {
-            self.engine.last_preparation.commit_clone_payload_bytes =
-                self.batch.logical_bytes() as usize;
-        }
-        match self.engine.context.store.commit(self.batch.clone()) {
+        match self.engine.context.store.commit(&self.batch) {
             CommitOutcome::Committed => Ok(Initialization::Committed(self.engine)),
             CommitOutcome::NotCommitted(error) => Ok(Initialization::NotCommitted {
                 error,

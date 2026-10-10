@@ -139,8 +139,8 @@ pub struct NamespaceRoots {
 /// The kind of engine map a trie node belongs to.
 ///
 /// The maps of a namespace share its object space, and the decoded node
-/// type depends on the map, so a decoded-node cache keys on the kind (node
-/// step N3c), and staging measurements report it.
+/// type depends on the map, so the durable engine's decoded-node cache keys
+/// on the kind, and staging and cache measurements report it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MapKind {
     /// The namespace catalog (space `Catalog`).
@@ -157,6 +157,25 @@ pub enum MapKind {
     Terms,
     /// A namespace's posting maps, nested in its term leaves.
     Postings,
+}
+
+impl MapKind {
+    /// Every kind, in declaration order: the order of per-kind counter
+    /// arrays such as [`crate::durable::CacheStats::hits_by_map`].
+    pub const ALL: [Self; 7] = [
+        Self::Catalog,
+        Self::Host,
+        Self::Records,
+        Self::Keys,
+        Self::Rows,
+        Self::Terms,
+        Self::Postings,
+    ];
+
+    /// The kind's position in [`Self::ALL`].
+    pub const fn index(self) -> usize {
+        self as usize
+    }
 }
 
 /// One object of a state that exists only in memory: a trie node a commit

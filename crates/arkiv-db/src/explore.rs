@@ -46,7 +46,7 @@ impl Snapshot {
         if path.len() > MAX_TREE_PATH || term_path.len() > MAX_TREE_PATH {
             return Ok(None);
         }
-        fn view<K: TrieKey, V: TrieValue>(
+        fn view<K: TrieKey, V: TrieValue + Send + Sync + 'static>(
             m: &MerkleMap<K, V>,
             path: &[u8],
             loader: &crate::nodes::Loader<'_>,

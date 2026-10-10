@@ -110,6 +110,9 @@ pub struct NodeBox<V> {
     pub(crate) node: Node<V>,
     rlp: OnceLock<RlpNode>,
     from_store: bool,
+    /// [`NodeBox::retained_bytes`] of a decoded node, measured once at
+    /// decode; zero for a node built in memory.
+    retained: usize,
 }
 
 impl<V> fmt::Debug for NodeBox<V> {
@@ -129,6 +132,7 @@ impl<V> NodeBox<V> {
             node,
             rlp: OnceLock::new(),
             from_store: false,
+            retained: 0,
         })
     }
 
@@ -145,6 +149,19 @@ impl<V> NodeBox<V> {
                 .expect("decoded nodes have a reference")
                 .len()
         })
+    }
+
+    /// Approximate heap bytes this decoded node keeps alive while it is
+    /// held in an `Arc`: the `Arc` allocation of the node itself, its path,
+    /// a branch's child array, every inline child (recursively) and the
+    /// [`TrieValue::heap_bytes`] of each leaf value.
+    ///
+    /// A decoded node references other committed nodes only by id, and
+    /// values decoded from the store hold nested maps only as stored roots,
+    /// so this is everything it retains. Measured once at decode; a node
+    /// built in memory reports zero (it is never retained by a host cache).
+    pub const fn retained_bytes(&self) -> usize {
+        self.retained
     }
 
     /// The node's type.
@@ -200,11 +217,33 @@ impl<V: TrieValue> NodeBox<V> {
             RlpNode::word_rlp(id)
         };
         Ok(Arc::new(Self {
+            retained: measure(&node),
             node,
             rlp: OnceLock::from(rlp),
             from_store: true,
         }))
     }
+}
+
+/// The `Arc` allocation of one node: the two reference counts plus the box.
+const fn arc_node_bytes<V>() -> usize {
+    2 * std::mem::size_of::<usize>() + std::mem::size_of::<NodeBox<V>>()
+}
+
+/// [`NodeBox::retained_bytes`] of a freshly decoded node.
+fn measure<V: TrieValue>(node: &Node<V>) -> usize {
+    let child = |link: &Link<V>| match link {
+        Link::Mem(inline) => inline.retained,
+        Link::Empty | Link::Stored(_) => 0,
+    };
+    arc_node_bytes::<V>()
+        + match node {
+            Node::Leaf { path, value } => path.len() + value.heap_bytes(),
+            Node::Extension { path, child: link } => path.len() + child(link),
+            Node::Branch { children } => {
+                std::mem::size_of::<[Link<V>; 16]>() + children.iter().map(child).sum::<usize>()
+            }
+        }
 }
 
 /// A trie node. Paths hold one nibble per byte.
@@ -439,6 +478,7 @@ fn materialize_child<V: TrieValue>(
             let node = materialize(decode_raw(bytes).map_err(malformed)?, id)?;
             let rlp = RlpNode::from_raw(bytes).ok_or(malformed("inline child too long"))?;
             Link::Mem(Arc::new(NodeBox {
+                retained: measure(&node),
                 node,
                 rlp: OnceLock::from(rlp),
                 from_store: true,

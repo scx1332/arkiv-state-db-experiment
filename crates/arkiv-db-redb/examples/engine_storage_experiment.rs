@@ -52,7 +52,7 @@ fn assert_resident(engine: &DurableEngine, cache: usize) {
     let stats = engine.stats();
     assert_eq!(stats.resident_manifests, 1);
     assert_eq!(stats.pending_payload_bytes, 0);
-    assert!(stats.cache.payload_capacity <= cache);
+    assert!(stats.cache.retained_bytes <= cache);
     assert!(stats.cache.entries <= options(cache).cache_entries);
     assert!(engine.head_snapshot().staged_objects().is_empty());
 }
@@ -90,20 +90,18 @@ fn history() {
             peak.payload_bytes = peak.payload_bytes.max(now.payload_bytes);
             peak.batch_container_bytes = peak.batch_container_bytes.max(now.batch_container_bytes);
             peak.dedup_entry_bytes = peak.dedup_entry_bytes.max(now.dedup_entry_bytes);
-            peak.commit_clone_payload_bytes = peak
-                .commit_clone_payload_bytes
-                .max(now.commit_clone_payload_bytes);
         }
         let s = engine.stats();
         checkpoint_rows.push(format!(
-            "| {milestone} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {:.3} |",
-            s.cache.payload_capacity,
+            "| {milestone} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {:.3} |",
+            s.cache.retained_bytes,
             s.cache.container_bytes,
             s.cache.entries,
+            s.cache.hits,
+            s.cache.misses,
             s.resident_manifests,
             s.last_preparation.unique_objects,
             s.last_preparation.payload_bytes,
-            s.last_preparation.commit_clone_payload_bytes,
             rss(),
             high_water_rss(),
             std::fs::metadata(&path).unwrap().len(),
@@ -163,20 +161,17 @@ fn history() {
         "\n## Retained history and resident state\n\nEach commit changes one of 64 raw keys and one host key; 16 typed rows remain fixed. Both caches start cold after each checkpoint reopen. Candidate/branch owners are dropped each commit.\n"
     );
     println!(
-        "| sequence | object cache bytes | cache container bytes | cache entries | resident manifests | last staged objects | last payload bytes | commit clone bytes | RSS KiB | process HWM KiB | file bytes | elapsed s |\n| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+        "| sequence | node cache retained bytes | cache container bytes | cache entries | cache hits | cache misses | resident manifests | last staged objects | last payload bytes | RSS KiB | process HWM KiB | file bytes | elapsed s |\n| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
     );
     for row in checkpoint_rows {
         println!("{row}");
     }
     println!(
-        "\nPeak prepared payload: {} bytes; batch-vector capacity: {} bytes; dedup entry payload: {} bytes; commit clone payload: {} bytes. The dedup entry figure excludes bounded B-tree allocator/node overhead. Preparation retains one batch, never a batch per historical snapshot.",
-        peak.payload_bytes,
-        peak.batch_container_bytes,
-        peak.dedup_entry_bytes,
-        peak.commit_clone_payload_bytes
+        "\nPeak prepared payload: {} bytes; batch-vector capacity: {} bytes; dedup entry payload: {} bytes. The dedup entry figure excludes bounded B-tree allocator/node overhead. Preparation retains one batch, never a batch per historical snapshot, and the store commits it by reference.",
+        peak.payload_bytes, peak.batch_container_bytes, peak.dedup_entry_bytes
     );
     println!(
-        "\nAt all three quiescent checkpoints, retained decoded trie nodes/bytes are **0/0 by ownership invariant**, not an allocator census: the head contains stored roots, the cache owns encoded bytes, no caller branch/candidate survives, and the runner asserts the head stages zero objects after every publication. Direct weak-reference tests separately check dirty graph/value release and that read-decoded nodes do not become owned by stored handles. Active calls may allocate decoded nodes; their peak is not measured by this invariant.\n\nThe following redb layout diagnostics measure disk allocation, including retained history. They run after each checkpoint's counters/RSS and before the cold reopen. They do not attribute resident metadata heap bytes.\n"
+        "\nAt all three quiescent checkpoints, the only retained decoded trie nodes are the decoded-node cache's, bounded by its configured bytes (the retained-bytes column is the sum of their estimated heap ownership) and entries: the head contains stored roots, no caller branch/candidate survives, and the runner asserts the head stages zero objects after every publication. Direct weak-reference tests separately check dirty graph/value release and that evicted or cleared cache nodes are released. Active calls may hold further decoded nodes; their peak is not measured here.\n\nThe following redb layout diagnostics measure disk allocation, including retained history. They run after each checkpoint's counters/RSS and before the cold reopen. They do not attribute resident metadata heap bytes.\n"
     );
     println!(
         "| sequence | tables | directory height | page bytes | allocated pages | allocated disk bytes | historical object entries | object key/value bytes |\n| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
@@ -204,10 +199,10 @@ fn historical_proofs(path: &Path) {
     let mut work_rows = Vec::new();
     let mut prior_work = None;
     println!(
-        "\n## Historical proofs under bounded caches\n\nSnapshot 1 reopens after 10,000 publications. Proof bytes equal the memory engine and verify independently. Cold and warm refer to the engine's encoded-object cache.\n"
+        "\n## Historical proofs under bounded caches\n\nSnapshot 1 reopens after 10,000 publications. Proof bytes equal the memory engine and verify independently. Cold and warm refer to the engine's decoded-node cache.\n"
     );
     println!(
-        "| cache bytes | cold object reads | warm object reads | cold backend bytes | warm backend bytes | proof bytes | retained payload | entries |\n| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+        "| cache bytes | cold object reads | warm object reads | cold backend bytes | warm backend bytes | proof bytes | retained bytes | entries |\n| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
     );
     for cache in [0, 64 << 10, 8 << 20] {
         let (store, engine) = open(path, cache);
@@ -289,7 +284,7 @@ fn historical_proofs(path: &Path) {
             cold.backend.unwrap().read_bytes,
             warm.backend.unwrap().read_bytes,
             expected.len(),
-            s.cache.payload_capacity,
+            s.cache.retained_bytes,
             s.cache.entries
         );
     }
@@ -325,7 +320,7 @@ fn historical_proofs(path: &Path) {
         "\n## Historical handle ownership and memory\n\n1,000 distinct held historical handles perform zero trie-object reads during creation. Each `Snapshot` occupies {inline_bytes} inline bytes; the handle vector capacity occupies {vector_capacity_bytes} bytes. Each additionally owns a private fixed-size root/header/context allocation; its heap layout and allocator overhead are not exposed by the public API.\n\n| phase | process RSS KiB |\n| --- | ---: |\n| before handles | {rss_before} |\n| after creation, before reads | {rss_created} |\n| after reading through all handles | {rss_live} |\n| after dropping handles | {} |\n\nCreation changes process RSS by {:.1} bytes per handle on average. This includes allocator/backend effects and reuse, so it is not an isolated per-handle heap cost. Linux-reported process `VmHWM` changes {hwm_before} → {hwm_live} KiB; it is process-wide and is **not** peak live decode memory. Cache after reads: {} bytes/{} entries; engine resident manifests: {}. Handles retain roots/header/context state; allocator RSS need not fall on drop.",
         rss(),
         (rss_created as f64 - rss_before as f64) * 1024.0 / 1000.0,
-        stats.cache.payload_capacity,
+        stats.cache.retained_bytes,
         stats.cache.entries,
         stats.resident_manifests
     );
@@ -378,7 +373,7 @@ fn live_growth() {
     let mut write_rows = Vec::new();
     let mut prior_probe = None;
     println!(
-        "\n## Namespace isolation\n\nNamespace 1 remains at 128 rows; namespace 2 grows from 1,000 to 10,000 rows. Each probe runs after closing/reopening redb and with the object cache disabled.\n"
+        "\n## Namespace isolation\n\nNamespace 1 remains at 128 rows; namespace 2 grows from 1,000 to 10,000 rows. Each probe runs after closing/reopening redb and with the node cache disabled.\n"
     );
     println!(
         "| snapshot | target object reads | foreign object reads | catalog reads | backend bytes | proof charge | proof bytes |\n| ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
@@ -522,7 +517,7 @@ fn main() {
         .find_map(|line| line.strip_prefix("model name\t: "))
         .unwrap_or("unknown");
     println!(
-        "# Engine storage v1 measured report\n\n- Date: {}\n- Command: `cargo run --release --offline -p arkiv-db-redb --example engine_storage_experiment`\n- {}\n- CPU: {cpu}; logical CPUs available: {}\n- Kernel: {}\n- Filesystem: {}; path: {}\n- redb 4.3.0; quick repair on; redb page cache 8 MiB. Object-cache options are stated per experiment.\n- This measures engine snapshots, not node block/body/signing restart. No pruning or compaction.",
+        "# Engine storage v1 measured report\n\n- Date: {}\n- Command: `cargo run --release --offline -p arkiv-db-redb --example engine_storage_experiment`\n- {}\n- CPU: {cpu}; logical CPUs available: {}\n- Kernel: {}\n- Filesystem: {}; path: {}\n- redb 4.3.0; quick repair on; redb page cache 8 MiB. Node-cache options are stated per experiment.\n- This measures engine snapshots, not node block/body/signing restart. No pruning or compaction.",
         command("date", &["-u", "+%Y-%m-%d %H:%M UTC"]),
         command("rustc", &["--version"]),
         std::thread::available_parallelism().unwrap().get(),

@@ -174,7 +174,7 @@ pub fn block(
 
 /// Asserts `Committed`.
 pub fn commit(store: &dyn VersionedStore, batch: CommitBatch) {
-    let outcome = store.commit(batch);
+    let outcome = store.commit(&batch);
     assert_eq!(outcome, CommitOutcome::Committed);
 }
 

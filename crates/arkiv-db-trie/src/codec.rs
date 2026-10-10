@@ -135,6 +135,16 @@ pub trait TrieValue: Clone {
     fn stage_nested(&self, sink: &mut dyn ObjectSink) {
         let _ = sink;
     }
+
+    /// Approximate heap bytes owned by this value beyond its inline size,
+    /// for hosts that bound a cache of decoded nodes by memory.
+    ///
+    /// The default is zero, right for plain fixed-size values. A value
+    /// decoded from the store that holds nested maps holds them only as
+    /// stored roots, so their nodes are not counted here.
+    fn heap_bytes(&self) -> usize {
+        0
+    }
 }
 
 impl TrieValue for Vec<u8> {
@@ -150,5 +160,9 @@ impl TrieValue for Vec<u8> {
             return Err(CodecError::new("empty leaf value"));
         }
         Ok(bytes.to_vec())
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.capacity()
     }
 }

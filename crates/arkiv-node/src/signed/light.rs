@@ -54,7 +54,7 @@ impl Light {
                 head.hash().as_slice(),
                 0u64.to_be_bytes(),
             );
-        match store.commit(batch) {
+        match store.commit(&batch) {
             CommitOutcome::Committed => {}
             CommitOutcome::NotCommitted(_) => return Err(Error("StorageUnavailable")),
             CommitOutcome::Indeterminate(_) => return Err(Error("CommitUncertain")),
@@ -354,7 +354,7 @@ impl Light {
         if let Some(conflict) = conflict {
             batch.put_record(Table::Meta, CONFLICT_KEY, conflict);
         }
-        match self.store.commit(batch) {
+        match self.store.commit(&batch) {
             CommitOutcome::Committed => {
                 self.sequence = next;
                 self.head = head;

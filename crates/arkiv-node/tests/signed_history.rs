@@ -126,7 +126,7 @@ fn history_open_checks_head_body_but_reads_older_bodies_lazily() {
                     .unwrap(),
             );
         }
-        assert_eq!(restored.commit(batch), CommitOutcome::Committed);
+        assert_eq!(restored.commit(&batch), CommitOutcome::Committed);
         if retain_head {
             let opened = History::open(restored.clone(), genesis).unwrap();
             assert_eq!(restored.stats().object_reads(), 1);
@@ -250,7 +250,7 @@ fn history_rejects_wrong_profile_run_missing_object_length_hash_and_frame() {
             },
         );
         batch.put_object(SpaceId::Host, id.0, frame);
-        assert_eq!(store.commit(batch), CommitOutcome::Committed);
+        assert_eq!(store.commit(&batch), CommitOutcome::Committed);
         assert_eq!(
             message(history.read(&BodyRef { id, len: 0 })),
             "StorageCorrupt"

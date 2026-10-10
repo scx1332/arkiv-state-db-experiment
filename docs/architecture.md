@@ -349,7 +349,7 @@ reading nothing at open and every node lazily on use, and the hidden
 (`Snapshot::hashed_nodes` counts them per map before deduplication, for
 the rehash measurements); together they let tests commit a state, reopen it
 and inject storage failures. Node step N3c adds the store context,
-bounded encoded-object cache, manifests and durable head through a separate
+bounded decoded-node cache, manifests and durable head through a separate
 facade that retains no historical state vector. Stored roots share one
 gated loader; recovery invalidates writer generations and cache entries,
 while immutable snapshot/cursor identity survives in-place recovery.

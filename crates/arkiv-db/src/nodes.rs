@@ -6,12 +6,12 @@
 //! a loader. [`Nodes`] is what an engine, its snapshots and its branches
 //! hold to make those loaders: nothing for a state built entirely in memory
 //! (the trie crate's [`MemoryOnly`] loader, which a memory map never
-//! consults), or an [`ObjectReader`] for a state opened from committed
-//! roots. A [`Loader`] is one map's view of it: the object space the map's
-//! nodes live in and the kind of map, which a future decoded-node cache
-//! keys on. [`crate::durable::DurableEngine`] supplies the gated store
-//! context and bounded encoded-object cache behind the same seam; its
-//! cache keys include database and space but need no decoded map kind.
+//! consults), an [`ObjectReader`] for a state opened from committed roots
+//! (read and decoded on every load, uncached), or the durable engine's
+//! gated store context with its bounded decoded-node cache. A [`Loader`] is
+//! one map's view of it: the object space the map's nodes live in and the
+//! kind of map, which together with the object id key the cache, since the
+//! maps of a namespace share its space and decode to different node types.
 //!
 //! [`Fault`] is how internal operations stop: a deterministic
 //! [`Rejection`], which is metered and recorded in a receipt, or a
@@ -24,22 +24,42 @@ use std::{fmt, sync::Arc};
 use arkiv_db_storage::versioned::{ObjectReader, SpaceId, StorageError, StorageErrorKind};
 use arkiv_db_trie::{MemoryOnly, NodeBox, NodeLoader, ObjectId, TrieError, TrieValue};
 
-use crate::{meter::Rejection, namespace::NamespaceId, state::MapKind};
+use crate::{
+    durable::cache::{Context, LoadFailure},
+    meter::Rejection,
+    namespace::NamespaceId,
+    state::MapKind,
+};
 
 /// Where the maps of one engine read committed nodes from.
 ///
-/// Cloning is O(1). A memory engine holds no reader: its maps are built by
+/// Cloning is O(1). A memory engine has no source: its maps are built by
 /// updates and never contain a stored link.
 #[derive(Clone, Default)]
 pub(crate) struct Nodes {
-    reader: Option<Arc<dyn ObjectReader>>,
+    source: Source,
+}
+
+#[derive(Clone, Default)]
+enum Source {
+    #[default]
+    Memory,
+    /// Every load reads and decodes; nothing is retained.
+    Reader(Arc<dyn ObjectReader>),
+    /// The durable engine's gated context and decoded-node cache.
+    Durable(Arc<Context>),
 }
 
 impl fmt::Debug for Nodes {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let source = match self.source {
+            Source::Memory => "Memory",
+            Source::Reader(_) => "ObjectReader",
+            Source::Durable(_) => "Durable",
+        };
         formatter
             .debug_struct("Nodes")
-            .field("reader", &self.reader.as_ref().map(|_| "ObjectReader"))
+            .field("source", &source)
             .finish()
     }
 }
@@ -47,13 +67,23 @@ impl fmt::Debug for Nodes {
 impl Nodes {
     /// Nodes of a state that lives entirely in memory.
     pub(crate) const fn memory() -> Self {
-        Self { reader: None }
+        Self {
+            source: Source::Memory,
+        }
     }
 
-    /// Nodes of a state whose committed nodes `reader` supplies.
+    /// Nodes of a state whose committed nodes `reader` supplies, uncached.
     pub(crate) fn stored(reader: Arc<dyn ObjectReader>) -> Self {
         Self {
-            reader: Some(reader),
+            source: Source::Reader(reader),
+        }
+    }
+
+    /// Nodes of a durable engine state, loaded through its context's
+    /// decoded-node cache.
+    pub(crate) fn durable(context: Arc<Context>) -> Self {
+        Self {
+            source: Source::Durable(context),
         }
     }
 
@@ -111,24 +141,38 @@ impl Loader<'_> {
     }
 }
 
-impl<V: TrieValue> NodeLoader<V> for Loader<'_> {
+impl<V: TrieValue + Send + Sync + 'static> NodeLoader<V> for Loader<'_> {
     type Error = LoadError;
 
     fn read(&self, id: &ObjectId) -> Result<Option<Vec<u8>>, LoadError> {
-        match &self.nodes.reader {
-            None => NodeLoader::<V>::read(&MemoryOnly, id).map_err(LoadError::from),
-            Some(reader) => reader.read_object(self.space, &id.0).map_err(LoadError),
+        match &self.nodes.source {
+            Source::Memory => NodeLoader::<V>::read(&MemoryOnly, id).map_err(LoadError::from),
+            Source::Reader(reader) => reader.read_object(self.space, &id.0).map_err(LoadError),
+            Source::Durable(context) => context.read_object(self.space, &id.0).map_err(LoadError),
         }
     }
 
-    /// Reads, verifies and decodes a node, naming the map and space in any
-    /// failure: an absent node is `Missing`, bytes that do not hash to the
-    /// id or do not decode are `Corrupt`.
+    /// Reads, verifies and decodes a node (or takes it from the durable
+    /// cache), naming the map and space in any failure: an absent node is
+    /// `Missing`, bytes that do not hash to the id or do not decode are
+    /// `Corrupt`.
     fn load(&self, id: &ObjectId) -> Result<Arc<NodeBox<V>>, LoadError> {
-        let bytes = NodeLoader::<V>::read(self, id)?
-            .ok_or_else(|| self.failure(StorageErrorKind::Missing, id, "referenced but absent"))?;
-        NodeBox::decode_stored(id, &bytes)
-            .map_err(|error| self.failure(StorageErrorKind::Corrupt, id, &error.to_string()))
+        let corrupt =
+            |error: TrieError| self.failure(StorageErrorKind::Corrupt, id, &error.to_string());
+        let node =
+            match &self.nodes.source {
+                Source::Durable(context) => context
+                    .load::<V>(self.space, self.map, &id.0)
+                    .map_err(|failure| match failure {
+                        LoadFailure::Storage(error) => LoadError(error),
+                        LoadFailure::Decode(error) => corrupt(error),
+                    })?,
+                Source::Memory | Source::Reader(_) => match NodeLoader::<V>::read(self, id)? {
+                    Some(bytes) => Some(NodeBox::decode_stored(id, &bytes).map_err(corrupt)?),
+                    None => None,
+                },
+            };
+        node.ok_or_else(|| self.failure(StorageErrorKind::Missing, id, "referenced but absent"))
     }
 }
 

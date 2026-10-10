@@ -48,7 +48,7 @@ pub fn lost_final_sync(quick_repair: bool) -> Result<Option<Head>, StorageError>
     let store = crash_store(&disk, config);
     // Two syncs per commit with quick repair, one without: fail the last.
     disk.fail_sync_losing_unsynced(u64::from(quick_repair));
-    let outcome = store.commit(candidate.clone());
+    let outcome = store.commit(&candidate);
     assert!(
         matches!(outcome, CommitOutcome::Indeterminate(ref error) if error.kind == StorageErrorKind::Io),
         "{outcome:?}"

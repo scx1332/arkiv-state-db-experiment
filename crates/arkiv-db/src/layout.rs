@@ -300,6 +300,16 @@ impl TrieValue for Blob {
         decoder.finish().map_err(codec_error)?;
         Ok(Self(Arc::from(value)))
     }
+
+    fn heap_bytes(&self) -> usize {
+        arc_bytes(self.0.len())
+    }
+}
+
+/// Heap bytes of an `Arc<[T]>`/`Arc<str>` holding `payload` bytes: the two
+/// reference counts plus the payload.
+const fn arc_bytes(payload: usize) -> usize {
+    2 * std::mem::size_of::<usize>() + payload
 }
 
 /// A key binding's value: the record id, `u64` (nonzero).
@@ -438,6 +448,21 @@ impl TrieValue for StoredRecord {
             key,
             cells: Arc::from(cells),
         })
+    }
+
+    /// The key, the cell array and every name, string and byte payload.
+    fn heap_bytes(&self) -> usize {
+        let cells = self.cells.iter().map(|(name, cell)| {
+            arc_bytes(name.as_str().len())
+                + match &cell.value {
+                    Value::Str(text) => arc_bytes(text.len()),
+                    Value::Bytes(bytes) => arc_bytes(bytes.len()),
+                    _ => 0,
+                }
+        });
+        arc_bytes(self.key.as_bytes().len())
+            + arc_bytes(std::mem::size_of_val::<[(CellName, Cell)]>(&self.cells))
+            + cells.sum::<usize>()
     }
 }
 

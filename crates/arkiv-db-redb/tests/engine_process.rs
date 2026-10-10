@@ -67,7 +67,7 @@ impl VersionedStore for BoundaryStore {
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.inner.read_record_bounded(t, k, cap)
     }
-    fn commit(&self, b: CommitBatch) -> CommitOutcome {
+    fn commit(&self, b: &CommitBatch) -> CommitOutcome {
         let outcome = self.inner.commit(b);
         if outcome == CommitOutcome::Committed && self.pause_after_commit.load(Ordering::SeqCst) {
             pause();

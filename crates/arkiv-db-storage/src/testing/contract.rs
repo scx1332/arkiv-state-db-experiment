@@ -230,7 +230,7 @@ pub fn first_commit_stores_everything(factory: &dyn StoreFactory) {
         .put_record(Table::Manifests, height_key(0), b"manifest zero".to_vec())
         .put_record(Table::Inclusions, b"no request".to_vec(), Vec::new())
         .put_record(Table::BlockIndex, genesis.hash, height_key(0));
-    committed(store.commit(batch));
+    committed(store.commit(&batch));
 
     assert_eq!(store.head().unwrap(), Some(genesis));
     for (space, id, bytes) in &expected {
@@ -272,33 +272,33 @@ pub fn head_compare_and_set(factory: &dyn StoreFactory) {
     // No head yet: an expected head is a mismatch.
     let wrong = block_batch(factory, Some(head(0, 9)), 1, 3);
     let wrong_ids: Vec<_> = wrong.objects.iter().map(|(_, id, _)| *id).collect();
-    not_committed(store.commit(wrong), StorageErrorKind::HeadMismatch);
+    not_committed(store.commit(&wrong), StorageErrorKind::HeadMismatch);
     assert_eq!(store.head().unwrap(), None);
     for id in &wrong_ids {
         assert_eq!(read(store, SpaceId::Namespace(1), id), None);
     }
     assert_eq!(record(store, Table::Blocks, &height_key(1)), None);
 
-    committed(store.commit(block_batch(factory, None, 0, 2)));
+    committed(store.commit(&block_batch(factory, None, 0, 2)));
     let genesis = head(0, 1);
 
     // A head exists: `None` and a different head are mismatches.
     not_committed(
-        store.commit(block_batch(factory, None, 1, 1)),
+        store.commit(&block_batch(factory, None, 1, 1)),
         StorageErrorKind::HeadMismatch,
     );
     let fork = block_batch(factory, Some(head(0, 2)), 1, 1);
     let fork_id = fork.objects[0].1;
-    not_committed(store.commit(fork), StorageErrorKind::HeadMismatch);
+    not_committed(store.commit(&fork), StorageErrorKind::HeadMismatch);
     assert_eq!(store.head().unwrap(), Some(genesis));
     assert_eq!(read(store, SpaceId::Namespace(1), &fork_id), None);
 
-    committed(store.commit(block_batch(factory, Some(genesis), 1, 1)));
+    committed(store.commit(&block_batch(factory, Some(genesis), 1, 1)));
     assert_eq!(store.head().unwrap(), Some(head(1, 1)));
 
     // The old head is now stale.
     not_committed(
-        store.commit(block_batch(factory, Some(genesis), 2, 1)),
+        store.commit(&block_batch(factory, Some(genesis), 2, 1)),
         StorageErrorKind::HeadMismatch,
     );
     assert_eq!(store.head().unwrap(), Some(head(1, 1)));
@@ -313,14 +313,14 @@ pub fn objects_put_if_absent(factory: &dyn StoreFactory) {
     let (id, bytes) = object(factory, "shared", 1, 300);
     let mut first = CommitBatch::new(None, head(0, 1));
     first.put_object(SpaceId::Namespace(3), id, bytes.clone());
-    committed(store.commit(first));
+    committed(store.commit(&first));
 
     let mut again = CommitBatch::new(Some(head(0, 1)), head(1, 1));
     let (other, other_bytes) = object(factory, "other", 1, 50);
     again
         .put_object(SpaceId::Namespace(3), id, bytes.clone())
         .put_object(SpaceId::Namespace(3), other, other_bytes.clone());
-    committed(store.commit(again));
+    committed(store.commit(&again));
     assert_eq!(read(store, SpaceId::Namespace(3), &id), Some(bytes.clone()));
     assert_eq!(
         read(store, SpaceId::Namespace(3), &other),
@@ -333,7 +333,7 @@ pub fn objects_put_if_absent(factory: &dyn StoreFactory) {
         .put_object(SpaceId::Namespace(3), fresh, fresh_bytes)
         .put_object(SpaceId::Namespace(3), id, b"different bytes".to_vec())
         .put_record(Table::Blocks, height_key(2), b"block".to_vec());
-    not_committed(store.commit(conflict), StorageErrorKind::Conflict);
+    not_committed(store.commit(&conflict), StorageErrorKind::Conflict);
     assert_eq!(store.head().unwrap(), Some(head(1, 1)));
     assert_eq!(read(store, SpaceId::Namespace(3), &id), Some(bytes));
     assert_eq!(read(store, SpaceId::Namespace(3), &fresh), None);
@@ -351,7 +351,7 @@ pub fn object_spaces_are_separate(factory: &dyn StoreFactory) {
     batch
         .put_object(SpaceId::Namespace(1), id, bytes.clone())
         .put_object(SpaceId::Catalog, id, bytes.clone());
-    committed(store.commit(batch));
+    committed(store.commit(&batch));
     assert_eq!(read(store, SpaceId::Namespace(1), &id), Some(bytes.clone()));
     assert_eq!(read(store, SpaceId::Catalog, &id), Some(bytes));
     assert_eq!(read(store, SpaceId::Namespace(2), &id), None);
@@ -367,12 +367,12 @@ pub fn records_are_insert_only(factory: &dyn StoreFactory) {
     first
         .put_record(Table::Inclusions, b"actor/1".to_vec(), b"height 0".to_vec())
         .put_record(Table::Meta, "chain_id", b"7".to_vec());
-    committed(store.commit(first));
+    committed(store.commit(&first));
 
     let mut same = CommitBatch::new(Some(head(0, 1)), head(1, 1));
     same.put_record(Table::Inclusions, b"actor/1".to_vec(), b"height 0".to_vec())
         .put_record(Table::Inclusions, b"actor/2".to_vec(), b"height 1".to_vec());
-    committed(store.commit(same));
+    committed(store.commit(&same));
 
     let (id, bytes) = object(factory, "late", 1, 32);
     let mut different = CommitBatch::new(Some(head(1, 1)), head(2, 1));
@@ -381,7 +381,7 @@ pub fn records_are_insert_only(factory: &dyn StoreFactory) {
         "chain_id",
         b"8".to_vec(),
     );
-    not_committed(store.commit(different), StorageErrorKind::Conflict);
+    not_committed(store.commit(&different), StorageErrorKind::Conflict);
     assert_eq!(store.head().unwrap(), Some(head(1, 1)));
     assert_eq!(record(store, Table::Meta, b"chain_id"), Some(b"7".to_vec()));
     assert_eq!(read(store, SpaceId::Host, &id), None);
@@ -403,7 +403,7 @@ pub fn batch_duplicates(factory: &dyn StoreFactory) {
         .put_object(SpaceId::Host, id, bytes.clone())
         .put_record(Table::Blocks, height_key(0), b"b".to_vec())
         .put_record(Table::Blocks, height_key(0), b"b".to_vec());
-    committed(store.commit(batch));
+    committed(store.commit(&batch));
     assert_eq!(read(store, SpaceId::Host, &id), Some(bytes.clone()));
 
     let mut conflict = CommitBatch::new(Some(head(0, 1)), head(1, 1));
@@ -411,7 +411,7 @@ pub fn batch_duplicates(factory: &dyn StoreFactory) {
     conflict
         .put_object(SpaceId::Host, fresh, fresh_bytes.clone())
         .put_object(SpaceId::Host, fresh, [fresh_bytes, vec![0]].concat());
-    not_committed(store.commit(conflict), StorageErrorKind::Conflict);
+    not_committed(store.commit(&conflict), StorageErrorKind::Conflict);
     assert_eq!(read(store, SpaceId::Host, &fresh), None);
     assert_eq!(store.head().unwrap(), Some(head(0, 1)));
 }
@@ -421,7 +421,7 @@ pub fn batch_duplicates(factory: &dyn StoreFactory) {
 pub fn malformed_batches_are_not_committed(factory: &dyn StoreFactory) {
     let test = factory.create();
     let store = test.store.as_ref();
-    committed(store.commit(CommitBatch::new(None, head(0, 1))));
+    committed(store.commit(&CommitBatch::new(None, head(0, 1))));
     let parent = Some(head(0, 1));
     let malformed: [(Table, &[u8], &[u8]); 6] = [
         (Table::Blocks, &[1; 7], b"x"),
@@ -435,11 +435,11 @@ pub fn malformed_batches_are_not_committed(factory: &dyn StoreFactory) {
         let mut batch = CommitBatch::new(parent, head(1, 1));
         batch.put_record(Table::Blocks, height_key(1), b"block".to_vec());
         batch.put_record(table, key.to_vec(), value.to_vec());
-        not_committed(store.commit(batch), StorageErrorKind::Incompatible);
+        not_committed(store.commit(&batch), StorageErrorKind::Incompatible);
         assert_eq!(record(store, Table::Blocks, &height_key(1)), None);
     }
     not_committed(
-        store.commit(CommitBatch::new(parent, head(0, 2))),
+        store.commit(&CommitBatch::new(parent, head(0, 2))),
         StorageErrorKind::Incompatible,
     );
     assert_eq!(store.head().unwrap(), parent);
@@ -450,9 +450,9 @@ pub fn malformed_batches_are_not_committed(factory: &dyn StoreFactory) {
 pub fn empty_batch_advances_head(factory: &dyn StoreFactory) {
     let test = factory.create();
     let store = test.store.as_ref();
-    committed(store.commit(CommitBatch::new(None, head(5, 1))));
+    committed(store.commit(&CommitBatch::new(None, head(5, 1))));
     assert_eq!(store.head().unwrap(), Some(head(5, 1)));
-    committed(store.commit(CommitBatch::new(Some(head(5, 1)), head(9, 1))));
+    committed(store.commit(&CommitBatch::new(Some(head(5, 1)), head(9, 1))));
     assert_eq!(store.head().unwrap(), Some(head(9, 1)));
 }
 
@@ -462,9 +462,9 @@ pub fn retry_after_commit_is_rejected(factory: &dyn StoreFactory) {
     let test = factory.create();
     let store = test.store.as_ref();
     let batch = block_batch(factory, None, 0, 4);
-    committed(store.commit(batch.clone()));
+    committed(store.commit(&batch));
     let stats = store.stats();
-    not_committed(store.commit(batch), StorageErrorKind::HeadMismatch);
+    not_committed(store.commit(&batch), StorageErrorKind::HeadMismatch);
     let after = store.stats().since(&stats);
     assert_eq!(after.committed, 0);
     assert_eq!(after.not_committed, 1);
@@ -487,7 +487,7 @@ pub fn reconcile_distinguishes_outcomes(factory: &dyn StoreFactory) {
         reconcile(store, &genesis).unwrap(),
         Reconciliation::NotCommitted
     );
-    committed(store.commit(genesis.clone()));
+    committed(store.commit(&genesis));
     assert_eq!(
         reconcile(store, &genesis).unwrap(),
         Reconciliation::Committed
@@ -498,7 +498,7 @@ pub fn reconcile_distinguishes_outcomes(factory: &dyn StoreFactory) {
         reconcile(store, &next).unwrap(),
         Reconciliation::NotCommitted
     );
-    committed(store.commit(next.clone()));
+    committed(store.commit(&next));
 
     // Same new head, different block bytes: divergence, not success.
     let mut forged = next.clone();
@@ -530,7 +530,7 @@ pub fn history_stays_readable(factory: &dyn StoreFactory) {
     for height in 0..20 {
         let batch = block_batch(factory, parent, height, 1 + height % 4);
         all.extend(batch.objects.iter().cloned());
-        committed(store.commit(batch));
+        committed(store.commit(&batch));
         parent = Some(head(height, 1));
     }
     for (space, id, bytes) in &all {
@@ -562,7 +562,7 @@ pub fn reopen_preserves_state(factory: &dyn StoreFactory) {
     for height in 0..5 {
         let batch = block_batch(factory, parent, height, 3);
         all.extend(batch.objects.iter().cloned());
-        committed(store.commit(batch));
+        committed(store.commit(&batch));
         parent = Some(head(height, 1));
     }
     drop(store);
@@ -579,7 +579,7 @@ pub fn reopen_preserves_state(factory: &dyn StoreFactory) {
         record(store.as_ref(), Table::Manifests, &height_key(4)),
         Some(b"manifest 4".to_vec())
     );
-    committed(store.commit(block_batch(factory, parent, 5, 1)));
+    committed(store.commit(&block_batch(factory, parent, 5, 1)));
     drop(store);
     let store = reopen();
     assert_eq!(store.head().unwrap(), Some(head(5, 1)));
@@ -593,7 +593,7 @@ pub fn stats_count_reads_per_space(factory: &dyn StoreFactory) {
     let (id, bytes) = object(factory, "stats", 1, 123);
     let mut batch = CommitBatch::new(None, head(0, 1));
     batch.put_object(SpaceId::Namespace(4), id, bytes);
-    committed(store.commit(batch));
+    committed(store.commit(&batch));
     let before = store.stats();
     assert_eq!(before.space(SpaceId::Namespace(4)).objects_written, 1);
     assert_eq!(before.space(SpaceId::Namespace(4)).bytes_written, 123);
@@ -618,7 +618,7 @@ pub fn stats_count_reads_per_space(factory: &dyn StoreFactory) {
 pub fn concurrent_reads_during_commits(factory: &dyn StoreFactory) {
     let test = factory.create();
     let store: Arc<dyn VersionedStore> = Arc::from(test.store);
-    committed(store.commit(block_batch(factory, None, 0, 4)));
+    committed(store.commit(&block_batch(factory, None, 0, 4)));
     let genesis_objects = block_batch(factory, None, 0, 4).objects;
     let batches: Vec<CommitBatch> = (1..=12)
         .map(|height| block_batch(factory, Some(head(height - 1, 1)), height, 6))
@@ -648,7 +648,7 @@ pub fn concurrent_reads_during_commits(factory: &dyn StoreFactory) {
             });
         }
         for batch in &batches {
-            committed(store.commit(batch.clone()));
+            committed(store.commit(batch));
         }
     });
     assert_eq!(store.head().unwrap(), Some(head(12, 1)));
@@ -690,7 +690,7 @@ pub fn bounded_reads_enforce_lengths(factory: &dyn StoreFactory) {
         batch.put_record(*table, key.clone(), value.clone());
     }
     batch.put_record(Table::Meta, b"bounded/empty".to_vec(), Vec::new());
-    committed(store.commit(batch));
+    committed(store.commit(&batch));
 
     for space in [SpaceId::Catalog, SpaceId::Host, SpaceId::Namespace(2)] {
         assert_eq!(
@@ -764,7 +764,7 @@ pub fn bounded_reads_preserve_counters(factory: &dyn StoreFactory) {
     let mut batch = CommitBatch::new(None, head(0, 1));
     batch.put_object(space, id, bytes.clone());
     batch.put_record(Table::Manifests, height_key(0), bytes.clone());
-    committed(store.commit(batch));
+    committed(store.commit(&batch));
     let before = store.stats();
     assert!(store.read_object_bounded(space, &id, 255).is_err());
     assert!(
@@ -799,7 +799,7 @@ pub fn faulty_bounded_reads_preserve_faults(factory: &dyn StoreFactory) {
     let (store, _resources) = faulty(factory);
     let batch = block_batch(factory, None, 0, 1);
     let (space, id, bytes) = batch.objects[0].clone();
-    committed(store.commit(batch));
+    committed(store.commit(&batch));
     store.fail_reads(ReadScope::Space(space), StorageErrorKind::Io, Some(1));
     let before = store.stats();
     let error = store.read_object_bounded(space, &id, 0).unwrap_err();
@@ -849,14 +849,14 @@ pub fn recover_is_idempotent(factory: &dyn StoreFactory) {
     let test = factory.create();
     let store = test.store.as_ref();
     let batch = block_batch(factory, None, 0, 5);
-    committed(store.commit(batch.clone()));
+    committed(store.commit(&batch));
     assert_eq!(store.recover().unwrap(), Some(head(0, 1)));
     assert_eq!(store.recover().unwrap(), Some(head(0, 1)));
     assert_eq!(store.health(), Health::Available);
     for (space, id, bytes) in &batch.objects {
         assert_eq!(read(store, *space, id).as_ref(), Some(bytes));
     }
-    committed(store.commit(block_batch(factory, Some(head(0, 1)), 1, 1)));
+    committed(store.commit(&block_batch(factory, Some(head(0, 1)), 1, 1)));
     assert!(store.stats().recoveries >= 2);
 }
 
@@ -882,14 +882,14 @@ pub fn faulty_without_faults_is_transparent(factory: &dyn StoreFactory) {
     let mut parent = None;
     for height in 0..4 {
         let batch = block_batch(factory, parent, height, 2);
-        committed(store.commit(batch.clone()));
+        committed(store.commit(&batch));
         for (space, id, bytes) in &batch.objects {
             assert_eq!(read(&store, *space, id).as_ref(), Some(bytes));
         }
         parent = Some(head(height, 1));
     }
     not_committed(
-        store.commit(block_batch(factory, None, 9, 1)),
+        store.commit(&block_batch(factory, None, 9, 1)),
         StorageErrorKind::HeadMismatch,
     );
     assert_eq!(store.head().unwrap(), parent);
@@ -902,7 +902,7 @@ pub fn faulty_without_faults_is_transparent(factory: &dyn StoreFactory) {
 pub fn faulty_latching_fails_every_call_until_recover(factory: &dyn StoreFactory) {
     let (store, _resources) = faulty(factory);
     let batch = block_batch(factory, None, 0, 3);
-    committed(store.commit(batch.clone()));
+    committed(store.commit(&batch));
     let (space, id, bytes) = batch.objects[0].clone();
 
     store.fail_reads(ReadScope::Space(space), StorageErrorKind::Io, Some(1));
@@ -927,7 +927,7 @@ pub fn faulty_latching_fails_every_call_until_recover(factory: &dyn StoreFactory
         StorageErrorKind::Io
     );
     assert_eq!(
-        store.commit(block_batch(factory, Some(head(0, 1)), 1, 1)),
+        store.commit(&block_batch(factory, Some(head(0, 1)), 1, 1)),
         CommitOutcome::NotCommitted(error)
     );
     assert!(store.injected().latched_calls >= 6);
@@ -935,7 +935,7 @@ pub fn faulty_latching_fails_every_call_until_recover(factory: &dyn StoreFactory
     assert_eq!(store.recover().unwrap(), Some(head(0, 1)));
     assert_eq!(store.health(), Health::Available);
     assert_eq!(read(&store, space, &id), Some(bytes));
-    committed(store.commit(block_batch(factory, Some(head(0, 1)), 1, 1)));
+    committed(store.commit(&block_batch(factory, Some(head(0, 1)), 1, 1)));
 }
 
 /// Latching mode latches what a `RedbStore` latches: `Io` and `Full` on any
@@ -945,7 +945,7 @@ pub fn faulty_latching_fails_every_call_until_recover(factory: &dyn StoreFactory
 pub fn faulty_latching_kinds_follow_the_redb_rule(factory: &dyn StoreFactory) {
     let (store, _resources) = faulty(factory);
     let genesis = block_batch(factory, None, 0, 2);
-    committed(store.commit(genesis.clone()));
+    committed(store.commit(&genesis));
     let (space, id, bytes) = genesis.objects[0].clone();
 
     // Damaged bytes are reported on the call that found them only.
@@ -965,7 +965,7 @@ pub fn faulty_latching_kinds_follow_the_redb_rule(factory: &dyn StoreFactory) {
     ] {
         store.push_commit_fault(CommitFault::NotCommitted(kind));
         not_committed(
-            store.commit(block_batch(factory, Some(head(0, 1)), 1, 1)),
+            store.commit(&block_batch(factory, Some(head(0, 1)), 1, 1)),
             kind,
         );
         assert_eq!(store.health(), Health::Available, "{kind:?}");
@@ -974,7 +974,7 @@ pub fn faulty_latching_kinds_follow_the_redb_rule(factory: &dyn StoreFactory) {
     // A lost acknowledgement never latches.
     let next = block_batch(factory, Some(head(0, 1)), 1, 1);
     store.push_commit_fault(CommitFault::AckLost);
-    indeterminate(store.commit(next.clone()), StorageErrorKind::Io);
+    indeterminate(store.commit(&next), StorageErrorKind::Io);
     assert_eq!(store.health(), Health::Available);
 
     // Any indeterminate commit latches, whatever its kind.
@@ -982,7 +982,7 @@ pub fn faulty_latching_kinds_follow_the_redb_rule(factory: &dyn StoreFactory) {
     store.push_commit_fault(CommitFault::IndeterminateNotApplied(
         StorageErrorKind::Incompatible,
     ));
-    let outcome = store.commit(after.clone());
+    let outcome = store.commit(&after);
     let CommitOutcome::Indeterminate(error) = outcome else {
         panic!("expected Indeterminate(Incompatible), got {outcome:?}");
     };
@@ -1004,7 +1004,7 @@ pub fn faulty_latching_kinds_follow_the_redb_rule(factory: &dyn StoreFactory) {
     assert_eq!(store.health(), Health::Failed(error.clone()));
     assert_eq!(store.read_object(space, &id).unwrap_err(), error);
     assert_eq!(store.recover().unwrap(), Some(head(1, 1)));
-    committed(store.commit(after));
+    committed(store.commit(&after));
 }
 
 /// `NotCommitted` before apply leaves durable state untouched and the same
@@ -1014,23 +1014,23 @@ pub fn faulty_not_committed_applies_nothing(factory: &dyn StoreFactory) {
     store.set_latching(false);
     let batch = block_batch(factory, None, 0, 3);
     store.push_commit_fault(CommitFault::NotCommitted(StorageErrorKind::Io));
-    not_committed(store.commit(batch.clone()), StorageErrorKind::Io);
+    not_committed(store.commit(&batch), StorageErrorKind::Io);
     assert_eq!(store.health(), Health::Available);
     assert_eq!(store.head().unwrap(), None);
     for (space, id, _) in &batch.objects {
         assert_eq!(read(&store, *space, id), None);
     }
-    committed(store.commit(batch));
+    committed(store.commit(&batch));
 }
 
 /// An `Indeterminate` commit that did apply reconciles as committed; the
 /// batch is never applied twice.
 pub fn faulty_indeterminate_applied_reconciles_committed(factory: &dyn StoreFactory) {
     let (store, _resources) = faulty(factory);
-    committed(store.commit(block_batch(factory, None, 0, 1)));
+    committed(store.commit(&block_batch(factory, None, 0, 1)));
     let batch = block_batch(factory, Some(head(0, 1)), 1, 4);
     store.push_commit_fault(CommitFault::IndeterminateApplied(StorageErrorKind::Io));
-    indeterminate(store.commit(batch.clone()), StorageErrorKind::Io);
+    indeterminate(store.commit(&batch), StorageErrorKind::Io);
     assert!(matches!(store.health(), Health::Failed(_)));
     assert_eq!(
         reconcile(&store, &batch).unwrap(),
@@ -1038,7 +1038,7 @@ pub fn faulty_indeterminate_applied_reconciles_committed(factory: &dyn StoreFact
     );
     assert_eq!(store.health(), Health::Available);
     let before = store.stats();
-    not_committed(store.commit(batch), StorageErrorKind::HeadMismatch);
+    not_committed(store.commit(&batch), StorageErrorKind::HeadMismatch);
     assert_eq!(store.stats().since(&before).committed, 0);
     assert_eq!(store.injected().commits_applied, 1);
 }
@@ -1047,16 +1047,16 @@ pub fn faulty_indeterminate_applied_reconciles_committed(factory: &dyn StoreFact
 /// identical batch then commits exactly once.
 pub fn faulty_indeterminate_not_applied_retries_once(factory: &dyn StoreFactory) {
     let (store, _resources) = faulty(factory);
-    committed(store.commit(block_batch(factory, None, 0, 1)));
+    committed(store.commit(&block_batch(factory, None, 0, 1)));
     let batch = block_batch(factory, Some(head(0, 1)), 1, 4);
     store.push_commit_fault(CommitFault::IndeterminateNotApplied(StorageErrorKind::Io));
-    indeterminate(store.commit(batch.clone()), StorageErrorKind::Io);
+    indeterminate(store.commit(&batch), StorageErrorKind::Io);
     assert_eq!(
         reconcile(&store, &batch).unwrap(),
         Reconciliation::NotCommitted
     );
-    committed(store.commit(batch.clone()));
-    not_committed(store.commit(batch.clone()), StorageErrorKind::HeadMismatch);
+    committed(store.commit(&batch));
+    not_committed(store.commit(&batch), StorageErrorKind::HeadMismatch);
     assert_eq!(
         reconcile(&store, &batch).unwrap(),
         Reconciliation::Committed
@@ -1069,7 +1069,7 @@ pub fn faulty_ack_lost_keeps_store_available(factory: &dyn StoreFactory) {
     let (store, _resources) = faulty(factory);
     let batch = block_batch(factory, None, 0, 2);
     store.push_commit_fault(CommitFault::AckLost);
-    indeterminate(store.commit(batch.clone()), StorageErrorKind::Io);
+    indeterminate(store.commit(&batch), StorageErrorKind::Io);
     assert_eq!(store.health(), Health::Available);
     assert_eq!(store.head().unwrap(), Some(head(0, 1)));
     assert_eq!(
@@ -1089,7 +1089,7 @@ pub fn faulty_space_read_faults_are_scoped(factory: &dyn StoreFactory) {
     batch
         .put_object(SpaceId::Namespace(1), a, a_bytes.clone())
         .put_object(SpaceId::Namespace(2), b, b_bytes.clone());
-    committed(store.commit(batch));
+    committed(store.commit(&batch));
     store.fail_reads(
         ReadScope::Space(SpaceId::Namespace(2)),
         StorageErrorKind::Corrupt,
@@ -1128,13 +1128,13 @@ pub fn faulty_space_read_faults_are_scoped(factory: &dyn StoreFactory) {
 /// back the identical batch commits exactly once.
 pub fn faulty_disk_full_then_retry_commits_once(factory: &dyn StoreFactory) {
     let (store, _resources) = faulty(factory);
-    committed(store.commit(block_batch(factory, None, 0, 1)));
+    committed(store.commit(&block_batch(factory, None, 0, 1)));
     let mut parent = head(0, 1);
     for (height, full) in [(1, DiskFull::BeforeCommit), (2, DiskFull::DuringCommit)] {
         let batch = block_batch(factory, Some(parent), height, 3);
         store.set_disk_full(Some(full));
         for _ in 0..2 {
-            let outcome = store.commit(batch.clone());
+            let outcome = store.commit(&batch);
             match full {
                 DiskFull::BeforeCommit => not_committed(outcome, StorageErrorKind::Full),
                 DiskFull::DuringCommit => indeterminate(outcome, StorageErrorKind::Full),
@@ -1152,8 +1152,8 @@ pub fn faulty_disk_full_then_retry_commits_once(factory: &dyn StoreFactory) {
             }
         }
         store.set_disk_full(None);
-        committed(store.commit(batch.clone()));
-        not_committed(store.commit(batch), StorageErrorKind::HeadMismatch);
+        committed(store.commit(&batch));
+        not_committed(store.commit(&batch), StorageErrorKind::HeadMismatch);
         parent = head(height, 1);
         assert_eq!(store.head().unwrap(), Some(parent));
     }
@@ -1163,7 +1163,7 @@ pub fn faulty_disk_full_then_retry_commits_once(factory: &dyn StoreFactory) {
 /// from a failed store and from a healthy one — and can be retried.
 pub fn faulty_failed_recovery_is_retryable(factory: &dyn StoreFactory) {
     let (store, _resources) = faulty(factory);
-    committed(store.commit(block_batch(factory, None, 0, 1)));
+    committed(store.commit(&block_batch(factory, None, 0, 1)));
     store.fail_reads(ReadScope::Head, StorageErrorKind::Io, Some(1));
     let error = store.head().unwrap_err();
     assert_eq!(store.health(), Health::Failed(error.clone()));

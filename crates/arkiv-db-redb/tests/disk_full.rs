@@ -89,7 +89,7 @@ fn storage_full_at_any_commit_call_is_full_and_reconciles() {
         let disk = CrashDisk::from_image(image.clone());
         let store = crash_store(&disk, config());
         disk.fail(*op, skip, io::ErrorKind::StorageFull);
-        let outcome = store.commit(candidate.clone());
+        let outcome = store.commit(&candidate);
         assert!(full(&outcome), "call {k} {op:?}: {outcome:?}");
         match reconcile(&store, &candidate).unwrap() {
             Reconciliation::NotCommitted => {

@@ -98,7 +98,7 @@ fn io_errors_at_every_commit_call_reconcile_without_re_execution() {
         let disk = CrashDisk::from_image(image.clone());
         let store = crash_store(&disk, config());
         disk.fail(*op, skip, io::ErrorKind::Other);
-        let outcome = store.commit(candidate.clone());
+        let outcome = store.commit(&candidate);
         assert!(
             matches!(store.health(), Health::Failed(_)),
             "call {k} {op:?}: {outcome:?}"
@@ -114,7 +114,7 @@ fn io_errors_at_every_commit_call_reconcile_without_re_execution() {
                 indeterminate_committed += 1;
                 assert_applied(&store, &candidate);
                 assert!(matches!(
-                    store.commit(candidate.clone()),
+                    store.commit(&candidate),
                     CommitOutcome::NotCommitted(error) if error.kind == StorageErrorKind::HeadMismatch
                 ));
             }
@@ -154,7 +154,7 @@ fn a_failed_final_sync_is_undecided_until_durable_state_is_read() {
     let store = crash_store(&disk, config());
     // With quick repair a commit syncs twice; fail the second (final) one.
     disk.fail(DiskOp::Sync, 1, io::ErrorKind::Other);
-    let outcome = store.commit(candidate.clone());
+    let outcome = store.commit(&candidate);
     assert!(
         matches!(outcome, CommitOutcome::Indeterminate(ref error) if error.kind == StorageErrorKind::Io)
     );
@@ -220,7 +220,7 @@ fn a_block_committed_before_a_process_kill_reconciles_as_committed() {
         Reconciliation::Committed
     );
     assert!(matches!(
-        store.commit(candidate.clone()),
+        store.commit(&candidate),
         CommitOutcome::NotCommitted(error) if error.kind == StorageErrorKind::HeadMismatch
     ));
     assert_eq!(store.stats().committed, 0);
@@ -236,7 +236,7 @@ fn faulty_indeterminate_over_a_real_file_reconciles_through_a_reopen() {
     }
     store.push_commit_fault(CommitFault::IndeterminateApplied(StorageErrorKind::Io));
     assert!(matches!(
-        store.commit(candidate.clone()),
+        store.commit(&candidate),
         CommitOutcome::Indeterminate(_)
     ));
     assert_eq!(

@@ -35,6 +35,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let command = args
         .next()
         .ok_or("usage: arkiv-demo producer|full|light|rpc [--option value]")?;
+    if command == "--version" {
+        println!("arkiv-demo {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let mut options = BTreeMap::new();
     while let Some(key) = args.next() {
         if ![

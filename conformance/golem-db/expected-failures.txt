@@ -1,0 +1,13 @@
+# Ported golem-db tests (src/golem_tests.rs) that are expected to fail.
+# Checked by check-tests.py in CI: a test outside this list failing, or a
+# listed test passing, fails the job. Keep it current.
+#
+# All five fail only on golem-internal system records (#alloc and its next
+# record id, the #recordKeys binding, the #roots cell), which have no engine
+# counterpart; see README.md "Ported golem-db tests". The same five fail with
+# the default archive retention and with ARKIV_STATE_RETENTION=0.
+golem_tests::checkpoints_rollback_seal_and_discard_share_state_across_clones
+golem_tests::crud_pending_reads_projections_and_recreation
+golem_tests::durable_reopens_empty_records_created_directly_or_by_removing_all_cells
+golem_tests::empty_records_keep_identity_through_patch_rollback_commit_and_delete
+golem_tests::reserved_records_limits_and_failed_mutations_preserve_state

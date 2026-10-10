@@ -20,6 +20,7 @@ They are copied into a checkout of the harness and built there.
 | `harness.patch` | Changes to the harness's `crates/harness`. `Cargo.toml` adds the path dependencies on this repository. `main.rs` adds backend selection (`GOLEMDB_BACKEND`, the `ARKIV_*` variables), an optional golem genesis YAML (`GOLEMDB_GENESIS`) and picks each backend's `table_log` source. `workloads.rs` takes that source as a parameter instead of always reading MDBX. |
 | `src/arkiv.rs` | The adapter: `ArkivDb` implements `golemdb_api::Api` on `arkiv-db`. |
 | `src/golem_tests.rs` | golem-db's API tests ported to the adapter, with soft checks so that one run lists every divergence, plus adapter tests. |
+| `ci.sh`, `check-tests.py`, `expected-failures.txt` | The CI driver, the libtest result checker and the ported tests expected to fail (see [CI](#ci)). |
 | `scenarios-scaled/` | `scenarios/large/*` scaled to 1/10 of the commits, with `profile_at` removed. They have the same seeds and shapes as the originals. |
 
 The patch was made against harness commit `686ddfc` ("allow overriding
@@ -169,6 +170,31 @@ Adapter tests (7, all pass):
   head and one older commit are served, older ones are `CommitUnavailable`).
 
 A failing test prints each divergent check with its line number.
+
+## CI
+
+`.github/workflows/golem-conformance.yml` runs the kit on every push to
+`main`, on pull requests, weekly and on demand, through `ci.sh` (also usable
+locally from a checkout named `arkiv-state-db-experiment`):
+
+- `ci.sh setup <harness-ref> <golem-db-ref>` clones the harness next to this
+  repository, checks out both revisions and applies the kit;
+- `ci.sh tests` runs the ported tests with the default retention and with
+  `ARKIV_STATE_RETENTION=0` through `check-tests.py`, which fails when a test
+  outside [`expected-failures.txt`](expected-failures.txt) fails, when a
+  listed test passes (remove it from the list), or when the number of tests
+  run is not 21;
+- `ci.sh smoke` runs `scenarios/block-size/2-blocks-of-100.toml` and
+  `scenarios/commit-growth.toml` on all three backends. Only the exit status
+  is checked; timings are not compared.
+
+The `pinned` job (gating) uses the revisions in the workflow's `env`:
+`HARNESS_REV` = `686ddfc` and `GOLEM_DB_REV` = `57c48ca`. To move the kit to
+newer revisions, bump both there and in this README. The `golem-latest` job
+(weekly and on demand only, non-gating) runs the same steps on the harness's
+default branch and golem-db's `feature/golem-db-api` tip; a failure there,
+including "harness.patch no longer applies", is an early warning that the
+kit needs porting.
 
 ## Adapter notes
 

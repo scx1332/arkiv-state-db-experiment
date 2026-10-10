@@ -37,6 +37,10 @@ async fn main() {
 }
 async fn run() -> Result<()> {
     let (role, args) = args()?;
+    if role == "--version" {
+        println!("arkiv-simulator {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if role == "--help" {
         println!(
             "arkiv-simulator producer|full|light --unsigned-simulator --run-dir DIR [--listen 127.0.0.1:9400] [--admin-listen 127.0.0.1:9401] [--resume | --start paused|running] [--interval-ms 1000]\nProducer: [--source-id UUID] [--chain-id 9001] [--seed 7] [--block-period-ms 1000] [--payload-bytes 64] [--cache-bytes 8388608] [--state-retention archive|N]\nFollowers: --peer URL --source-id UUID --run-id HEX32 --genesis-hash 0xHEX64 [--chain-id 9001] (full also: [--state-retention archive|N])\nPrivate listener requires SIMULATOR_ADMIN_TOKEN (>=32 bytes). Full follower additionally requires --replication-peer URL and SIMULATOR_REPLICATION_TOKEN (same private bearer).\nUnsigned source: proofs verify state against the explicitly trusted source, without consensus authentication. Restart opens retained history from one redb file; producer starts paused unless --resume (or --start running, the deployment form of the same startup policy). --state-retention N serves state reads only for the head and the N snapshots before it (older heights: 410 HistoryPruned); archive (default) serves all. Nothing is deleted yet; a pruned floor never moves back."

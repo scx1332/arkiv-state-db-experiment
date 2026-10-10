@@ -48,15 +48,15 @@ the harness patch, the scaled scenarios and the tests.
 | `BranchInfo::version` | golem's undo-entry count, computed exactly from the branch's write log when asked. No write reads a record for it. The one extra read left is a non-empty patch right after a rollback, where golem's frame rule depends on whether the patch changes anything. |
 | Storage failures | A full medium is `StoreFull`; any other failure is `Internal` with the storage error as source; a poisoned lock is `Internal`. A failed call leaves the branch as it was, so the call can be retried: a branch the engine poisoned is rebuilt from its log after the durable engine recovers the store. A failed commit keeps its seal, can be retried or discarded, and does not block other branches. |
 | Branch ids | Process-wide, as in golem's branch manager. |
-| Harness `table_log` | redb tables per engine space, other tables, free file space, the object cache, and live record, term and snapshot counts at head. |
+| Harness `table_log` | redb tables per engine space, other tables, free file space, the decoded-node cache, and live record, term and snapshot counts at head. |
 
 ## Engine changes made for the conformance work
 
-1. **Durable object cache: O(1) lookups**
-   (`crates/arkiv-db/src/durable/cache.rs`). Every lookup used to scan the
-   whole FIFO, and while the cache filled, `reserve_exact(1)` copied the
-   whole ring on every insert. That made durable creates 3–6x slower than
-   they needed to be. The fix puts a key → sequence index beside the FIFO.
+1. **Durable decoded-node cache** (`crates/arkiv-db/src/durable/cache.rs`).
+   The harness exposed a linear scan in the old encoded-object cache. The
+   cache now holds decoded trie nodes keyed by (space, map kind, object id),
+   sharded, with CLOCK eviction and no lock held during storage reads, so
+   readers run in parallel with the producer.
 2. **`Branch::try_state_root(&self)`.** It returns the root a seal would
    produce without consuming the branch and keeps the hashes for the seal.
    The adapter uses it to keep a sealed branch readable, as golem does.
@@ -94,56 +94,63 @@ subset.
 
 ## Benchmarks
 
-All runs used tmpfs, so fsync cost almost nothing for either engine. Both
-engines ran on the same machine. Treat cross-engine ratios as rough. Our
-durable runs use the default object cache (8 MiB / 16384 entries).
-`S` below is the session scratchpad.
+Measured on 2026-10-10 with `scripts/bench-compare.sh`
+([docs/benchmarking.md](benchmarking.md)) on an idle machine: databases on
+NVMe (ext4, fsync on), runs pinned to 8 cores, page cache dropped before each
+run, engines interleaved. Medians of 5 runs; every arkiv/golem difference
+below is outside the min–max spread. Full tables:
+[golem vs arkiv](benchmarks/2026-10-10-golem-vs-arkiv-nvme.md) and
+[decoded-node cache](benchmarks/2026-10-10-decoded-cache-nvme.md).
 
-### Runs of 2026-10-09 with the current adapter
+### arkiv durable (redb) vs golem-db (MDBX)
 
-Engine at `305d79e`; ops/s, with seal / commit p50 in ms. Logs:
-`S/adapter-runs`.
+ops/s, with seal / commit p50 in ms; disk is the database size after the run.
 
-| Scenario | arkiv durable | arkiv memory | golem-db (MDBX) |
+| Scenario | golem-db | arkiv | arkiv / golem | disk golem → arkiv | peak RSS golem → arkiv |
+|---|---|---|---|---|---|
+| index-layout/1-no-index | 2,901 (172 / 191) | 16,913 (4.6 / 43) | 5.8x | 864 → 129 MiB | 969 → 104 MiB |
+| index-layout/2-same-term | 2,833 (174 / 195) | 15,543 (4.8 / 44) | 5.5x | 864 → 129 MiB | 970 → 104 MiB |
+| index-layout/3-16-terms | 2,822 (175 / 194) | 14,659 (5.0 / 48) | 5.2x | 864 → 129 MiB | 975 → 107 MiB |
+| index-layout/4-unique-terms | 2,329 (213 / 243) | 11,910 (6.3 / 63) | 5.1x | 1,056 → 129 MiB | 1,186 → 136 MiB |
+| index-layout/5-16-attributes | 307 (1,798 / 1,700) | 2,218 (39 / 277) | 7.2x | 8,224 → 514 MiB | 9,200 → 327 MiB |
+| block-size/1 (10 ops) | 298 (4.7 / 29) | 943 (0.28 / 8.3) | 3.2x | 1,536 → 257 MiB | 2,291 → 244 MiB |
+| block-size/2 (100 ops) | 731 (38 / 99) | 3,174 (1.5 / 22) | 4.3x | 1,376 → 257 MiB | 2,132 → 163 MiB |
+| block-size/3 (1000 ops) | 1,355 (345 / 402) | 6,986 (9.5 / 85) | 5.2x | 1,456 → 129 MiB | 2,173 → 151 MiB |
+| block-size/4 (5000 ops) | 1,853 (1,752 / 951) | 10,456 (43 / 233) | 5.6x | 1,776 → 129 MiB | 2,403 → 196 MiB |
+| commit-growth | 975 (1.4 / 13) | 2,133 (0.18 / 6.4) | 2.2x | 768 → 257 MiB | 957 → 180 MiB |
+| concurrent-writers (8) | 901 (36 / 92) | 2,149 (1.7 / 26) | 2.4x | 2,080 → 514 MiB | 2,891 → 738 MiB |
+| large-2m, 1/10 scale | 1,044 (405 / 610) | 4,803 (11 / 134) | 4.6x | 6,720 → 1,028 MiB | 7,016 → 310 MiB |
+| large-realistic, 1/10 scale | 841 (493 / 699) | 2,789 (18 / 191) | 3.3x | 6,688 → 1,028 MiB | 7,056 → 330 MiB |
+
+- **Seal** is where the engines differ most: golem's seal grows steeply with
+  block size and attribute count (1.8 s for 5000-op blocks or 16 attributes),
+  ours stays at 39–43 ms.
+- **commit-growth** is the closest: tiny commits are dominated by fsync for
+  both engines.
+- arkiv keeps every snapshot and still uses 3–16x less disk; it has no
+  pruning, so disk grows with history.
+- golem-db ran with the harness defaults; we did not tune it.
+
+### Decoded-node cache (`1e1d4d7` → `774d3ef`)
+
+Medians of 3 interleaved runs, same setup.
+
+| Workload | before | after | change |
 |---|---|---|---|
-| commit-growth | 5479 (0.18 / 1.31) | 26214 (0.21 / 0.001) | – |
-| block-size/2 (100 ops) | 5161 (1.41 / 9.96) | 21128 (1.55 / 0.005) | – |
-| concurrent-writers (8) | 2626 (2.19 / 13.2) | 15668 (2.96 / 0.013) | 1343 (35.6 / 23.8) |
-| large-2m, 1/10 scale | 5661 (12.9 / 97.1) | 20838 (14.7 / 0.14) | – |
+| index-layout/4, ops/s | 11,024 | 11,867 | +8% |
+| commit-growth, ops/s | 1,683 | 1,738 | +3% |
+| large-2m 1/10, ops/s | 4,695 | 4,800 | +2% |
+| producer + 1 reader, reads/s (100-op blocks) | 9,728 | 33,303 | 3.4x |
+| producer + 4 readers, reads/s | 15,819 | 99,761 | 6.3x |
+| producer + 8 readers, reads/s | 17,104 | 133,996 | 7.8x |
+| producer ops/s with 8 readers | 1,429 | 2,070 | +45% |
+| read p99 with 4 readers | 577 µs | 96 µs | 6x lower |
 
-- **No cost from the adapter changes.** commit-growth earlier gave 5368,
-  5477 and 5613 ops/s on durable.
-- **`table_log` now works on both arkiv backends.** It runs between
-  commits, outside the timers. Durable large-2m without `table_log` gave
-  5973 ops/s. After the last commit the table log shows:
-  `objects:namespace` with 1,711,346 objects in 551 MiB (B-tree height 4),
-  catalog 0.08 MiB, other tables 0.13 MiB, 476 MiB free in a 1028 MiB file,
-  and 200,000 live records with 209,711 index terms over 202 snapshots.
-
-### Runs of 2026-10-09 before the adapter changes
-
-Engine before the cell-type grid and the configurable limits. These are the
-runs that found and checked the object-cache fix (logs `S/conf/runs` and
-`S/final-runs`).
-
-| Scenario | golem-db (MDBX) | arkiv durable, linear-scan cache | arkiv durable, indexed cache |
-|---|---|---|---|
-| index-layout/1-no-index | 3674 (177 / 99.5) | 9468 (4.6 / 25.2) | 23286 (4.7 / 25.7) |
-| index-layout/2-same-term | 3702 (172 / 97.5) | 8691 (5.0 / 24.2) | 21369 (4.9 / 24.4) |
-| index-layout/3-16-terms | 3689 (174 / 96.3) | 8176 (6.0 / 28.1) | 19921 (5.3 / 27.5) |
-| index-layout/4-unique-terms | 2953 (219 / 125) | 7666 (7.0 / 40.8) | 16300 (6.2 / 38.1) |
-| index-layout/5-16-attributes | 221 (1930 / 2714) | 2304 (35.1 / 193) | 2879 (33.6 / 184) |
-| block-size/1 (10 ops) | 1170 (4.6 / 2.6) | 956 (0.26 / 2.2) | 2658 (0.26 / 2.2) |
-| block-size/2 (100 ops) | 1432 (38.5 / 22.0) | 2114 (1.4 / 10.1) | 5377 (1.3 / 9.9) |
-| block-size/3 (1000 ops) | 1120 (475 / 343) | 3813 (9.6 / 56.1) | 9003 (9.1 / 53.8) |
-| block-size/4 (5000 ops) | 1458 (1873 / 1332) | 6053 (41.3 / 188) | 11607 (42.5 / 187) |
-| commit-growth | 2878 (1.3 / 0.8) | 1843 (0.17 / 1.4) | 5449 (0.17 / 1.3) |
-| concurrent-writers (8) | 1487 (35.1 / 23.9) | 387 (1.6 / 11.4) | 2879 (2.1 / 14.0) |
-| large-2m, 1/10 scale | 961 (476 / 581) | 3109 (11.2 / 83.8) | 6743 (11.0 / 81.3) |
-| large-realistic, 1/10 scale | 768 (563 / 737) | 1504 (20.7 / 115) | 3649 (21.1 / 115) |
-
-- **Disk:** our durable database used 5–16x less disk than golem's MDBX
-  file, even though we keep every snapshot.
+Write throughput is bound by fsync and barely moves; reads alongside the
+single producer scale with threads and no longer slow the producer down.
+A larger cache does not pay off for these workloads: 32 and 128 MiB were
+2–6% slower than the 8 MiB default on large-2m, so the default stays
+8 MiB / 16,384 entries.
 
 ### Concurrent writers: a semantics check only
 
@@ -152,7 +159,7 @@ an Arkiv workload. The scenario only checks that first-committer-wins
 works: losers get `HandleInvalid` or `Conflict` and retry on the new head.
 Both backends finish the scenario with no errors.
 
-Attempts per commit in the runs above:
+Attempts per commit (tmpfs runs of 2026-10-09):
 
 | | attempts | commits | attempts per commit |
 |---|---|---|---|

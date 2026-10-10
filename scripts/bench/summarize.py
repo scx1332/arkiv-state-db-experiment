@@ -17,7 +17,24 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import parse_run  # noqa: E402
 
-ENGINES = ["golem", "arkiv-old", "arkiv-new", "arkiv-mem"]
+ENGINE_ORDER = ["golem", "golem-old", "golem-new", "arkiv-old", "arkiv-new", "arkiv-mem"]
+# (a, b, label): ratio a/b, shown when both engines have runs.
+RATIOS = [
+    ("arkiv-new", "arkiv-old", "new/old"),
+    ("golem-new", "golem-old", "golem new/old"),
+    ("arkiv-new", "golem", "new/golem"),
+    ("arkiv-new", "golem-old", "new/golem-old"),
+    ("arkiv-new", "golem-new", "new/golem-new"),
+]
+
+
+def engines_present(records):
+    present = {r.get("engine") for r in records}
+    return [e for e in ENGINE_ORDER if e in present]
+
+
+def ratios_present(engines):
+    return [r for r in RATIOS if r[0] in engines and r[1] in engines]
 
 
 def med(values):
@@ -120,18 +137,15 @@ def main_section(records, lines):
     def vals(scn, eng, field):
         return [r.get(field) for r in ok if r["scenario"] == scn and r["engine"] == eng]
 
+    engines = engines_present(main)
+    ratios = ratios_present(engines)
     lines.append("## Overview (median ops/s)\n")
-    lines.append("| scenario | golem | arkiv-old | arkiv-new | arkiv-mem | new/old | new/golem |")
-    lines.append("|---|---:|---:|---:|---:|---|---|")
+    lines.append("| scenario | " + " | ".join(engines + [r[2] for r in ratios]) + " |")
+    lines.append("|---|" + "---:|" * len(engines) + "---|" * len(ratios))
     for scn in scenarios:
-        cells = [fmt(med(vals(scn, e, "ops_per_s"))) for e in ENGINES]
-        lines.append(
-            f"| {scn} | " + " | ".join(cells) + " | "
-            + compare(vals(scn, "arkiv-new", "ops_per_s"), vals(scn, "arkiv-old", "ops_per_s"))
-            + " | "
-            + compare(vals(scn, "arkiv-new", "ops_per_s"), vals(scn, "golem", "ops_per_s"))
-            + " |"
-        )
+        cells = [fmt(med(vals(scn, e, "ops_per_s"))) for e in engines]
+        cells += [compare(vals(scn, a, "ops_per_s"), vals(scn, b, "ops_per_s")) for a, b, _ in ratios]
+        lines.append(f"| {scn} | " + " | ".join(cells) + " |")
     lines.append("")
     lines.append(
         "Ratios are of medians; **sig** = the min..max ranges do not overlap; "
@@ -146,7 +160,7 @@ def main_section(records, lines):
             "| commit p99 ms | disk MiB | peak RSS MiB |"
         )
         lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|")
-        for eng in ENGINES:
+        for eng in engines:
             all_runs = [r for r in main if r["scenario"] == scn and r["engine"] == eng]
             if not all_runs:
                 continue
@@ -160,13 +174,13 @@ def main_section(records, lines):
                 f"{fmt(mib(med(vals(scn, eng, 'disk_bytes'))), 1)} | {fmt(med(rss))} |"
             )
         lines.append("")
-        new = vals(scn, "arkiv-new", "ops_per_s")
-        lines.append(
-            f"- new/old ops/s: {compare(new, vals(scn, 'arkiv-old', 'ops_per_s'))}; "
-            f"new/golem: {compare(new, vals(scn, 'golem', 'ops_per_s'))}; "
-            f"commit p50 new/old: {compare(vals(scn, 'arkiv-new', 'commit_p50_ms'), vals(scn, 'arkiv-old', 'commit_p50_ms'))}; "
-            f"disk new/golem: {compare(vals(scn, 'arkiv-new', 'disk_bytes'), vals(scn, 'golem', 'disk_bytes'))}\n"
-        )
+        parts = []
+        for field, what in (("ops_per_s", "ops/s"), ("seal_p50_ms", "seal p50"),
+                            ("commit_p50_ms", "commit p50"), ("disk_bytes", "disk")):
+            for a, b, label in ratios:
+                parts.append(f"{what} {label}: {compare(vals(scn, a, field), vals(scn, b, field))}")
+        if parts:
+            lines.append("- " + "; ".join(parts) + "\n")
 
 
 def cache_section(records, lines):
@@ -289,8 +303,12 @@ def meta_section(out, records, lines, revs):
     lines.append("## Run conditions\n")
     gate = read(os.path.join(out, "meta", "load-gate.txt")).strip() or "(no load gate record)"
     lines.append(f"- Load gate: {gate}")
-    for k in ("old_rev", "old_sha", "new_rev", "new_sha", "conformance_rev", "harness_rustc",
-              "arkiv_rustc", "redb_version"):
+    for k in ("old_rev", "old_sha", "new_rev", "new_sha", "engines", "golem_rev", "golem_sha",
+              "golem_old_rev", "golem_old_sha", "golem_new_rev", "golem_new_sha",
+              "golem_pinned_sha", "conformance_rev", "harness_rustc", "arkiv_rustc",
+              "redb_version"):
+        if k.startswith("old_") and "arkiv-old" not in engines_present(records):
+            continue
         if k in revs:
             lines.append(f"- {k}: `{revs[k]}`")
     cfg = kv(read(os.path.join(out, "config.env")))
@@ -340,15 +358,29 @@ def main():
 
     revs = kv(read(os.path.join(out, "meta", "revs.txt")))
     ok = sum(1 for r in records if r["status"] == "ok")
+    engines = engines_present(records)
+
+    def rev(name):
+        return f"`{revs.get(name + '_rev', '?')}` ({revs.get(name + '_sha', '?')[:12]})"
+
+    desc = []
+    if "golem" in engines:
+        desc.append(f"golem = golem-db {rev('golem')} on MDBX")
+    if "golem-old" in engines or "golem-new" in engines:
+        desc.append(f"golem-old = golem-db {rev('golem_old')} and golem-new = golem-db "
+                    f"{rev('golem_new')}, both on MDBX")
+    if "arkiv-old" in engines:
+        desc.append(f"arkiv-old = DurableEngine on redb (GOLEMDB_BACKEND=arkiv) at {rev('old')}")
+    if "arkiv-new" in engines:
+        desc.append(f"arkiv-new = DurableEngine on redb (GOLEMDB_BACKEND=arkiv) at {rev('new')}")
+    if "arkiv-mem" in engines:
+        desc.append("arkiv-mem = in-memory Engine at the new revision")
     lines = [
         "# bench-compare summary\n",
         f"Results: `{out}`. {ok} of {len(records)} runs succeeded. "
-        f"old = `{revs.get('old_rev', '?')}` ({revs.get('old_sha', '?')[:12]}), "
-        f"new = `{revs.get('new_rev', '?')}` ({revs.get('new_sha', '?')[:12]}). "
-        "Engines: golem = golem-db on MDBX; arkiv-old / arkiv-new = DurableEngine on redb "
-        "(GOLEMDB_BACKEND=arkiv) built from each revision with its own conformance kit; "
-        "arkiv-mem = in-memory Engine at the new revision. Disk = `du -sb` of the database "
-        "directory after the run.\n",
+        "Engines: " + "; ".join(desc) + ". Each arkiv revision is built with its own "
+        "conformance kit; every engine runs in the same harness build at its golem-db "
+        "revision. Disk = `du -sb` of the database directory after the run.\n",
     ]
     main_section(records, lines)
     cache_section(records, lines)

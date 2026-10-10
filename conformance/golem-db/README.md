@@ -23,7 +23,12 @@ They are copied into a checkout of the harness and built there.
 | `scenarios-scaled/` | `scenarios/large/*` scaled to 1/10 of the commits, with `profile_at` removed. They have the same seeds and shapes as the originals. |
 
 The patch was made against harness commit `686ddfc` ("allow overriding
-location of db file"), with the `golem-db` submodule at `95a24ea`.
+location of db file"), with the `golem-db` submodule at `95a24ea`. The kit
+targets golem-db `57c48ca`: `feature/golem-db-api` rebased onto golem-db
+`main` `9dfd120` ("perf: update tries in one pass at seal"). Its
+`golemdb-api` is unchanged from `95a24ea`, so the same patch and sources
+build against both, with the same test results. To use it, check the
+submodule out at `57c48ca` after `git submodule update`.
 
 ## Setup
 
@@ -43,6 +48,7 @@ cd <parent>
 git clone --recurse-submodules https://github.com/golemfactory/golem-db-conformance-testing.git
 cd golem-db-conformance-testing
 git checkout 686ddfc && git submodule update --init    # the tested revision (optional)
+git -C golem-db fetch origin && git -C golem-db checkout 57c48ca   # the golem-db the kit targets
 
 KIT=../arkiv-state-db-experiment/conformance/golem-db
 git apply "$KIT/harness.patch"

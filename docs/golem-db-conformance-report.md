@@ -3,8 +3,10 @@
 This report checks our engine against
 [golemfactory/golem-db-conformance-testing](https://github.com/golemfactory/golem-db-conformance-testing).
 That repository is a load harness written against golem-db's public
-`golemdb-api` crate (the golem-db submodule is on `feature/golem-db-api` at
-`95a24ea`). It is not a wire protocol. The harness's only calls are
+`golemdb-api` crate. We use golem-db `57c48ca`: `feature/golem-db-api`
+rebased onto golem-db `main` `9dfd120`, which adds the one-pass trie update
+at seal. The harness itself still pins the earlier `95a24ea`; the
+`golemdb-api` crate is the same at both. It is not a wire protocol. The harness's only calls are
 `begin`, `create`, `patch`, `delete`, `seal`, `commit` and `discard` on the
 in-process `Api` trait. It treats `HandleInvalid` and `Conflict` as a lost
 race and treats any other error as fatal.
@@ -97,38 +99,54 @@ subset.
 Measured on 2026-10-10 with `scripts/bench-compare.sh`
 ([docs/benchmarking.md](benchmarking.md)) on an idle machine: databases on
 NVMe (ext4, fsync on), runs pinned to 8 cores, page cache dropped before each
-run, engines interleaved. Medians of 5 runs; every arkiv/golem difference
-below is outside the min–max spread. Full tables:
-[golem vs arkiv](benchmarks/2026-10-10-golem-vs-arkiv-nvme.md) and
-[decoded-node cache](benchmarks/2026-10-10-decoded-cache-nvme.md).
+run, engines interleaved. Medians of 3 runs; every difference below is
+outside the min–max spread. Full tables:
+[golem-db `95a24ea` / `57c48ca` vs arkiv `51acc60`](benchmarks/2026-10-10-golem-new-vs-arkiv-nvme.md),
+the earlier [golem-db `95a24ea` vs arkiv](benchmarks/2026-10-10-golem-vs-arkiv-nvme.md)
+and [decoded-node cache](benchmarks/2026-10-10-decoded-cache-nvme.md).
 
 ### arkiv durable (redb) vs golem-db (MDBX)
 
-ops/s, with seal / commit p50 in ms; disk is the database size after the run.
+golem-db `57c48ca` against arkiv `51acc60`. ops/s, with seal / commit p50
+in ms; disk is the database size after the run. The last column is golem-db's
+own speedup from `95a24ea` to `57c48ca`.
 
-| Scenario | golem-db | arkiv | arkiv / golem | disk golem → arkiv | peak RSS golem → arkiv |
-|---|---|---|---|---|---|
-| index-layout/1-no-index | 2,901 (172 / 191) | 16,913 (4.6 / 43) | 5.8x | 864 → 129 MiB | 969 → 104 MiB |
-| index-layout/2-same-term | 2,833 (174 / 195) | 15,543 (4.8 / 44) | 5.5x | 864 → 129 MiB | 970 → 104 MiB |
-| index-layout/3-16-terms | 2,822 (175 / 194) | 14,659 (5.0 / 48) | 5.2x | 864 → 129 MiB | 975 → 107 MiB |
-| index-layout/4-unique-terms | 2,329 (213 / 243) | 11,910 (6.3 / 63) | 5.1x | 1,056 → 129 MiB | 1,186 → 136 MiB |
-| index-layout/5-16-attributes | 307 (1,798 / 1,700) | 2,218 (39 / 277) | 7.2x | 8,224 → 514 MiB | 9,200 → 327 MiB |
-| block-size/1 (10 ops) | 298 (4.7 / 29) | 943 (0.28 / 8.3) | 3.2x | 1,536 → 257 MiB | 2,291 → 244 MiB |
-| block-size/2 (100 ops) | 731 (38 / 99) | 3,174 (1.5 / 22) | 4.3x | 1,376 → 257 MiB | 2,132 → 163 MiB |
-| block-size/3 (1000 ops) | 1,355 (345 / 402) | 6,986 (9.5 / 85) | 5.2x | 1,456 → 129 MiB | 2,173 → 151 MiB |
-| block-size/4 (5000 ops) | 1,853 (1,752 / 951) | 10,456 (43 / 233) | 5.6x | 1,776 → 129 MiB | 2,403 → 196 MiB |
-| commit-growth | 975 (1.4 / 13) | 2,133 (0.18 / 6.4) | 2.2x | 768 → 257 MiB | 957 → 180 MiB |
-| concurrent-writers (8) | 901 (36 / 92) | 2,149 (1.7 / 26) | 2.4x | 2,080 → 514 MiB | 2,891 → 738 MiB |
-| large-2m, 1/10 scale | 1,044 (405 / 610) | 4,803 (11 / 134) | 4.6x | 6,720 → 1,028 MiB | 7,016 → 310 MiB |
-| large-realistic, 1/10 scale | 841 (493 / 699) | 2,789 (18 / 191) | 3.3x | 6,688 → 1,028 MiB | 7,056 → 330 MiB |
+| Scenario | golem-db | arkiv | arkiv / golem | disk golem → arkiv | peak RSS golem → arkiv | golem `57c48ca` / `95a24ea` |
+|---|---|---|---|---|---|---|
+| index-layout/1-no-index | 6,839 (88 / 65) | 17,444 (4.6 / 46) | 2.6x | 224 → 129 MiB | 270 → 108 MiB | 2.4x |
+| index-layout/2-same-term | 6,864 (89 / 61) | 14,737 (5.0 / 51) | 2.1x | 224 → 129 MiB | 270 → 109 MiB | 2.4x |
+| index-layout/3-16-terms | 6,706 (89 / 67) | 15,349 (5.1 / 46) | 2.3x | 240 → 129 MiB | 274 → 111 MiB | 2.4x |
+| index-layout/4-unique-terms | 5,530 (111 / 76) | 11,760 (6.5 / 65) | 2.1x | 288 → 129 MiB | 336 → 140 MiB | 2.3x |
+| index-layout/5-16-attributes | 820 (868 / 434) | 2,217 (40 / 273) | 2.7x | 1,792 → 514 MiB | 2,078 → 330 MiB | 2.7x |
+| block-size/1 (10 ops) | 571 (3.7 / 13) | 806 (0.28 / 8.7) | 1.4x | 704 → 257 MiB | 821 → 246 MiB | 2.1x |
+| block-size/2 (100 ops) | 1,591 (25 / 36) | 3,084 (1.4 / 23) | 1.9x | 448 → 257 MiB | 549 → 164 MiB | 2.1x |
+| block-size/3 (1000 ops) | 3,506 (177 / 114) | 6,974 (9.9 / 86) | 2.0x | 304 → 129 MiB | 405 → 154 MiB | 2.6x |
+| block-size/4 (5000 ops) | 5,937 (671 / 142) | 10,779 (44 / 227) | 1.8x | 240 → 129 MiB | 360 → 199 MiB | 3.1x |
+| commit-growth | 1,515 (1.2 / 9.6) | 2,201 (0.18 / 6.4) | 1.5x | 288 → 257 MiB | 336 → 181 MiB | 1.7x |
+| concurrent-writers (8) | 1,514 (23 / 49) | 2,816 (1.9 / 27) | 1.9x | 1,008 → 514 MiB | 1,195 → 577 MiB | 1.8x |
+| large-2m, 1/10 scale | 2,273 (230 / 228) | 4,841 (11 / 137) | 2.1x | 2,144 → 1,028 MiB | 2,277 → 311 MiB | 2.2x |
+| large-realistic, 1/10 scale | 1,904 (282 / 263) | 2,897 (18 / 199) | 1.5x | 1,968 → 1,028 MiB | 2,093 → 325 MiB | 2.3x |
 
-- **Seal** is where the engines differ most: golem's seal grows steeply with
-  block size and attribute count (1.8 s for 5000-op blocks or 16 attributes),
-  ours stays at 39–43 ms.
-- **commit-growth** is the closest: tiny commits are dominated by fsync for
-  both engines.
-- arkiv keeps every snapshot and still uses 3–16x less disk; it has no
-  pruning, so disk grows with history.
+- **golem-db got 1.7–3.1x faster** between `95a24ea` and `57c48ca`. The
+  change is golem-db `main` `9dfd120` ("perf: update tries in one pass at
+  seal"): each cell, index and bitmap trie is updated in one batch per seal
+  instead of once per change, so far fewer intermediate trie nodes are
+  hashed and written. Seal p50 fell 15–60%, commit p50 1.6–6.7x, and the
+  database and peak RSS shrank 2–7x. The gain grows with block size.
+- **arkiv is still faster in all 13 scenarios**, but by 1.4–2.7x instead
+  of 2.4–7.2x. The smallest margins are tiny blocks (block-size/1,
+  commit-growth), where fsync dominates for both, and large-realistic.
+- **Seal** is still where the engines differ most: golem's seal is
+  7–20x ours (671 ms against 44 ms for 5000-op blocks). Our seal only
+  computes the state root; the writes happen in commit. For 5000-op blocks
+  golem's commit p50 (142 ms) is now below ours (227 ms), but seal plus
+  commit is 813 ms against 271 ms.
+- **Disk:** golem-db is now 1.1–3.5x larger than arkiv, down from 3–16x.
+  arkiv keeps every snapshot and still uses less; it has no pruning, so its
+  disk grows with history. golem-db keeps only the head (history is
+  deferred) but does not yet reclaim obsolete trie nodes; garbage
+  collection for them is on a separate branch
+  (`fix/trie-garbage-collection`) that is not part of this build.
 - golem-db ran with the harness defaults; we did not tune it.
 
 ### Decoded-node cache (`1e1d4d7` → `774d3ef`)

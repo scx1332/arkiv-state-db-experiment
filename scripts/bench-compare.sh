@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Unattended benchmark runner: golem-db (MDBX) vs. this engine at an old and a
-# new revision, on the golem-db conformance harness, plus an object-cache sweep
-# and a reader/producer workload. See docs/benchmarking.md.
+# Unattended benchmark runner: golem-db (MDBX) at one or two revisions vs.
+# this engine at an old and a new revision, on the golem-db conformance
+# harness, plus an object-cache sweep and a reader/producer workload. See
+# docs/benchmarking.md.
 #
 # Usage:
 #   scripts/bench-compare.sh [--all | --quick | --scenarios LIST] [--runs N]
-#       [--out DIR] [--new-rev REV] [--old-rev REV] [--resume DIR]
-#       [--max-wait-load MIN] [--load-threshold X] [--cpus LIST]
-#       [--timeout MIN] [--full-large] [--no-cache-sweep] [--no-readers]
-#       [--dry-run]
+#       [--out DIR] [--new-rev REV] [--old-rev REV] [--golem-rev REV]
+#       [--golem-old-rev REV] [--golem-new-rev REV] [--engines LIST]
+#       [--resume DIR] [--max-wait-load MIN] [--load-threshold X]
+#       [--cpus LIST] [--timeout MIN] [--full-large] [--no-cache-sweep]
+#       [--no-readers] [--dry-run]
 #
 # Exit codes: 0 all runs succeeded; 1 some runs failed (summary still
 # written); 2 prepare/build failed or bad usage; 3 another instance holds the
@@ -32,6 +34,13 @@ RUNS_SET=0
 OUT=""
 NEW_REV=""
 OLD_REV="e230fb3"
+GOLEM_REV=""
+GOLEM_OLD_REV=""
+GOLEM_NEW_REV=""
+GOLEM_SHA=""
+GOLEM_OLD_SHA=""
+GOLEM_NEW_SHA=""
+ENGINES=""
 RESUME=""
 MAX_WAIT_LOAD=120
 MAX_WAIT_SET=0
@@ -48,7 +57,7 @@ MIN_FREE_GB=30
 export PATH="$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 export PYTHONDONTWRITEBYTECODE=1
 
-usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -59,6 +68,10 @@ while [ $# -gt 0 ]; do
     --out) OUT="${2:-}"; shift ;;
     --new-rev) NEW_REV="${2:-}"; shift ;;
     --old-rev) OLD_REV="${2:-}"; shift ;;
+    --golem-rev) GOLEM_REV="${2:-}"; shift ;;
+    --golem-old-rev) GOLEM_OLD_REV="${2:-}"; shift ;;
+    --golem-new-rev) GOLEM_NEW_REV="${2:-}"; shift ;;
+    --engines) ENGINES="${2:-}"; shift ;;
     --resume) RESUME="${2:-}"; shift ;;
     --max-wait-load) MAX_WAIT_LOAD="${2:-}"; MAX_WAIT_SET=1; shift ;;
     --load-threshold) LOAD_THRESHOLD="${2:-}"; shift ;;
@@ -90,6 +103,26 @@ if [ -n "$RESUME" ]; then
   DRY_RUN="$saved_dry"
   if [ "$saved_wait_set" = 1 ]; then MAX_WAIT_LOAD="$saved_wait"; fi
 fi
+
+if [ -n "$GOLEM_REV" ] && { [ -n "$GOLEM_OLD_REV" ] || [ -n "$GOLEM_NEW_REV" ]; }; then
+  echo "--golem-rev cannot be combined with --golem-old-rev/--golem-new-rev" >&2; exit 2
+fi
+
+# Engines. Two golem revisions give golem-old and golem-new; otherwise golem.
+if [ -n "$GOLEM_OLD_REV" ] || [ -n "$GOLEM_NEW_REV" ]; then
+  TWO_GOLEM=1; KNOWN_ENGINES="golem-old golem-new arkiv-old arkiv-new arkiv-mem"
+else
+  TWO_GOLEM=0; KNOWN_ENGINES="golem arkiv-old arkiv-new arkiv-mem"
+fi
+[ -n "$ENGINES" ] || ENGINES="$KNOWN_ENGINES"
+ENGINES="$(echo "$ENGINES" | tr ',' ' ' | xargs)"
+for e in $ENGINES; do
+  case " $KNOWN_ENGINES " in *" $e "*) ;; *)
+    echo "--engines: unknown engine '$e' (known: $KNOWN_ENGINES)" >&2; exit 2 ;;
+  esac
+done
+[ -n "$ENGINES" ] || { echo "--engines: empty list" >&2; exit 2; }
+has_engine() { case " $ENGINES " in *" $1 "*) return 0 ;; esac; return 1; }
 
 if [ "$MODE" = "quick" ]; then
   [ "$RUNS_SET" = 1 ] || RUNS=1
@@ -313,25 +346,91 @@ prepare_conformance() {
   fi
 }
 
+# golem-db revisions resolve in the conformance copy's golem-db submodule;
+# a revision that is missing there is fetched from origin once.
+CONF_DIR="$WORK/src/golem-db-conformance-testing"
+golem_resolve() { # rev -> sha on stdout
+  local rev="$1" g="$CONF_DIR/golem-db" sha
+  if sha="$(git -C "$g" rev-parse --verify -q "$rev^{commit}" 2>/dev/null)"; then echo "$sha"; return 0; fi
+  log "golem-db: $rev not found locally; fetching origin"
+  GIT_TERMINAL_PROMPT=0 timeout 120 git -C "$g" fetch -q origin >>"$LOG" 2>&1 \
+    || git_with_token -C "$g" fetch -q origin >>"$LOG" 2>&1 || true
+  git -C "$g" rev-parse --verify -q "$rev^{commit}" 2>/dev/null
+}
+
+golem_pinned() { # the harness's submodule commit
+  git -C "$CONF_DIR" ls-tree HEAD golem-db 2>/dev/null | awk '{print $3}'
+}
+
+resolve_golem_revs() {
+  local pinned
+  pinned="$(golem_pinned)"
+  [ -n "$pinned" ] || die "cannot read the golem-db submodule commit of $CONF_DIR"
+  if [ "$TWO_GOLEM" = 1 ]; then
+    [ -n "$GOLEM_OLD_REV" ] || GOLEM_OLD_REV="$pinned"
+    [ -n "$GOLEM_NEW_REV" ] || GOLEM_NEW_REV="$pinned"
+    GOLEM_OLD_SHA="$(golem_resolve "$GOLEM_OLD_REV")" || die "golem-db rev $GOLEM_OLD_REV not found"
+    GOLEM_NEW_SHA="$(golem_resolve "$GOLEM_NEW_REV")" || die "golem-db rev $GOLEM_NEW_REV not found"
+    log "golem-old $GOLEM_OLD_REV = $GOLEM_OLD_SHA; golem-new $GOLEM_NEW_REV = $GOLEM_NEW_SHA"
+  else
+    [ -n "$GOLEM_REV" ] || GOLEM_REV="$pinned"
+    GOLEM_SHA="$(golem_resolve "$GOLEM_REV")" || die "golem-db rev $GOLEM_REV not found"
+    log "golem $GOLEM_REV = $GOLEM_SHA"
+  fi
+}
+
+# golem-db commit for an engine's harness. The arkiv engines are built with
+# the newest configured golem-db (golem-new, or golem).
+engine_golem_sha() {
+  case "$1" in
+    golem-old) echo "$GOLEM_OLD_SHA" ;;
+    golem-new) echo "$GOLEM_NEW_SHA" ;;
+    golem) echo "$GOLEM_SHA" ;;
+    *) if [ "$TWO_GOLEM" = 1 ]; then echo "$GOLEM_NEW_SHA"; else echo "$GOLEM_SHA"; fi ;;
+  esac
+}
+
+# arkiv commit for an engine's harness. golem engines use the new revision.
+engine_arkiv_sha() {
+  if [ "$1" = "arkiv-old" ]; then echo "$OLD_SHA"; else echo "$NEW_SHA"; fi
+}
+
+harness_id() { # arkiv sha, golem sha -> <arkiv12>-g<golem12>
+  echo "${1:0:12}-g${2:0:12}"
+}
+
 kit_hash() { # export dir -> hash of its kit
   (cd "$1/conformance/golem-db" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)
 }
 
-build_harness() { # sha
-  local sha="$1" short="${1:0:12}"
-  local src="$WORK/src/arkiv-$short"
+build_harness() { # arkiv sha, golem sha
+  local sha="$1" gsha="$2"
+  local short
+  short="$(harness_id "$sha" "$gsha")"
+  local src="$WORK/src/arkiv-${sha:0:12}"
   local h="$WORK/harness/h-$short"
   local bin="$WORK/bin/harness-$short"
   local stamp
-  stamp="sha=$sha kit=$(kit_hash "$src") conf=$CONF_REV"
+  stamp="sha=$sha kit=$(kit_hash "$src") conf=$CONF_REV golem=$gsha"
   if [ -x "$bin" ] && [ -f "$h/.bench-stamp" ] && [ "$(cat "$h/.bench-stamp")" = "$stamp" ]; then
     log "harness $short: up to date ($bin)"
     return 0
   fi
   log "harness $short: preparing $h"
   rm -rf "$h" && mkdir -p "$h" || die "cannot create $h"
-  (cd "$WORK/src/golem-db-conformance-testing" && tar -c --exclude=./target \
+  (cd "$CONF_DIR" && tar -c --exclude=./target \
      --exclude=./golem-db/target .) | (cd "$h" && tar -x) || die "copy of harness failed"
+  # The copy carries the submodule's git dir (.git/modules/golem-db).
+  git -C "$h/golem-db" checkout -q --detach "$gsha" >>"$LOG" 2>&1 \
+    || die "harness $short: checkout of golem-db $gsha failed"
+  git -C "$h/golem-db" reset -q --hard >>"$LOG" 2>&1
+  [ "$(git -C "$h/golem-db" rev-parse HEAD 2>/dev/null)" = "$gsha" ] \
+    || die "harness $short: golem-db is not at $gsha"
+  # Cargo keys path dependencies by their path relative to the workspace, so
+  # every harness copy shares golem-db's units in the one target dir, and it
+  # trusts mtimes. tar keeps old mtimes: mark the sources new so a build never
+  # reuses another golem-db revision's objects.
+  find "$h/golem-db" -path "$h/golem-db/.git" -prune -o -type f -exec touch {} + 2>>"$LOG"
   local kit="$src/conformance/golem-db"
   (cd "$h" && git apply "$kit/harness.patch") >>"$LOG" 2>&1 || die "harness $short: git apply harness.patch failed"
   cp "$kit"/src/*.rs "$h/crates/harness/src/" || die "harness $short: copying kit sources failed"
@@ -396,27 +495,51 @@ build_readers() { # sha -> sets READERS_OK_*; never fatal
   return 1
 }
 
+# Engines whose reader workload runs (arkiv-old/arkiv-new among ENGINES).
+reader_engines() {
+  local e out=""
+  for e in arkiv-old arkiv-new; do has_engine "$e" && out="$out $e"; done
+  echo "${out# }"
+}
+
 prepare() {
   status "prepare"
   mkdir -p "$WORK/src" "$WORK/harness" "$WORK/bin" "$WORK/db" "$OUT/prepare" || die "mkdir failed"
-  prepare_conformance
-  export_rev "$OLD_SHA"
-  [ "$NEW_SHA" = "$OLD_SHA" ] || export_rev "$NEW_SHA"
-  build_harness "$OLD_SHA"
-  [ "$NEW_SHA" = "$OLD_SHA" ] || build_harness "$NEW_SHA"
+  local e pair pairs="" a g
+  for e in $ENGINES; do
+    a="$(engine_arkiv_sha "$e")"; g="$(engine_golem_sha "$e")"
+    case " $pairs " in *" $a:$g "*) ;; *) pairs="$pairs $a:$g" ;; esac
+  done
+  export_rev "$NEW_SHA"
+  if has_engine arkiv-old && [ "$OLD_SHA" != "$NEW_SHA" ]; then export_rev "$OLD_SHA"; fi
+  for pair in $pairs; do
+    build_harness "${pair%%:*}" "${pair#*:}"
+  done
   if [ "$READERS" = 1 ]; then
-    if build_readers "$NEW_SHA"; then READERS_OK_NEW=1; fi
-    if [ "$NEW_SHA" = "$OLD_SHA" ]; then READERS_OK_OLD=$READERS_OK_NEW
-    elif build_readers "$OLD_SHA"; then READERS_OK_OLD=1; fi
+    if has_engine arkiv-new && build_readers "$NEW_SHA"; then READERS_OK_NEW=1; fi
+    if has_engine arkiv-old; then
+      if [ "$NEW_SHA" = "$OLD_SHA" ] && has_engine arkiv-new; then READERS_OK_OLD=$READERS_OK_NEW
+      elif build_readers "$OLD_SHA"; then READERS_OK_OLD=1; fi
+    fi
   fi
+  local hn
+  hn="$WORK/harness/h-$(harness_id "$NEW_SHA" "$(engine_golem_sha arkiv-new)")"
   {
     echo "old_rev=$OLD_REV"; echo "old_sha=$OLD_SHA"
     echo "new_rev=$NEW_REV"; echo "new_sha=$NEW_SHA"
-    echo "conformance_rev=$(cat "$WORK/src/golem-db-conformance-testing/.copy-ok" 2>/dev/null)"
-    echo "harness_rustc=$(cd "$WORK/harness/h-$NEW_SHORT" && rustc -V 2>/dev/null)"
-    echo "harness_cargo=$(cd "$WORK/harness/h-$NEW_SHORT" && cargo -V 2>/dev/null)"
+    echo "engines=$ENGINES"
+    if [ "$TWO_GOLEM" = 1 ]; then
+      echo "golem_old_rev=$GOLEM_OLD_REV"; echo "golem_old_sha=$GOLEM_OLD_SHA"
+      echo "golem_new_rev=$GOLEM_NEW_REV"; echo "golem_new_sha=$GOLEM_NEW_SHA"
+    else
+      echo "golem_rev=$GOLEM_REV"; echo "golem_sha=$GOLEM_SHA"
+    fi
+    echo "golem_pinned_sha=$(golem_pinned)"
+    echo "conformance_rev=$(cat "$CONF_DIR/.copy-ok" 2>/dev/null)"
+    echo "harness_rustc=$(cd "$hn" 2>/dev/null && rustc -V 2>/dev/null)"
+    echo "harness_cargo=$(cd "$hn" 2>/dev/null && cargo -V 2>/dev/null)"
     echo "arkiv_rustc=$(cd "$WORK/src/arkiv-$NEW_SHORT" && rustc -V 2>/dev/null)"
-    echo "redb_version=$(grep -A1 '^name = "redb"$' "$WORK/harness/h-$NEW_SHORT/Cargo.lock" | sed -n 's/^version = "\(.*\)"/\1/p' | tr '\n' ' ')"
+    echo "redb_version=$(grep -A1 '^name = "redb"$' "$hn/Cargo.lock" 2>/dev/null | sed -n 's/^version = "\(.*\)"/\1/p' | tr '\n' ' ')"
     echo "readers_old=$READERS_OK_OLD"; echo "readers_new=$READERS_OK_NEW"
     echo "old_bench_readers_injected=$([ -f "$WORK/src/arkiv-$OLD_SHORT/.bench-readers-injected" ] && echo yes || echo no)"
     echo "new_bench_readers_injected=$([ -f "$WORK/src/arkiv-$NEW_SHORT/.bench-readers-injected" ] && echo yes || echo no)"
@@ -438,15 +561,22 @@ build_plan() {
     i=0
     for entry in "${SELECTED[@]}"; do
       id="${entry%%|*}"
-      engines="golem arkiv-old arkiv-new"
-      case "$MEM_SCENARIOS" in *" $id "*) engines="$engines arkiv-mem" ;; esac
+      engines=""
+      for e in $ENGINES; do
+        if [ "$e" = "arkiv-mem" ]; then
+          case "$MEM_SCENARIOS" in *" $id "*) ;; *) continue ;; esac
+        fi
+        engines="$engines $e"
+      done
+      [ -n "$engines" ] || { i=$((i + 1)); continue; }
+      # shellcheck disable=SC2086
       for e in $(shuffled $((run * 1000 + i)) $engines); do
         PLAN_LINES+=("main	$id	$e	$run")
       done
       i=$((i + 1))
     done
   done
-  if [ "$CACHE_SWEEP" = 1 ]; then
+  if [ "$CACHE_SWEEP" = 1 ] && has_engine arkiv-new; then
     for ((run = 1; run <= SWEEP_RUNS; run++)); do
       for entry in "${SELECTED[@]}"; do
         id="${entry%%|*}"
@@ -457,12 +587,13 @@ build_plan() {
       done
     done
   fi
-  if [ "$READERS" = 1 ]; then
+  if [ "$READERS" = 1 ] && [ -n "$(reader_engines)" ]; then
     local b t
     for ((run = 1; run <= READER_RUNS; run++)); do
       for b in $READER_BLOCKS; do
         for t in $READER_THREADS; do
-          for e in $(shuffled $((run * 31 + b + t)) arkiv-old arkiv-new); do
+          # shellcheck disable=SC2046
+          for e in $(shuffled $((run * 31 + b + t)) $(reader_engines)); do
             PLAN_LINES+=("readers	readers/b$b-r$t	$e	$run")
           done
         done
@@ -488,11 +619,11 @@ job_command() { # variant scenario engine run dbdir
     return 0
   fi
   rel="$(scenario_path "$id")" || return 1
-  if [ "$engine" = "arkiv-old" ]; then short="$OLD_SHORT"; else short="$NEW_SHORT"; fi
+  short="$(harness_id "$(engine_arkiv_sha "$engine")" "$(engine_golem_sha "$engine")")"
   h="$WORK/harness/h-$short"
   ENVV=("GOLEMDB_DB_DIR=$dbdir")
   case "$engine" in
-    golem) ;;
+    golem|golem-old|golem-new) ;;
     arkiv-old|arkiv-new) ENVV+=("GOLEMDB_BACKEND=arkiv") ;;
     arkiv-mem) ENVV+=("GOLEMDB_BACKEND=arkiv-memory") ;;
   esac
@@ -518,9 +649,15 @@ print_plan() {
   echo "# bench-compare plan ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
   echo "# out=$OUT work=$WORK repo=$REPO"
   echo "# old=$OLD_REV (${OLD_SHA:-?}) new=$NEW_REV (${NEW_SHA:-?}) conformance=$CONF_REV"
+  if [ "$TWO_GOLEM" = 1 ]; then
+    echo "# golem-old=$GOLEM_OLD_REV (${GOLEM_OLD_SHA:-?}) golem-new=$GOLEM_NEW_REV (${GOLEM_NEW_SHA:-?}) engines=$ENGINES"
+  else
+    echo "# golem=${GOLEM_REV:-pinned} (${GOLEM_SHA:-?}) engines=$ENGINES"
+  fi
   echo "# mode=$MODE runs=$RUNS cpus=$CPUS timeout=${RUN_TIMEOUT_MIN}m load-gate<$LOAD_THRESHOLD up to ${MAX_WAIT_LOAD}m full-large=$FULL_LARGE"
   echo "# prepare: copy/clone conformance@$CONF_REV -> $WORK/src/golem-db-conformance-testing;"
-  echo "#   git archive old/new -> $WORK/src/arkiv-<sha>; harness copies $WORK/harness/h-<sha> with each rev's kit;"
+  echo "#   git archive old/new -> $WORK/src/arkiv-<sha>; harness copies $WORK/harness/h-<sha>-g<golem sha>"
+  echo "#   with each arkiv rev's kit and golem-db checked out at the engine's golem rev;"
   echo "#   cargo build --release -p golemdb-harness (CARGO_BUILD_JOBS=$JOBS, CARGO_TARGET_DIR=$WORK/target);"
   echo "#   cargo build --release -p arkiv-db-redb --example bench_readers (CARGO_TARGET_DIR=$WORK/target-arkiv)"
   echo "# each job: sync; sudo -n drop_caches; cd \$OUT/runs/<key>; env ... timeout -k 60 <T>m taskset -c $CPUS /usr/bin/time -v <cmd>; du -sb db; rm -rf db"
@@ -663,6 +800,16 @@ if [ "$DRY_RUN" = 1 ]; then
     NEW_SHA="$(git -C "$REPO" rev-parse --verify -q "$NEW_REV^{commit}" || echo "?")"
   fi
   OLD_SHORT="${OLD_SHA:0:12}"; NEW_SHORT="${NEW_SHA:0:12}"
+  if [ -z "$GOLEM_SHA$GOLEM_OLD_SHA$GOLEM_NEW_SHA" ]; then
+    # Resolve only from what is already on disk; a dry run fetches nothing.
+    p="$(golem_pinned)"
+    lr() { git -C "$CONF_DIR/golem-db" rev-parse --verify -q "$1^{commit}" 2>/dev/null || echo "?"; }
+    if [ "$TWO_GOLEM" = 1 ]; then
+      GOLEM_OLD_SHA="$(lr "${GOLEM_OLD_REV:-$p}")"; GOLEM_NEW_SHA="$(lr "${GOLEM_NEW_REV:-$p}")"
+    else
+      GOLEM_SHA="$(lr "${GOLEM_REV:-$p}")"
+    fi
+  fi
   build_plan
   print_plan
   exit 0
@@ -683,15 +830,21 @@ trap 'log "interrupted"; EXIT_CODE=130; exit 130' INT TERM HUP
 log "bench-compare start: mode=$MODE runs=$RUNS out=$OUT resume=${RESUME:-no} pid=$$"
 write_meta "$OUT/meta/machine-start.txt"
 
+status "prepare"
+mkdir -p "$WORK/src" || die "mkdir $WORK/src failed"
+prepare_conformance
 if [ -z "$RESUME" ]; then
   resolve_revs
+  resolve_golem_revs
 else
-  log "resume: revisions from config.env: old $OLD_SHA new $NEW_SHA"
+  log "resume: revisions from config.env: old $OLD_SHA new $NEW_SHA golem ${GOLEM_SHA:-$GOLEM_OLD_SHA $GOLEM_NEW_SHA}"
   OLD_SHORT="${OLD_SHA:0:12}"; NEW_SHORT="${NEW_SHA:0:12}"
 fi
 {
   printf 'MODE=%q\nSCENARIO_FILTER=%q\nRUNS=%q\nOLD_REV=%q\nNEW_REV=%q\nOLD_SHA=%q\nNEW_SHA=%q\n' \
     "$MODE" "$SCENARIO_FILTER" "$RUNS" "$OLD_REV" "$NEW_REV" "$OLD_SHA" "$NEW_SHA"
+  printf 'GOLEM_REV=%q\nGOLEM_OLD_REV=%q\nGOLEM_NEW_REV=%q\nGOLEM_SHA=%q\nGOLEM_OLD_SHA=%q\nGOLEM_NEW_SHA=%q\nENGINES=%q\n' \
+    "$GOLEM_REV" "$GOLEM_OLD_REV" "$GOLEM_NEW_REV" "$GOLEM_SHA" "$GOLEM_OLD_SHA" "$GOLEM_NEW_SHA" "$ENGINES"
   printf 'MAX_WAIT_LOAD=%q\nLOAD_THRESHOLD=%q\nCPUS=%q\nRUN_TIMEOUT_MIN=%q\nFULL_LARGE=%q\nCACHE_SWEEP=%q\nREADERS=%q\n' \
     "$MAX_WAIT_LOAD" "$LOAD_THRESHOLD" "$CPUS" "$RUN_TIMEOUT_MIN" "$FULL_LARGE" "$CACHE_SWEEP" "$READERS"
 } >"$OUT/config.env"

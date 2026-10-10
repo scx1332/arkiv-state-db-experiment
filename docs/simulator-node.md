@@ -13,7 +13,10 @@ This executable does not sign headers. The `arkiv-demo` executable and the
 signed `arkiv-proposer` are separate. The source UUID, random 128-bit run ID and
 canonical genesis-header hash identify a retained run. Restart never replaces
 those identities. A new directory creates a separate run; there is no reset,
-pruning or truncation API.
+pruning or truncation API. `--state-retention <N>` (producer, full, inspect)
+limits the state heights served to the head and the `N` before it; older
+heights answer `410 HistoryPruned`, and nothing is deleted (see the
+[pruning design](pruning-design.md)).
 
 The `producer` and `full` roles keep one `node.redb` file. The `light` role keeps
 one independent `headers.redb` file containing pinned identity, canonical headers,

@@ -35,6 +35,7 @@ pub mod genesis_bundle;
 pub mod identity;
 pub mod params;
 pub mod replay;
+pub mod retention;
 pub mod select;
 pub mod signed;
 pub mod simulator;

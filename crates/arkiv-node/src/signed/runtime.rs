@@ -201,9 +201,38 @@ pub fn status(node: &Node) -> Json {
         ),
         Node::Light { light, .. } => ("light", light.health, false),
     };
-    json!({"apiVersion":1,"feedVersion":1,"identity":node.identity(),"sourceId":node.identity().source_id,"runId":node.identity().run_id,"genesisHash":node.identity().genesis_hash,"chainId":node.identity().chain_id,"sourceKind":"arkiv-native-signed","authentication":"signed-proposer-v1","proposer":hex(&node.genesis().proposer),"consensus":false,"finality":false,"role":role,"health":health,"paused":paused,"head":snapshot(&node.head()),"durability":"durable","bodyRetention":if matches!(node,Node::Light{..}){"headers-only"}else{"all"},"proofProfiles":[crate::simulator::profile::PROOF_PROFILE,range_api::PROFILE],"capabilities":capabilities})
+    let mut value = json!({"apiVersion":1,"feedVersion":1,"identity":node.identity(),"sourceId":node.identity().source_id,"runId":node.identity().run_id,"genesisHash":node.identity().genesis_hash,"chainId":node.identity().chain_id,"sourceKind":"arkiv-native-signed","authentication":"signed-proposer-v1","proposer":hex(&node.genesis().proposer),"consensus":false,"finality":false,"role":role,"health":health,"paused":paused,"head":snapshot(&node.head()),"durability":"durable","bodyRetention":if matches!(node,Node::Light{..}){"headers-only"}else{"all"},"proofProfiles":[crate::simulator::profile::PROOF_PROFILE,range_api::PROFILE],"capabilities":capabilities});
+    // State retention of this node (a light node keeps no state: null).
+    let retention = match node {
+        Node::Full(h) => crate::retention::status(&h.engine),
+        Node::Light { .. } => {
+            json!({"stateRetention":null,"stateRetentionWindow":null,"stateFloor":null,"receiptFloor":null})
+        }
+    };
+    if let (Some(value), Json::Object(fields)) = (value.as_object_mut(), retention) {
+        value.extend(fields);
+    }
+    value
+}
+/// Details of this request's `HistoryPruned` refusal, recorded on the host
+/// while the request held the node lock.
+fn refusal(rt: &Shared, result: &Result<Json>) -> Option<(u64, u64)> {
+    if !matches!(result, Err(Error("HistoryPruned"))) {
+        return None;
+    }
+    match &*rt.node.try_lock().ok()? {
+        Node::Full(host) => host.refusal.take(),
+        Node::Light { .. } => None,
+    }
+}
+fn respond(rt: &Shared, result: Result<Json>) -> Response {
+    let refusal = refusal(rt, &result);
+    response_with(result, refusal)
 }
 fn response(result: Result<Json>) -> Response {
+    response_with(result, None)
+}
+fn response_with(result: Result<Json>, refusal: Option<(u64, u64)>) -> Response {
     match result {
         Ok(value) => match json_bytes(&value, RESPONSE_CAP) {
             Ok(bytes) => (
@@ -217,13 +246,18 @@ fn response(result: Result<Json>) -> Response {
         Err(e) => {
             let status = match e.0 {
                 "Unauthorized" => StatusCode::UNAUTHORIZED,
+                "HistoryPruned" => StatusCode::GONE,
                 "ServerBusy" | "PoolFull" => StatusCode::TOO_MANY_REQUESTS,
                 "StorageUnavailable" | "HistoryUnavailable" | "CommitUncertain" => {
                     StatusCode::SERVICE_UNAVAILABLE
                 }
                 _ => StatusCode::UNPROCESSABLE_ENTITY,
             };
-            (status, axum::Json(json!({"error":e.0}))).into_response()
+            (
+                status,
+                axum::Json(crate::retention::error_body(e.0, refusal)),
+            )
+                .into_response()
         }
     }
 }
@@ -353,15 +387,15 @@ async fn http_read(
         Ok(p) => p,
         Err(_) => return response(Err(Error("ServerBusy"))),
     };
-    response(
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            let node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
-            read(&node, &path, &q)
-        })
-        .await
-        .unwrap_or(Err(Error("StorageUnavailable"))),
-    )
+    let worker = rt.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let node = worker.node.try_lock().map_err(|_| Error("ServerBusy"))?;
+        read(&node, &path, &q)
+    })
+    .await
+    .unwrap_or(Err(Error("StorageUnavailable")));
+    respond(&rt, result)
 }
 async fn parse<T: serde::de::DeserializeOwned>(body: Body, cap: usize) -> Result<T> {
     let bytes = tokio::time::timeout(Duration::from_secs(5), to_bytes(body, cap))
@@ -411,6 +445,7 @@ async fn http_post(State(rt): State<Shared>, Path(path): Path<String>, body: Bod
         Ok(p) => p,
         Err(_) => return response(Err(Error("ServerBusy"))),
     });
+    let shared = rt.clone();
     let result:Result<Json>=async {
         if path=="state/explore" {return state_api::handle(rt.clone(),body,permit.clone()).await;}
         if matches!(path.as_str(), "query/range" | "query/range/resolve" | "query/range/verified" | "query/range/inspect") { return range_api::handle(rt.clone(), &path, body, permit.clone()).await; }
@@ -443,7 +478,7 @@ async fn http_post(State(rt): State<Shared>, Path(path): Path<String>, body: Bod
         }).await.map_err(|_|Error("StorageUnavailable"))?
     }.await;
     drop(permit);
-    response(result)
+    respond(&shared, result)
 }
 async fn verified_account(rt: Shared, request: AccountQuery) -> Result<Json> {
     let actor = actor(&request.actor)?;
@@ -708,6 +743,7 @@ async fn fetch_once<T: serde::de::DeserializeOwned>(
             Some("ProofLimitExceeded") => "ProofLimitExceeded",
             Some("BudgetExceeded") => "BudgetExceeded",
             Some("CursorMismatch") => "CursorMismatch",
+            Some("HistoryPruned") if status == StatusCode::GONE => "HistoryPruned",
             Some("ServerBusy") if status == StatusCode::TOO_MANY_REQUESTS => "ServerBusy",
             _ => "PeerUnavailable",
         }));

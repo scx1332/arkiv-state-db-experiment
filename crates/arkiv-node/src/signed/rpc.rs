@@ -11,7 +11,7 @@ use crate::{
     arkiv::{self, ArkivOperation},
 };
 use alloy_primitives::{U256, keccak256};
-use arkiv_db::{Budget, Cost, OwnerId, Projection, RecordKey, SnapshotId};
+use arkiv_db::{Budget, Cost, OwnerId, Projection, RecordKey};
 use axum::{
     body::{Body, to_bytes},
     extract::State,
@@ -258,7 +258,7 @@ pub fn block_json(host: &Host, height: u64, full: bool) -> Result<Value> {
     )
 }
 fn entity_nonce(host: &Host, height: u64, a: &[u8; 20]) -> Result<u64> {
-    let s = host.engine.snapshot(SnapshotId::from_sequence(height))?;
+    let s = host.state(height)?;
     match s.try_host_get(&arkiv::nonce_key(a))? {
         None => Ok(0),
         Some(b) => Ok(u64::from_be_bytes(
@@ -267,7 +267,7 @@ fn entity_nonce(host: &Host, height: u64, a: &[u8; 20]) -> Result<u64> {
     }
 }
 fn previous_owner(host: &Host, height: u64, key: &RecordKey) -> Result<[u8; 20]> {
-    let s = host.engine.snapshot(SnapshotId::from_sequence(height))?;
+    let s = host.state(height)?;
     let r = s
         .try_get_record(
             arkiv::entity_namespace(),
@@ -288,7 +288,11 @@ fn word(n: u64) -> String {
 fn topic_address(a: &[u8; 20]) -> String {
     format!("0x{}{}", "0".repeat(24), &hex(a)[2..])
 }
+/// Logs of block `height`, derived from its body and the state after
+/// `height - 1`; refused up front below the receipt floor (see
+/// `crate::retention`), whether or not the block has Arkiv operations.
 pub fn block_logs(host: &Host, height: u64) -> Result<Vec<Value>> {
+    host.require_receipts(height)?;
     if height == 0 {
         return Ok(vec![]);
     }
@@ -497,6 +501,8 @@ pub fn logs(host: &Host, state: &mut RpcState, filter: &Value) -> Result<Value> 
     if end < start || end - start >= LOG_BLOCK_CAP {
         return Err(Error("LogRangeTooLarge"));
     }
+    // The whole range is refused up front; the floor only rises.
+    host.require_receipts(start)?;
     let mut out = Vec::new();
     for h in start..=end {
         for l in block_logs(host, h)? {
@@ -526,9 +532,7 @@ fn revert_data(
         return Ok(None);
     };
     let key_word = &hex(key.as_bytes())[2..];
-    let snapshot = host
-        .engine
-        .snapshot(SnapshotId::from_sequence(host.head.height))?;
+    let snapshot = host.state(host.head.height)?;
     let current = snapshot
         .try_get_record(
             arkiv::entity_namespace(),
@@ -1104,7 +1108,23 @@ fn dispatch(host: &mut Host, state: &mut RpcState, method: &str, params: &Value)
         _ => Err(Error("MethodNotFound")),
     }
 }
+/// JSON-RPC code of a state-retention refusal (`HistoryPruned`).
+pub const HISTORY_PRUNED_CODE: i64 = -32001;
 fn error(id: Value, e: Error) -> Value {
+    error_with(id, e, None)
+}
+/// `pruned` carries `(requested, floor)` of a `HistoryPruned` refusal.
+fn error_with(id: Value, e: Error, pruned: Option<(u64, u64)>) -> Value {
+    if e.0 == "HistoryPruned" {
+        let mut error = json!({"code":HISTORY_PRUNED_CODE,"message":"history pruned"});
+        if let Some((requested, floor)) = pruned {
+            error["message"] = json!(format!(
+                "history pruned: requested {requested}, floor {floor}"
+            ));
+            error["data"] = json!({"requested":quantity(requested),"floor":quantity(floor)});
+        }
+        return json!({"jsonrpc":"2.0","id":id,"error":error});
+    }
     let message = match e.0 {
         "InsufficientBalance" => "insufficient funds for gas * price + value",
         _ => e.0,
@@ -1143,7 +1163,7 @@ async fn single(rt: &Shared, request: Value) -> Value {
                 Node::Full(h) => match dispatch(h, &mut state, &method, &params) {
                     Ok(v) => Ok(json!({"jsonrpc":"2.0","id":response_id,"result":v})),
                     Err(e) => {
-                        let mut response = error(response_id, e);
+                        let mut response = error_with(response_id, e, h.refusal.take());
                         if let Some(data) = state.revert_data.take() {
                             response["error"]["data"] = json!(data);
                         }

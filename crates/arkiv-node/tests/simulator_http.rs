@@ -706,3 +706,85 @@ async fn inspection_rejects_oversized_witness_before_returning_any_proof_data() 
         json!({"error":"ProofLimitExceeded"})
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn state_retention_refuses_pruned_proofs_with_410_on_full_and_light() {
+    use arkiv_db::durable::Retention;
+    let mut h = Host::create(
+        Arc::new(MemoryVersionedStore::new()),
+        RunConfig {
+            genesis: arkiv_node::demo::workload::genesis(9001, 1700000000000),
+            workload: Workload::default(),
+        },
+        [1; 16],
+        [7; 16],
+        Options {
+            retention: Retention::Window(5),
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    for _ in 0..20 {
+        h.produce(None).unwrap();
+    }
+    let id = h.durable_identity.clone();
+    let headers = (1..=20).map(|n| h.header(n).unwrap()).collect::<Vec<_>>();
+    let head = h.head;
+    let source = serve(runtime::public_router(
+        Runtime::new(Node::Full(Box::new(h)), None, None).unwrap(),
+    ))
+    .await;
+    let client = reqwest::Client::new();
+    let status = get(&client, &source.url, "status").await;
+    assert_eq!(status["stateRetention"], "window");
+    assert_eq!(status["stateRetentionWindow"], "5");
+    assert_eq!(status["stateFloor"], "15");
+    assert_eq!(status["receiptFloor"], "16");
+    for (height, pruned) in [(14, true), (15, false), (20, false)] {
+        let mut q = query();
+        q["height"] = json!(height.to_string());
+        let resolved: Value = request(&client, &source.url, "query/resolve", &q)
+            .await
+            .json()
+            .await
+            .unwrap();
+        let r = request(
+            &client,
+            &source.url,
+            "query/eq",
+            &json!({"request":resolved["request"]}),
+        )
+        .await;
+        if pruned {
+            assert_eq!(r.status(), 410);
+            assert_eq!(
+                r.json::<Value>().await.unwrap(),
+                json!({"error":"HistoryPruned","requestedHeight":"14","stateFloor":"15"})
+            );
+        } else {
+            assert!(r.status().is_success());
+        }
+    }
+    // A light follower passes the peer's refusal through explicitly.
+    let mut l = Light::create(Arc::new(MemoryVersionedStore::new()), id).unwrap();
+    l.append(&headers, &head).unwrap();
+    let rt = Runtime::new(Node::Light(Box::new(l)), Some(source.url.clone()), None).unwrap();
+    let local = serve(runtime::public_router(rt)).await;
+    let light_status = get(&client, &local.url, "status").await;
+    assert_eq!(light_status["stateFloor"], Value::Null);
+    let mut q = query();
+    q["height"] = json!("14");
+    let r = request(&client, &local.url, "query/verified", &q).await;
+    assert_eq!(r.status(), 410);
+    assert_eq!(
+        r.json::<Value>().await.unwrap(),
+        json!({"error":"HistoryPruned"})
+    );
+    q["height"] = json!("15");
+    assert!(
+        request(&client, &local.url, "query/verified", &q)
+            .await
+            .status()
+            .is_success()
+    );
+}

@@ -5,7 +5,7 @@ use crate::{
     simulator::wire::{REQUEST_CAP, hex, number, pack},
 };
 use arkiv_db::{
-    NamespaceId, SnapshotId,
+    NamespaceId,
     engine::explore::{ExploredLeaf, MAX_TREE_PATH},
 };
 use arkiv_db_trie::NodeKind;
@@ -69,7 +69,7 @@ pub(super) async fn handle(
         let node=rt.node.try_lock().map_err(|_|Error("ServerBusy"))?;
         let Node::Full(host)=&*node else{return Err(Error("UnsupportedNodeRole"))};
         let certificate=host.certificate(height)?;
-        let s=host.engine.snapshot(SnapshotId::from_sequence(height))?;
+        let s=host.state(height)?;
         let h=s.state_header();
         if h.root()!=certificate.header.state_root{return Err(Error("InvalidProof"))}
         let m=s.explore_tree(&q.map,ns,&q.path,&q.term_path)?.ok_or(Error("TreePathNotFound"))?;

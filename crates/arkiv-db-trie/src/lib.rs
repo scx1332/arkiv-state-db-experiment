@@ -77,6 +77,7 @@ mod node;
 pub mod order;
 mod proof;
 mod range;
+mod reach;
 mod stage;
 
 pub use alloy_trie::EMPTY_ROOT_HASH;

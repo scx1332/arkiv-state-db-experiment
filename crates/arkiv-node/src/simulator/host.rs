@@ -9,8 +9,7 @@ use arkiv_db::durable::{
     simulator::{SimulatorIdentity, SimulatorInclusion, SimulatorPacket},
 };
 use arkiv_db::{
-    B256, Budget, Cost, Decode, DecodeError, Decoder, Encode, Encoder, SnapshotId, decode_exact,
-    digest, encode,
+    B256, Budget, Cost, Decode, DecodeError, Decoder, Encode, Encoder, decode_exact, digest, encode,
 };
 use arkiv_db_storage::versioned::VersionedStore;
 use serde::{Deserialize, Serialize};
@@ -287,6 +286,8 @@ pub struct Host {
     pending: Option<StoredBlock>,
     pending_config: Option<(ControlReceipt, Workload)>,
     volatile_controls: BTreeMap<[u8; 32], B256>,
+    /// The last state-retention refusal, for API error details.
+    pub refusal: crate::retention::Refusal,
 }
 impl Host {
     pub fn create(
@@ -349,6 +350,7 @@ impl Host {
             pending: None,
             pending_config: None,
             volatile_controls: BTreeMap::new(),
+            refusal: Default::default(),
         })
     }
     pub fn open(
@@ -399,6 +401,7 @@ impl Host {
             pending: None,
             pending_config: None,
             volatile_controls: BTreeMap::new(),
+            refusal: Default::default(),
         })
     }
     pub fn block(&self, height: u64) -> Result<StoredBlock> {
@@ -725,7 +728,7 @@ impl Host {
         {
             return Err(Error("CursorMismatch"));
         }
-        Ok(self.engine.snapshot(SnapshotId::from_sequence(h.height))?)
+        crate::retention::state(&self.engine, &self.refusal, h.height)
     }
     pub fn proof(&self, r: &arkiv_db::proof::EqRequest) -> Result<Vec<u8>> {
         Ok(self

@@ -35,6 +35,10 @@ impl From<arkiv_db::durable::DurableError> for Error {
         match e {
             DurableError::Storage(e) => e.into(),
             DurableError::ResourceLimit(_) => Self("CapacityReached"),
+            // Retention refusal: explicit, never storage corruption or absence.
+            DurableError::Engine(arkiv_db::EngineError::HistoryPruned { .. }) => {
+                Self("HistoryPruned")
+            }
             _ => Self("StorageUnavailable"),
         }
     }

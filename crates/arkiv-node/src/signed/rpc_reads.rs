@@ -16,9 +16,7 @@ use crate::{
     },
 };
 use alloy_primitives::{U256, keccak256};
-use arkiv_db::{
-    Budget, CellName, Cursor, Literal, Projection, Query, Row, SnapshotId, Term, TypeTag, Value,
-};
+use arkiv_db::{Budget, CellName, Cursor, Literal, Projection, Query, Row, Term, TypeTag, Value};
 use serde_json::{Value as Json, json};
 use std::{
     collections::BTreeMap,
@@ -98,7 +96,7 @@ fn entity_count(host: &Host, params: &Json) -> Result<Json> {
         Some(value) => parse_query(value.as_str().ok_or(Error("InvalidParams"))?)?,
         None => Query::match_all(),
     };
-    let snapshot = host.engine.snapshot(SnapshotId::from_sequence(height))?;
+    let snapshot = host.state(height)?;
     let n = snapshot
         .try_count(
             arkiv::entity_namespace(),
@@ -198,6 +196,8 @@ fn query(host: &Host, params: &Json) -> Result<Json> {
     if height > host.head.height {
         return Err(Error("UnknownBlock"));
     }
+    // Checked on every page: a cursor is not a lease on its snapshot.
+    host.require_state(height)?;
     let selected = selection(options.get("select"))?;
     let limit = options
         .get("limit")
@@ -239,7 +239,7 @@ fn query(host: &Host, params: &Json) -> Result<Json> {
     } else {
         None
     };
-    let snapshot = host.engine.snapshot(SnapshotId::from_sequence(height))?;
+    let snapshot = host.state(height)?;
     let page = read_page(
         &snapshot,
         &query,

@@ -4,10 +4,15 @@
 //! head and at most one bounded prepared batch, never a history vector.
 //! Callers grant it exclusive writer/recovery authority over the store.
 //! This profile stores no node blocks, receipts or signing state.
+//!
+//! State history is retained according to [`Retention`] (archive by
+//! default); see the [`retention`] module for the floor and pin semantics.
 
 pub(crate) mod cache;
 mod format;
 mod prepare;
+pub mod reachability;
+pub mod retention;
 pub mod simulator;
 
 use crate::{B256, Branch, Cost, EngineError, SealedCandidate, Snapshot, SnapshotId, nodes::Nodes};
@@ -19,12 +24,16 @@ use cache::Context;
 pub use format::{EngineGenesis, EngineManifest};
 use format::{GENESIS_KEY, GENESIS_MAX_BYTES, MANIFEST_MAX_BYTES, PROFILE_KEY, profile_bytes};
 pub use prepare::PreparationStats;
+use retention::RetentionState;
+pub use retention::{Retention, RetentionStatus};
 use std::{
     fmt,
     sync::{Arc, atomic::Ordering},
 };
 
-/// Runtime policy; none of these cache/staging options changes logical state.
+/// Runtime policy; none of these options changes logical state.
+/// `retention` decides which historical snapshots this node serves; it is a
+/// node-local choice, not part of genesis.
 #[derive(Clone, Debug)]
 pub struct Options {
     pub cache_bytes: usize,
@@ -32,6 +41,7 @@ pub struct Options {
     pub prepare_bytes: usize,
     pub prepare_objects: usize,
     pub prepare_visits: u64,
+    pub retention: Retention,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -41,6 +51,7 @@ impl Default for Options {
             prepare_bytes: 32 * 1024 * 1024,
             prepare_objects: 100_000,
             prepare_visits: 1_000_000,
+            retention: Retention::Archive,
         }
     }
 }
@@ -153,6 +164,8 @@ struct Prepared {
     snapshot: Snapshot,
     info: CommitInfo,
     generation: u64,
+    /// The state floor this publication records.
+    floor: u64,
 }
 
 /// Noncanonical resident-state and preparation counters; backend/caller
@@ -164,6 +177,7 @@ pub struct DurableStats {
     pub published_sequence: u64,
     pub resident_manifests: usize,
     pub pending_payload_bytes: u64,
+    pub retention: RetentionStatus,
 }
 
 pub struct DurableEngine {
@@ -177,6 +191,7 @@ pub struct DurableEngine {
     state: WriterState,
     last_preparation: PreparationStats,
     simulator: Option<simulator::SimulatorIdentity>,
+    retention: Arc<RetentionState>,
 }
 impl fmt::Debug for DurableEngine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -283,6 +298,22 @@ fn read_open(
         simulator::read_block(store, &manifest)?;
     }
     Ok(manifest)
+}
+
+/// The state floor recorded with the commit of `sequence`; zero if none.
+fn read_floor(store: &dyn VersionedStore, sequence: u64) -> Result<u64, DurableError> {
+    let Some(bytes) =
+        store.read_record_bounded(Table::Meta, retention::floor_key(sequence).as_bytes(), 8)?
+    else {
+        return Ok(0);
+    };
+    let floor = <[u8; 8]>::try_from(bytes.as_slice())
+        .map(u64::from_be_bytes)
+        .map_err(|_| corrupt("malformed state floor record"))?;
+    if floor == 0 || floor > sequence {
+        return Err(corrupt("state floor record outside the published range"));
+    }
+    Ok(floor)
 }
 
 fn manifest_batch(parent: Option<Head>, manifest: &EngineManifest) -> CommitBatch {
@@ -561,6 +592,17 @@ impl DurableEngine {
         manifest: EngineManifest,
         simulator: Option<simulator::SimulatorIdentity>,
     ) -> Result<Self, DurableError> {
+        let durable = read_floor(store.as_ref(), manifest.sequence)?;
+        if durable > 0 && options.retention == Retention::Archive {
+            return Err(incompatible(format!(
+                "state history below snapshot {durable} is declared pruned; \
+                 archive retention cannot be restored, configure a window"
+            )));
+        }
+        let retention = RetentionState::new(
+            durable,
+            durable.max(options.retention.floor_at(manifest.sequence)),
+        );
         let instance = crate::engine::NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed);
         let context = Arc::new(Context::new(
             store,
@@ -574,6 +616,7 @@ impl DurableEngine {
             genesis.limits,
             &manifest.state,
             Nodes::durable(context.clone()),
+            Some(retention.pin(manifest.sequence)),
         )?;
         Ok(Self {
             context,
@@ -586,6 +629,7 @@ impl DurableEngine {
             state: WriterState::Ready,
             last_preparation: PreparationStats::default(),
             simulator,
+            retention,
         })
     }
 
@@ -615,11 +659,67 @@ impl DurableEngine {
             .ok_or(DurableError::SequenceExhausted)
     }
 
+    /// The lowest snapshot this engine serves. Every earlier one is refused
+    /// with [`EngineError::HistoryPruned`]. Zero under archive retention.
+    pub fn state_floor(&self) -> SnapshotId {
+        SnapshotId::from_sequence(self.retention.floor())
+    }
+
+    /// The retention policy, floors and pins.
+    pub fn retention_status(&self) -> RetentionStatus {
+        RetentionStatus {
+            retention: self.options.retention,
+            floor: self.retention.floor(),
+            durable_floor: self.retention.durable(),
+            lowest_pinned: self.retention.lowest_pinned(),
+            pinned_handles: self.retention.pinned_handles(),
+        }
+    }
+
+    /// Fails with [`EngineError::HistoryPruned`] if `id` is below the floor,
+    /// or [`EngineError::UnknownSnapshot`] if it is above the head. Reads
+    /// nothing from storage.
+    pub fn check_retained(&self, id: SnapshotId) -> Result<(), DurableError> {
+        if id > self.head() {
+            return Err(EngineError::UnknownSnapshot(id).into());
+        }
+        let floor = self.state_floor();
+        if id < floor {
+            return Err(EngineError::HistoryPruned {
+                requested: id,
+                floor,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Opens a retained snapshot. The pin on `id` is registered first and
+    /// the floor is checked after it, before any manifest, object or cache
+    /// access (a refusal releases the pin). This order matters for physical
+    /// deletion, which is bounded by `min(durable floor, lowest pin)`: a
+    /// floor that rises after the check can no longer pass an accepted
+    /// reader unnoticed. The handle keeps the pin until its last clone is
+    /// dropped and keeps reading even if the floor passes it meanwhile.
     pub fn snapshot(&self, id: SnapshotId) -> Result<Snapshot, DurableError> {
+        self.snapshot_hooked(id, &mut || {})
+    }
+
+    /// [`Self::snapshot`] with a hook run between pinning and the floor
+    /// check (tests assert the ordering through it).
+    fn snapshot_hooked(
+        &self,
+        id: SnapshotId,
+        pinned: &mut dyn FnMut(),
+    ) -> Result<Snapshot, DurableError> {
         self.context.generation()?;
         if id > self.head() {
             return Err(EngineError::UnknownSnapshot(id).into());
         }
+        let pin = self.retention.pin(id.sequence());
+        pinned();
+        // On refusal the pin is dropped with the error return.
+        self.check_retained(id)?;
         let manifest = read_manifest(self.context.store.as_ref(), &self.genesis, id.sequence())?;
         Snapshot::from_header(
             id,
@@ -628,6 +728,7 @@ impl DurableEngine {
             self.genesis.limits,
             &manifest.state,
             Nodes::durable(self.context.clone()),
+            Some(pin),
         )
         .map_err(Into::into)
     }
@@ -733,6 +834,17 @@ impl DurableEngine {
             state: header,
         };
         let mut batch = manifest_batch(Some(head_of(&self.manifest)), &manifest);
+        let floor = self
+            .retention
+            .floor()
+            .max(self.options.retention.floor_at(sequence));
+        if floor > 0 {
+            batch.put_record(
+                Table::Meta,
+                retention::floor_key(sequence).into_bytes(),
+                floor.to_be_bytes().to_vec(),
+            );
+        }
         if let Some(packet) = packet {
             packet.append(&mut batch, &manifest)?;
         }
@@ -755,6 +867,7 @@ impl DurableEngine {
             self.genesis.limits,
             &manifest.state,
             Nodes::durable(self.context.clone()),
+            Some(self.retention.pin(sequence)),
         )?;
         self.last_preparation = staging.stats;
         Ok(Prepared {
@@ -763,6 +876,7 @@ impl DurableEngine {
             snapshot,
             info,
             generation,
+            floor,
         })
     }
 
@@ -782,6 +896,7 @@ impl DurableEngine {
                 let p = self.pending.take().expect("prepared checked");
                 self.head = p.snapshot;
                 self.manifest = p.manifest;
+                self.retention.committed(p.floor);
                 self.state = WriterState::Ready;
                 Ok(Publication::Committed(p.info))
             }
@@ -884,6 +999,7 @@ impl DurableEngine {
             published_sequence: self.manifest.sequence,
             resident_manifests: 1 + usize::from(self.pending.is_some()),
             pending_payload_bytes: self.pending.as_ref().map_or(0, |p| p.batch.logical_bytes()),
+            retention: self.retention_status(),
         }
     }
 }
@@ -1083,5 +1199,39 @@ mod ownership_tests {
             assert!(handle.staged_objects().is_empty());
         }
         assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn snapshot_pins_before_checking_the_floor_and_releases_on_refusal() {
+        let store = Arc::new(MemoryVersionedStore::new());
+        let options = Options {
+            retention: Retention::Window(1),
+            ..Options::default()
+        };
+        let Initialization::Committed(mut engine) = DurableEngine::initialize(
+            store,
+            EngineGenesis::new([2; 32], PriceSchedule::FIXTURE),
+            options,
+        )
+        .unwrap() else {
+            panic!("memory initialization commits")
+        };
+        for _ in 0..3 {
+            let branch = engine.begin(engine.head(), None).unwrap();
+            engine.prepare(branch.seal()).unwrap();
+            engine.commit().unwrap();
+        }
+        assert_eq!(engine.state_floor(), SnapshotId::from_sequence(2));
+        for (sequence, accepted) in [(2, true), (1, false)] {
+            let mut seen = None;
+            let result = engine.snapshot_hooked(SnapshotId::from_sequence(sequence), &mut || {
+                seen = engine.retention.lowest_pinned();
+            });
+            // The pin was visible before the floor was read.
+            assert_eq!(seen, Some(sequence));
+            assert_eq!(result.is_ok(), accepted);
+            drop(result);
+            assert_eq!(engine.retention_status().lowest_pinned, Some(3));
+        }
     }
 }

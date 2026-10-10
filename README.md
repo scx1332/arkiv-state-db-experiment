@@ -18,8 +18,11 @@ light followers. It retains transaction bodies in a separate `history.redb`;
 `node.redb` keeps engine state, headers, sanitized metadata and body references.
 The unsigned simulator is a separate binary with its own stores. See the
 [signed profile guide](docs/signed-proposer-v1.md) for local commands, limits,
-storage recovery and validation evidence. There is no consensus, finality or
-pruning implementation.
+storage recovery and validation evidence. There is no consensus or finality
+implementation. Full nodes keep every state snapshot by default;
+`--state-retention <N>` serves state only for the head and the `N` snapshots
+before it and refuses older reads with `HistoryPruned`. Nothing is deleted
+yet; see the [pruning design](docs/pruning-design.md).
 
 The target is Arkiv's blockchain workload: many ordered operations per block,
 one completed block state, and historical queries with proofs. The engine

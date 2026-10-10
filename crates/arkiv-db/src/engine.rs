@@ -213,6 +213,15 @@ pub enum EngineError {
     ForeignCandidate,
     /// No such snapshot has been published.
     UnknownSnapshot(SnapshotId),
+    /// The snapshot is below the durable engine's retention floor: its state
+    /// history is declared pruned and is never served, whether or not its
+    /// objects are still stored (see `durable::Retention`).
+    HistoryPruned {
+        /// The snapshot the caller asked for.
+        requested: SnapshotId,
+        /// The lowest snapshot still served.
+        floor: SnapshotId,
+    },
     /// The checkpoint belongs to another branch or was already rolled past.
     InvalidCheckpoint,
     /// A pricing schedule must carry a larger ID than the one it replaces.
@@ -234,6 +243,12 @@ impl fmt::Display for EngineError {
             }
             Self::ForeignCandidate => write!(formatter, "candidate from another engine"),
             Self::UnknownSnapshot(id) => write!(formatter, "unknown {id}"),
+            Self::HistoryPruned { requested, floor } => write!(
+                formatter,
+                "history pruned: requested {}, floor {}",
+                requested.sequence(),
+                floor.sequence()
+            ),
             Self::InvalidCheckpoint => write!(formatter, "invalid checkpoint"),
             Self::StaleSchedule { current } => {
                 write!(formatter, "schedule id must exceed {current}")
@@ -414,6 +429,8 @@ struct SnapshotState {
     nodes: Nodes,
     /// The state root, computed on first request.
     root: OnceLock<B256>,
+    /// The durable engine's retention pin, released with the last clone.
+    _pin: Option<crate::durable::retention::Pin>,
 }
 
 /// Retains every published snapshot and advances the head by publication.
@@ -506,6 +523,7 @@ impl Engine {
             state,
             nodes: nodes.clone(),
             root: OnceLock::new(),
+            _pin: None,
         };
         Self {
             instance,
@@ -610,6 +628,7 @@ impl Engine {
             state: candidate.state.clone(),
             nodes: self.nodes.clone(),
             root,
+            _pin: None,
         }));
         Ok(id)
     }
@@ -690,6 +709,7 @@ impl Snapshot {
         limits: Limits,
         header: &StateHeader,
         nodes: Nodes,
+        pin: Option<crate::durable::retention::Pin>,
     ) -> Result<Self, StorageError> {
         // Strict decoding checks allocator/handle relations as well as format.
         let header: StateHeader =
@@ -712,6 +732,7 @@ impl Snapshot {
                 state,
                 nodes,
                 root,
+                _pin: pin,
             }),
         })
     }

@@ -30,8 +30,11 @@ the harness patch, the scaled scenarios and the tests.
 - **Ported golem API tests: 9 of 14 pass.** Every failure is either a
   golem-internal system record (`#alloc`, `#recordKeys`, `#roots`) or a
   read of an old commit, where golem returns `CommitUnavailable` and we
-  keep history and return the data. All user-visible record, branch,
-  opening and storage-failure behaviour passes.
+  keep history and return the data. With `ARKIV_STATE_RETENTION=0` (head
+  only, see [pruning design](pruning-design.md)) the old-commit read is
+  `CommitUnavailable` too and only the system-record divergences remain.
+  All user-visible record, branch, opening and storage-failure behaviour
+  passes.
 - **Adapter tests: 6 of 6 pass.** One of them runs seeded random scripts
   on golem-db itself and on both of our backends and finds no difference
   in any call's outcome or `BranchInfo`.
@@ -200,7 +203,10 @@ writers interleave, not how good the engine is.
 - **System records.** golem's `#alloc`, `#recordKeys` and `#roots` have no
   equivalent. `#params` and the other system keys are answered with their
   identity, and `#params` with the genesis limits.
-- **History.** Old commits stay readable. golem returns `CommitUnavailable`.
+- **History.** Under the default archive retention old commits stay
+  readable where golem returns `CommitUnavailable`. A retention window
+  (`ARKIV_STATE_RETENTION=<N>`) refuses commits below `head - N` with
+  `CommitUnavailable`; `0` matches golem.
 - **Roots.** We have one state root with no separate index root, because
   the index is part of the namespace state. `SealInfo::index_root` and
   `OpenInfo::index_root` are zeros. Reporting the namespace's term-map root
@@ -231,4 +237,6 @@ writers interleave, not how good the engine is.
   simulator profile exposes) would make it atomic and remove the offset.
 - **Not supported.** Immutable-data calls return `NotImplemented`, as in
   golem-db. `profile_at` needs `perf`; the scaled scenarios drop it.
-- **No pruning.** Our disk use grows with history.
+- **No physical pruning yet.** A retention window refuses old reads, but
+  nothing is deleted, so disk use still grows with history (see
+  [pruning design](pruning-design.md)).

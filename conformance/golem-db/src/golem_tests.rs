@@ -108,6 +108,7 @@ fn options() -> ArkivOptions {
         redb_cache: 8 << 20,
         object_cache: 8 << 20,
         object_cache_entries: 16_384,
+        retention: ArkivOptions::retention_from_env(),
     }
 }
 
@@ -1165,6 +1166,7 @@ fn crash_db(disk: &CrashDisk, genesis: Genesis) -> ArkivDb {
         redb_cache: 0,
         object_cache: 0,
         object_cache_entries: 0,
+        retention: ArkivOptions::retention_from_env(),
     };
     ArkivDb::open_store(
         Arc::new(store),
@@ -1452,6 +1454,8 @@ fn table_stats_report_redb_tables_and_engine_counts() {
         db.create(branch, input(KEY, 50)).unwrap();
         db.commit(branch).unwrap();
     }
+    // Snapshots 0..=2 (adapter genesis, commit 0, commit 1), as retained.
+    let retained = options().retention.window().map_or(3, |w| (w + 1).min(3));
     let lines = durable.table_stats().unwrap();
     // table,entries,depth,pages,mib
     check!(lines.iter().all(|line| line.split(',').count() == 5));
@@ -1465,7 +1469,7 @@ fn table_stats_report_redb_tables_and_engine_counts() {
     );
     check_eq!(
         is_row(&lines, "snapshots"),
-        Some("snapshots,3,,,".to_string())
+        Some(format!("snapshots,{retained},,,"))
     );
     let lines = memory.table_stats().unwrap();
     check_eq!(
@@ -1474,8 +1478,62 @@ fn table_stats_report_redb_tables_and_engine_counts() {
     );
     check_eq!(
         is_row(&lines, "snapshots"),
-        Some("snapshots,3,,,".to_string())
+        Some(format!("snapshots,{retained},,,"))
     );
     check!(is_row(&lines, "file").is_none());
+    finish();
+}
+
+#[test]
+fn state_retention_window_refuses_commits_below_the_floor() {
+    let options = ArkivOptions {
+        retention: arkiv_db::durable::Retention::Window(1),
+        ..options()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for backend in ["arkiv-redb", "arkiv-memory"] {
+        BACKEND.with(|b| *b.borrow_mut() = backend);
+        let db = if backend == "arkiv-redb" {
+            ArkivDb::open(dir.path(), &config(), options).unwrap()
+        } else {
+            ArkivDb::open_memory(&genesis(), options).unwrap()
+        };
+        for price in [1, 2, 3] {
+            let branch = db.begin().unwrap();
+            if price == 1 {
+                db.create(branch, input(KEY, price)).unwrap();
+            } else {
+                db.patch(
+                    branch,
+                    RecordOp::patch(KEY)
+                        .field("price", CellValue::from_i32(price))
+                        .unwrap(),
+                )
+                .unwrap();
+            }
+            db.commit(branch).unwrap();
+        }
+        check_eq!(db.head().unwrap(), CommitId::new(3));
+        // Head and one commit before it are served; older commits are
+        // refused before any read, as golem-db refuses every non-head commit.
+        for served in [3, 2] {
+            check!(
+                db.get(
+                    ReadTarget::Commit(CommitId::new(served)),
+                    RecordOp::get(KEY)
+                )
+                .is_ok()
+            );
+        }
+        for refused in [1, 0] {
+            check!(matches!(
+                db.get(ReadTarget::Commit(CommitId::new(refused)), RecordOp::get(KEY)),
+                Err(ApiError::CommitUnavailable { requested, head })
+                    if requested.get() == refused && head.get() == 3
+            ));
+        }
+        let lines = db.table_stats().unwrap();
+        check!(lines.iter().any(|line| line == "snapshots,2,,,"));
+    }
     finish();
 }

@@ -254,7 +254,7 @@ async fn run() -> Result<()> {
     let (command, args) = arguments()?;
     if command == "--help" {
         println!(
-            "arkiv-proposer genesis lock CHAIN [--refresh]\narkiv-proposer genesis build CHAIN --out BUNDLE --locked\narkiv-proposer genesis verify BUNDLE\narkiv-proposer keygen --out FILE\narkiv-proposer producer --run-dir DIR --key-file FILE [--listen 127.0.0.1:9500] [--private-listen 127.0.0.1:9501] [--start paused|running] [--source-id UUID] [--chain-id 9001] [--block-period-ms 1000] (--allocations-file FILE | --bundle BUNDLE)\narkiv-proposer full|light --run-dir DIR --peer URL --genesis-hash 0xHEX --proposer 0xADDRESS --chain-id N --source-id UUID --run-id HEX32 [--replication-peer URL] [--bundle BUNDLE]\narkiv-proposer sign --key-file FILE --genesis-file FILE --tx-file FILE --nonce N --out FILE\narkiv-proposer create --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --payload-file FILE --out FILE [--salt 0] [--gas-limit 1000000] [--lifetime-blocks 17280]\narkiv-proposer transfer --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --to 0xADDRESS --amount-wei DECIMAL --out FILE [--gas-limit 21000]\narkiv-proposer submit --peer URL --transaction-file FILE\nOptional private Prometheus exporter: --metrics-listen 127.0.0.1:9600 [--metrics-interval-secs 300] (minimum 10). Metrics use rogue_one_ prefix.\nPrivate listener/full replication use ARKIV_PROPOSER_TOKEN (at least 32 bytes). Producer starts paused. Every chain runs the glm-v2 gas profile with funded accounts. A bundle chain creates the entities namespace (and its prefill) at height 0; a chain created from --allocations-file creates it with the proposer's bootstrap transaction in block 1. Each run exports public genesis.bin/certificate.bin. Sign/create files use native canonical bytes; submit polls pending/included status. Single-proposer authentication supplies no consensus or finality. Bodies are retained in history.redb separately from node.redb."
+            "arkiv-proposer genesis lock CHAIN [--refresh]\narkiv-proposer genesis build CHAIN --out BUNDLE --locked\narkiv-proposer genesis verify BUNDLE\narkiv-proposer keygen --out FILE\narkiv-proposer producer --run-dir DIR --key-file FILE [--listen 127.0.0.1:9500] [--private-listen 127.0.0.1:9501] [--start paused|running] [--source-id UUID] [--chain-id 9001] [--block-period-ms 1000] [--state-retention archive|N] (--allocations-file FILE | --bundle BUNDLE)\narkiv-proposer full|light --run-dir DIR --peer URL --genesis-hash 0xHEX --proposer 0xADDRESS --chain-id N --source-id UUID --run-id HEX32 [--replication-peer URL] [--bundle BUNDLE] [--state-retention archive|N (full only)]\narkiv-proposer sign --key-file FILE --genesis-file FILE --tx-file FILE --nonce N --out FILE\narkiv-proposer create --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --payload-file FILE --out FILE [--salt 0] [--gas-limit 1000000] [--lifetime-blocks 17280]\narkiv-proposer transfer --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --to 0xADDRESS --amount-wei DECIMAL --out FILE [--gas-limit 21000]\narkiv-proposer submit --peer URL --transaction-file FILE\nOptional private Prometheus exporter: --metrics-listen 127.0.0.1:9600 [--metrics-interval-secs 300] (minimum 10). Metrics use rogue_one_ prefix.\nPrivate listener/full replication use ARKIV_PROPOSER_TOKEN (at least 32 bytes). Producer starts paused. Every chain runs the glm-v2 gas profile with funded accounts. A bundle chain creates the entities namespace (and its prefill) at height 0; a chain created from --allocations-file creates it with the proposer's bootstrap transaction in block 1. Each run exports public genesis.bin/certificate.bin. Sign/create files use native canonical bytes; submit polls pending/included status. Single-proposer authentication supplies no consensus or finality. Bodies are retained in history.redb separately from node.redb. --state-retention N serves state (balances, proofs, queries, receipts/logs) only for the head and the N snapshots before it and refuses older heights with HistoryPruned; archive (default) serves every height. Nothing is deleted yet, and a pruned floor never moves back."
         );
         return Ok(());
     }
@@ -288,6 +288,7 @@ async fn run() -> Result<()> {
         "--genesis-hash",
         "--proposer",
         "--run-id",
+        "--state-retention",
     ];
     if args.keys().any(|k| !FLAGS.contains(&k.as_str())) {
         return Err(Error("InvalidRequest"));
@@ -451,6 +452,16 @@ async fn run() -> Result<()> {
     if args.contains_key("--metrics-interval-secs") && !args.contains_key("--metrics-listen") {
         return Err(Error("InvalidRequest"));
     }
+    if command == "light" && args.contains_key("--state-retention") {
+        // A light node keeps headers only; it has no state history to retain.
+        return Err(Error("InvalidRequest"));
+    }
+    let options = Options {
+        retention: get("--state-retention", "archive")
+            .parse()
+            .map_err(|_| Error("InvalidRequest"))?,
+        ..Options::default()
+    };
     let databases = std::cell::RefCell::new(Vec::new());
     let store = |path: &Path| -> Result<Arc<RedbStore>> {
         let opened = store(path)?;
@@ -501,7 +512,7 @@ async fn run() -> Result<()> {
                 return Err(Error("IdentityMismatch"));
             }
             let history = History::open(history_store, genesis.hash())?;
-            Host::open(state, history, &genesis, Some(s), Options::default())?
+            Host::open(state, history, &genesis, Some(s), options.clone())?
         } else {
             let proposed = if let Some((genesis, _)) = &bundle {
                 genesis.clone()
@@ -568,7 +579,7 @@ async fn run() -> Result<()> {
                 parse_uuid(&get("--source-id", "00000000-0000-4000-8000-000000000001"))?,
                 certificate,
                 Some(s),
-                Options::default(),
+                options.clone(),
                 prefill,
             )?
         };
@@ -699,7 +710,7 @@ async fn run() -> Result<()> {
                 History::create(hs, genesis.hash())?
             };
             let mut host = if state.head()?.is_some() {
-                Host::open(state, history, &genesis, None, Options::default())?
+                Host::open(state, history, &genesis, None, options.clone())?
             } else {
                 Host::create_with_prefill(
                     state,
@@ -708,7 +719,7 @@ async fn run() -> Result<()> {
                     parse_uuid(&identity.source_id)?,
                     certificate,
                     None,
-                    Options::default(),
+                    options.clone(),
                     prefill.clone(),
                 )?
             };

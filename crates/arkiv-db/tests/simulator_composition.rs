@@ -191,7 +191,8 @@ fn host_publication_is_atomic_lazy_and_profile_separated() {
         .unwrap();
     let delta = store.stats().since(&before);
     assert_eq!(delta.object_reads(), 0);
-    assert_eq!(delta.record_reads, 9);
+    // Includes the state-floor record of the head.
+    assert_eq!(delta.record_reads, 10);
     assert_eq!(delta.head_reads, 1);
     assert_eq!(e.head_info(), info);
     assert_eq!(e.simulator_block(0).unwrap().bytes, [0; 8]);
@@ -419,7 +420,8 @@ fn long_history_keeps_one_manifest_and_reopens_without_trie_reads() {
     let e = DurableEngine::open_simulator(store.clone(), genesis(), Options::default(), identity())
         .unwrap();
     let delta = store.stats().since(&before);
-    assert_eq!(delta.record_reads, 9);
+    // Includes the state-floor record of the head.
+    assert_eq!(delta.record_reads, 10);
     assert_eq!(delta.object_reads(), 0);
     assert_eq!(e.head(), SnapshotId::from_sequence(1000));
     for h in [0, 1, 17, 999, 1000] {

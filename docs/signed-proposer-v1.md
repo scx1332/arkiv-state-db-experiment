@@ -193,8 +193,11 @@ uses each store's recovery contract and validates the referenced head body.
 A crash before engine publication can leave an orphan history object. It is
 never treated as inclusion and cannot block another body at the same height.
 Missing or corrupt committed body references fail closed. Backups must include
-compatible state and history files. All bodies and snapshots remain retained;
-there is no pruning, compaction, key rotation or snapshot-based bootstrap.
+compatible state and history files. All bodies and snapshots remain stored.
+`--state-retention <N>` (producer and full) only limits which state heights
+are served (older ones are `HistoryPruned`, see the
+[pruning design](pruning-design.md)); there is no physical pruning,
+compaction, key rotation or snapshot-based bootstrap.
 
 ## Validation
 

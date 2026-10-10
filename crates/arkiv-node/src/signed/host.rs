@@ -15,8 +15,8 @@ use crate::{
     },
 };
 use arkiv_db::{
-    Budget, Cost, DecodeError, Decoder, Encoder, OwnerId, SnapshotId, StorageError,
-    StorageErrorKind, decode_exact,
+    Budget, Cost, DecodeError, Decoder, Encoder, OwnerId, StorageError, StorageErrorKind,
+    decode_exact,
     durable::{
         DurableEngine, EngineGenesis, Initialization, Options, Publication, Recovery,
         simulator::{SimulatorIdentity, SimulatorInclusion, SimulatorPacket},
@@ -136,6 +136,8 @@ pub struct Host {
     history: History,
     signer: Option<Signer>,
     pending: Option<Pending>,
+    /// The last state-retention refusal, for API error details.
+    pub refusal: crate::retention::Refusal,
 }
 impl Host {
     #[allow(clippy::too_many_arguments)]
@@ -247,6 +249,7 @@ impl Host {
             history,
             signer,
             pending: None,
+            refusal: Default::default(),
         })
     }
     pub fn open(
@@ -295,12 +298,26 @@ impl Host {
             history,
             signer,
             pending: None,
+            refusal: Default::default(),
         };
         host.block(host.head.height)?;
         if host.signer.is_none() {
             host.health = "following";
         }
         Ok(host)
+    }
+    /// Opens the state after `height`, refusing heights below the state
+    /// floor up front with `HistoryPruned` (details in `refusal`).
+    pub fn state(&self, height: u64) -> Result<arkiv_db::Snapshot> {
+        crate::retention::state(&self.engine, &self.refusal, height)
+    }
+    /// Refuses state at `height` below the floor without opening it.
+    pub fn require_state(&self, height: u64) -> Result<()> {
+        crate::retention::require_state(&self.engine, &self.refusal, height)
+    }
+    /// Refuses receipts/logs of block `height` (they need state `height - 1`).
+    pub fn require_receipts(&self, height: u64) -> Result<()> {
+        crate::retention::require_receipts(&self.engine, &self.refusal, height)
     }
     pub fn is_producer(&self) -> bool {
         self.signer.is_some()
@@ -351,7 +368,7 @@ impl Host {
             .nonce)
     }
     pub fn account(&self, height: u64, actor: OwnerId) -> Result<crate::accounts::Account> {
-        let snapshot = self.engine.snapshot(SnapshotId::from_sequence(height))?;
+        let snapshot = self.state(height)?;
         Ok(self.genesis.accounts.resolve(
             actor,
             snapshot.try_host_get(&crate::accounts::account_key(actor))?,
@@ -360,7 +377,7 @@ impl Host {
     pub fn account_response(&self, height: u64, actor: OwnerId, proof: bool) -> Result<Json> {
         let config = &self.genesis.accounts;
         let certificate = self.certificate(height)?;
-        let snapshot = self.engine.snapshot(SnapshotId::from_sequence(height))?;
+        let snapshot = self.state(height)?;
         let account = self.account(height, actor)?;
         let burnt = crate::accounts::burned(snapshot.try_host_get(&crate::accounts::BURN_KEY)?)?;
         let initial = config
@@ -762,8 +779,7 @@ impl Host {
             return Err(Error("CursorMismatch"));
         }
         Ok(self
-            .engine
-            .snapshot(SnapshotId::from_sequence(header.height))?
+            .state(header.height)?
             .prove_eq(request, proof_limits(), Budget::limit(10_000_000))?
             .bytes)
     }
@@ -777,8 +793,7 @@ impl Host {
             return Err(Error("InvalidRequest"));
         }
         Ok(self
-            .engine
-            .snapshot(SnapshotId::from_sequence(header.height))?
+            .state(header.height)?
             .prove_range(
                 request,
                 crate::simulator::wire::range_proof_limits()?,

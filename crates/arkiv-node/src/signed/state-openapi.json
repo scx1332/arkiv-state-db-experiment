@@ -268,6 +268,26 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "HistoryPruned: the requested height is below this node's state floor (or, on a light node, its peer's).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryPruned"
+                },
+                "examples": {
+                  "HistoryPruned": {
+                    "summary": "HistoryPruned",
+                    "value": {
+                      "error": "HistoryPruned",
+                      "requestedHeight": "3",
+                      "stateFloor": "4"
+                    }
+                  }
+                }
+              }
+            }
           }
         },
         "x-node-roles": [
@@ -830,6 +850,26 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "HistoryPruned: the requested height is below this node's state floor (or, on a light node, its peer's).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryPruned"
+                },
+                "examples": {
+                  "HistoryPruned": {
+                    "summary": "HistoryPruned",
+                    "value": {
+                      "error": "HistoryPruned",
+                      "requestedHeight": "3",
+                      "stateFloor": "4"
+                    }
+                  }
+                }
+              }
+            }
           }
         },
         "parameters": [
@@ -916,6 +956,26 @@
               "text/plain": {
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "HistoryPruned: the requested height is below this node's state floor (or, on a light node, its peer's).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryPruned"
+                },
+                "examples": {
+                  "HistoryPruned": {
+                    "summary": "HistoryPruned",
+                    "value": {
+                      "error": "HistoryPruned",
+                      "requestedHeight": "3",
+                      "stateFloor": "4"
+                    }
+                  }
                 }
               }
             }
@@ -1315,6 +1375,26 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "HistoryPruned: the requested height is below this node's state floor (or, on a light node, its peer's).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryPruned"
+                },
+                "examples": {
+                  "HistoryPruned": {
+                    "summary": "HistoryPruned",
+                    "value": {
+                      "error": "HistoryPruned",
+                      "requestedHeight": "3",
+                      "stateFloor": "4"
+                    }
+                  }
+                }
+              }
+            }
           }
         },
         "requestBody": {
@@ -1462,6 +1542,26 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "HistoryPruned: the requested height is below this node's state floor (or, on a light node, its peer's).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryPruned"
+                },
+                "examples": {
+                  "HistoryPruned": {
+                    "summary": "HistoryPruned",
+                    "value": {
+                      "error": "HistoryPruned",
+                      "requestedHeight": "3",
+                      "stateFloor": "4"
+                    }
+                  }
+                }
+              }
+            }
           }
         },
         "requestBody": {
@@ -1524,6 +1624,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "HistoryPruned: the requested height is below this node's state floor (or, on a light node, its peer's).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryPruned"
+                },
+                "examples": {
+                  "HistoryPruned": {
+                    "summary": "HistoryPruned",
+                    "value": {
+                      "error": "HistoryPruned",
+                      "requestedHeight": "3",
+                      "stateFloor": "4"
+                    }
+                  }
                 }
               }
             }
@@ -1600,6 +1720,26 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "HistoryPruned: the requested height is below this node's state floor (or, on a light node, its peer's).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryPruned"
+                },
+                "examples": {
+                  "HistoryPruned": {
+                    "summary": "HistoryPruned",
+                    "value": {
+                      "error": "HistoryPruned",
+                      "requestedHeight": "3",
+                      "stateFloor": "4"
+                    }
+                  }
+                }
+              }
+            }
           }
         },
         "requestBody": {
@@ -1670,6 +1810,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "HistoryPruned: the requested height is below this node's state floor (or, on a light node, its peer's).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryPruned"
+                },
+                "examples": {
+                  "HistoryPruned": {
+                    "summary": "HistoryPruned",
+                    "value": {
+                      "error": "HistoryPruned",
+                      "requestedHeight": "3",
+                      "stateFloor": "4"
+                    }
+                  }
                 }
               }
             }
@@ -1752,6 +1912,26 @@
                 }
               }
             }
+          },
+          "410": {
+            "description": "HistoryPruned: the requested height is below this node's state floor (or, on a light node, its peer's).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryPruned"
+                },
+                "examples": {
+                  "HistoryPruned": {
+                    "summary": "HistoryPruned",
+                    "value": {
+                      "error": "HistoryPruned",
+                      "requestedHeight": "3",
+                      "stateFloor": "4"
+                    }
+                  }
+                }
+              }
+            }
           }
         },
         "requestBody": {
@@ -1828,6 +2008,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "HistoryPruned: the requested height is below this node's state floor (or, on a light node, its peer's).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryPruned"
+                },
+                "examples": {
+                  "HistoryPruned": {
+                    "summary": "HistoryPruned",
+                    "value": {
+                      "error": "HistoryPruned",
+                      "requestedHeight": "3",
+                      "stateFloor": "4"
+                    }
+                  }
                 }
               }
             }
@@ -2564,7 +2764,7 @@
         ],
         "operationId": "jsonRpc",
         "summary": "Execute SDK and Ethereum-compatible JSON-RPC calls",
-        "description": "Native Ethereum-compatible JSON-RPC over HTTP (also supported over WebSocket at the same path). This is not a complete Ethereum API: hashes are native commitments, not Ethereum MPT roots; arbitrary EVM execution is unsupported. Full/producer nodes read locally; light nodes forward all methods to their peer without proof verification. eth_sendRawTransaction is forwarded by full followers as well. No bearer authentication.\n\nRequests are limited to 1 MiB and responses to 8 MiB. A batch contains 1\u201364 calls. Notifications omit id and produce no response; all-notification requests return HTTP 204. JSON-RPC errors normally return HTTP 200. Block selectors: latest, pending, safe, finalized (all resolve to the native head), earliest, or hexadecimal height. These aliases do not imply Ethereum finality.\n\n### Supported methods\n\n**`web3_clientVersion`** \u2014 Client implementation string.\n\n**`net_version`** \u2014 Decimal chain ID string.\n\n**`net_listening`** \u2014 Always true.\n\n**`eth_chainId`** \u2014 Chain ID as a hexadecimal quantity.\n\n**`eth_blockNumber`** \u2014 Latest height as a hexadecimal quantity.\n\n**`eth_syncing`** \u2014 Always false; use signed status for native node health.\n\n**`eth_gasPrice`** \u2014 Fixed gas price as a hexadecimal quantity.\n\n**`eth_maxPriorityFeePerGas`** \u2014 Always 0x0; priority fees are unsupported.\n\n**`eth_accounts`** \u2014 Empty list; this node does not manage wallet keys.\n\n**`eth_getBalance`** \u2014 Address, optional block selector \u2192 balance in wei as a hexadecimal quantity.\n\n**`eth_getTransactionCount`** \u2014 Address, optional block selector \u2192 nonce; pending includes contiguous pending transactions.\n\n**`eth_getCode`** \u2014 Address, optional block selector \u2192 0x. Arbitrary EVM contracts are unsupported.\n\n**`eth_getBlockByNumber`** \u2014 Block selector, fullTransactions boolean \u2192 native block compatibility object or null.\n\n**`eth_getBlockByHash`** \u2014 Block hash, fullTransactions boolean \u2192 block object or null.\n\n**`eth_getBlockTransactionCountByNumber`** \u2014 Block selector \u2192 transaction count as a hexadecimal quantity.\n\n**`eth_getTransactionByHash`** \u2014 Transaction hash \u2192 committed/pending transaction object or null.\n\n**`eth_getTransactionReceipt`** \u2014 Transaction hash \u2192 committed receipt object or null.\n\n**`eth_getTransactionByBlockNumberAndIndex`** \u2014 Block selector, hexadecimal transaction index \u2192 transaction object or null.\n\n**`eth_sendRawTransaction`** \u2014 Signed Ethereum transaction bytes \u2192 transaction hash. Replace the illustrative 0x with signed EIP-155 legacy or EIP-1559 bytes with an empty access list; forwarded to the producer by full followers and light nodes.\n\n**`eth_estimateGas`** \u2014 Call object, optional latest/pending selector \u2192 gas estimate. Historical simulation is unsupported.\n\n**`eth_call`** \u2014 Arkiv contract call object and optional block selector \u2192 ABI result bytes. Replace illustrative data with ABI call data. Only native Arkiv calls are supported; entityNonce supports historical reads, other simulation requires the current head.\n\n**`eth_getLogs`** \u2014 Log filter \u2192 logs. At most 256 blocks per query; blockHash is mutually exclusive with fromBlock/toBlock.\n\n**`eth_newFilter`** \u2014 Log filter \u2192 process-local filter ID. Filters expire after 15 minutes without access; maximum 1024 filters.\n\n**`eth_newBlockFilter`** \u2014 Creates a block filter and returns its hexadecimal filter ID.\n\n**`eth_uninstallFilter`** \u2014 Filter ID \u2192 boolean indicating removal.\n\n**`eth_getFilterChanges`** \u2014 Filter ID \u2192 new logs or block hashes; advances the filter cursor.\n\n**`eth_getFilterLogs`** \u2014 Log filter ID \u2192 all matching logs within its bounds; block filters are unsupported.\n\n**`eth_feeHistory`** \u2014 Hexadecimal block count, newest block selector, optional ascending percentiles (0\u2013100) \u2192 oldestBlock, baseFeePerGas, gasUsedRatio, reward. Count capped at 1024; at most 100 percentiles; rewards are zero.\n\n**`arkiv_query`** \u2014 Query text and optional options \u2192 {data,blockNumber,cursor?}. Options: atBlock (integer or hexadecimal quantity), limit (1\u2013200; default 100), select, cursor. Explicit atBlock required for continuation; cursors are process-local and expire on eviction/restart. Results are unverified.\n\n**`arkiv_getEntityCount`** \u2014 Optional options object with block (integer height) and query (text) \u2192 JSON integer count. Results are unverified.\n\n**`arkiv_getBlockTiming`** \u2014 Returns current_block, current_block_time and duration as JSON integers; times are seconds.\n\n### Result schemas\n\nBlock reads return RpcBlock or null; transaction reads return RpcTransaction or null; receipts return RpcReceipt or null. Log reads return arrays of RpcLog; eth_getFilterChanges returns RpcLog[] or block-hash strings. eth_feeHistory returns RpcFeeHistory. arkiv_query returns RpcQueryResult containing projected RpcEntity rows; arkiv_getEntityCount returns an integer; arkiv_getBlockTiming returns RpcBlockTiming. Request variants below describe each method\u2019s positional parameters.",
+        "description": "Native Ethereum-compatible JSON-RPC over HTTP (also supported over WebSocket at the same path). This is not a complete Ethereum API: hashes are native commitments, not Ethereum MPT roots; arbitrary EVM execution is unsupported. Full/producer nodes read locally; light nodes forward all methods to their peer without proof verification. eth_sendRawTransaction is forwarded by full followers as well. No bearer authentication.\n\nRequests are limited to 1 MiB and responses to 8 MiB. A batch contains 1\u201364 calls. Notifications omit id and produce no response; all-notification requests return HTTP 204. JSON-RPC errors normally return HTTP 200. Block selectors: latest, pending, safe, finalized (all resolve to the native head), earliest, or hexadecimal height. These aliases do not imply Ethereum finality.\n\n### Supported methods\n\n**`web3_clientVersion`** \u2014 Client implementation string.\n\n**`net_version`** \u2014 Decimal chain ID string.\n\n**`net_listening`** \u2014 Always true.\n\n**`eth_chainId`** \u2014 Chain ID as a hexadecimal quantity.\n\n**`eth_blockNumber`** \u2014 Latest height as a hexadecimal quantity.\n\n**`eth_syncing`** \u2014 Always false; use signed status for native node health.\n\n**`eth_gasPrice`** \u2014 Fixed gas price as a hexadecimal quantity.\n\n**`eth_maxPriorityFeePerGas`** \u2014 Always 0x0; priority fees are unsupported.\n\n**`eth_accounts`** \u2014 Empty list; this node does not manage wallet keys.\n\n**`eth_getBalance`** \u2014 Address, optional block selector \u2192 balance in wei as a hexadecimal quantity.\n\n**`eth_getTransactionCount`** \u2014 Address, optional block selector \u2192 nonce; pending includes contiguous pending transactions.\n\n**`eth_getCode`** \u2014 Address, optional block selector \u2192 0x. Arbitrary EVM contracts are unsupported.\n\n**`eth_getBlockByNumber`** \u2014 Block selector, fullTransactions boolean \u2192 native block compatibility object or null.\n\n**`eth_getBlockByHash`** \u2014 Block hash, fullTransactions boolean \u2192 block object or null.\n\n**`eth_getBlockTransactionCountByNumber`** \u2014 Block selector \u2192 transaction count as a hexadecimal quantity.\n\n**`eth_getTransactionByHash`** \u2014 Transaction hash \u2192 committed/pending transaction object or null.\n\n**`eth_getTransactionReceipt`** \u2014 Transaction hash \u2192 committed receipt object or null.\n\n**`eth_getTransactionByBlockNumberAndIndex`** \u2014 Block selector, hexadecimal transaction index \u2192 transaction object or null.\n\n**`eth_sendRawTransaction`** \u2014 Signed Ethereum transaction bytes \u2192 transaction hash. Replace the illustrative 0x with signed EIP-155 legacy or EIP-1559 bytes with an empty access list; forwarded to the producer by full followers and light nodes.\n\n**`eth_estimateGas`** \u2014 Call object, optional latest/pending selector \u2192 gas estimate. Historical simulation is unsupported.\n\n**`eth_call`** \u2014 Arkiv contract call object and optional block selector \u2192 ABI result bytes. Replace illustrative data with ABI call data. Only native Arkiv calls are supported; entityNonce supports historical reads, other simulation requires the current head.\n\n**`eth_getLogs`** \u2014 Log filter \u2192 logs. At most 256 blocks per query; blockHash is mutually exclusive with fromBlock/toBlock.\n\n**`eth_newFilter`** \u2014 Log filter \u2192 process-local filter ID. Filters expire after 15 minutes without access; maximum 1024 filters.\n\n**`eth_newBlockFilter`** \u2014 Creates a block filter and returns its hexadecimal filter ID.\n\n**`eth_uninstallFilter`** \u2014 Filter ID \u2192 boolean indicating removal.\n\n**`eth_getFilterChanges`** \u2014 Filter ID \u2192 new logs or block hashes; advances the filter cursor.\n\n**`eth_getFilterLogs`** \u2014 Log filter ID \u2192 all matching logs within its bounds; block filters are unsupported.\n\n**`eth_feeHistory`** \u2014 Hexadecimal block count, newest block selector, optional ascending percentiles (0\u2013100) \u2192 oldestBlock, baseFeePerGas, gasUsedRatio, reward. Count capped at 1024; at most 100 percentiles; rewards are zero.\n\n**`arkiv_query`** \u2014 Query text and optional options \u2192 {data,blockNumber,cursor?}. Options: atBlock (integer or hexadecimal quantity), limit (1\u2013200; default 100), select, cursor. Explicit atBlock required for continuation; cursors are process-local and expire on eviction/restart. Results are unverified.\n\n**`arkiv_getEntityCount`** \u2014 Optional options object with block (integer height) and query (text) \u2192 JSON integer count. Results are unverified.\n\n**`arkiv_getBlockTiming`** \u2014 Returns current_block, current_block_time and duration as JSON integers; times are seconds.\n\n### Result schemas\n\nBlock reads return RpcBlock or null; transaction reads return RpcTransaction or null; receipts return RpcReceipt or null. Log reads return arrays of RpcLog; eth_getFilterChanges returns RpcLog[] or block-hash strings. eth_feeHistory returns RpcFeeHistory. arkiv_query returns RpcQueryResult containing projected RpcEntity rows; arkiv_getEntityCount returns an integer; arkiv_getBlockTiming returns RpcBlockTiming. Request variants below describe each method\u2019s positional parameters.\n\n### State retention\n\nA full node started with --state-retention N serves state only at heights >= stateFloor = head - N (status stateFloor; it never decreases). Reads of older state (eth_getBalance, eth_getTransactionCount, eth_call entityNonce, arkiv_getEntityCount, arkiv_query, including later pages of an arkiv_query cursor) fail with code -32001, message \"history pruned: requested N, floor F\" and data {requested, floor}. Logs, receipts and block objects of block h (logsBloom) are derived from state h-1, so eth_getLogs, eth_getFilterLogs/Changes, eth_getTransactionReceipt and eth_getBlockByNumber/ByHash refuse blocks below receiptFloor = stateFloor+1 (block 0 is always served); the whole eth_getLogs range is checked up front. Body-only reads (eth_getTransactionByHash, eth_getTransactionByBlockNumberAndIndex, eth_getBlockTransactionCountByNumber, eth_feeHistory, block filters, eth_getCode) are served at every height. A WebSocket subscription whose replay position falls below the floor receives one eth_subscription notification carrying params.error (code -32001) and is closed. Archive retention (the default) serves every height.",
         "requestBody": {
           "required": true,
           "content": {
@@ -4111,6 +4311,51 @@
               "headers-only"
             ]
           },
+          "stateRetention": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "archive",
+              "window",
+              null
+            ],
+            "description": "State history policy of a full/producer node (--state-retention); null on a light node, which keeps no state and inherits its peer's retention."
+          },
+          "stateRetentionWindow": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DecimalString"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Window N for stateRetention=window: the head and the N heights before it are served. null for archive and light."
+          },
+          "stateFloor": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DecimalString"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Lowest height whose state (balances, nonces, proofs, queries, state tree) is served; lower heights answer HistoryPruned. 0 for archive; it never decreases. null on a light node."
+          },
+          "receiptFloor": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DecimalString"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Lowest block whose receipts, logs and JSON-RPC block objects (logsBloom) are served: stateFloor+1 when stateFloor>0, else 0 (logs of block h are derived from state h-1; block 0 has none). Headers and bodies are always retained in full. null on a light node."
+          },
           "proofProfiles": {
             "type": "array",
             "items": {
@@ -4140,6 +4385,10 @@
           "head",
           "durability",
           "bodyRetention",
+          "stateRetention",
+          "stateRetentionWindow",
+          "stateFloor",
+          "receiptFloor",
           "proofProfiles",
           "capabilities"
         ]
@@ -6758,14 +7007,34 @@
             "properties": {
               "code": {
                 "type": "integer",
-                "description": "-32700 parse error; -32600 invalid request; -32601 unknown method; -32602 invalid params; 3 execution reverted; -32000 runtime error."
+                "description": "-32700 parse error; -32600 invalid request; -32601 unknown method; -32602 invalid params; 3 execution reverted; -32001 history pruned (state below the node's retention floor; message \"history pruned: requested N, floor F\"); -32000 runtime error."
               },
               "message": {
                 "type": "string"
               },
               "data": {
-                "type": "string",
-                "description": "Optional ABI-encoded revert data."
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "description": "Optional ABI-encoded revert data."
+                  },
+                  {
+                    "type": "object",
+                    "description": "HistoryPruned details: requested height and the floor that refused it (the state floor, or for receipts/logs/block objects the receipt floor), as hexadecimal quantities.",
+                    "properties": {
+                      "requested": {
+                        "$ref": "#/components/schemas/RpcQuantity"
+                      },
+                      "floor": {
+                        "$ref": "#/components/schemas/RpcQuantity"
+                      }
+                    },
+                    "required": [
+                      "requested",
+                      "floor"
+                    ]
+                  }
+                ]
               }
             }
           }
@@ -8867,6 +9136,25 @@
           "proofTrust"
         ],
         "additionalProperties": true
+      },
+      "HistoryPruned": {
+        "type": "object",
+        "description": "State history below the node's retention floor is declared pruned (--state-retention). The refusal is checked before any state access and never falls back to the head. A full node includes the requested height and its current floor; a light node relays its peer's refusal without details. Compare GET /signed/v1/status stateFloor.",
+        "properties": {
+          "error": {
+            "const": "HistoryPruned"
+          },
+          "requestedHeight": {
+            "$ref": "#/components/schemas/DecimalString"
+          },
+          "stateFloor": {
+            "$ref": "#/components/schemas/DecimalString"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false
       }
     },
     "securitySchemes": {

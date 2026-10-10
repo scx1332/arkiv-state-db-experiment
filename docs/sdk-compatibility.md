@@ -109,7 +109,10 @@ block entries and one million transaction entries. Hitting the cap disables
 hash lookup with an explicit RPC error, without stopping native chain startup or
 production. Rebuilding this derived index adds work proportional to retained
 history at startup. It does not replace the
-retained canonical data. This first adapter has no pruning or snapshot bootstrap.
+retained canonical data. Bodies are never pruned, so the index covers every
+block; with `--state-retention` logs and receipts below `receiptFloor` are
+refused with JSON-RPC error -32001 (see the [pruning design](pruning-design.md)).
+There is no snapshot bootstrap.
 
 ## Validation
 

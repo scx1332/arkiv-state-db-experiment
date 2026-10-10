@@ -110,6 +110,11 @@ Environment variables:
 - `ARKIV_OBJECT_CACHE_MIB` and `ARKIV_OBJECT_CACHE_ENTRIES`: the engine's
   decoded-node cache. They default to `durable::Options::default()`,
   8 MiB and 16,384 entries.
+- `ARKIV_STATE_RETENTION`: `archive` (default; also when empty) or a state
+  history window in commits. `0` serves only the head, as golem-db does: an
+  older `Commit(n)` is `CommitUnavailable`. Both arkiv backends apply it; see
+  [the pruning design](../../docs/pruning-design.md). The ported tests read
+  it too.
 
 ### `table_log` on the arkiv backends
 
@@ -123,7 +128,7 @@ in the harness's `table,entries,depth,pages,mib` shape:
 | `unaccounted` | allocated pages outside the tables: redb's table directory, allocator state, pages freed by recent commits |
 | `free`, `file` | file pages not allocated, and the whole file |
 | `object-cache` | the engine's decoded-node cache: entries and payload MiB |
-| `live:records`, `live:terms`, `snapshots` | engine counts at head: records, index terms, retained snapshots (entries only) |
+| `live:records`, `live:terms`, `snapshots` | engine counts at head: records, index terms, retained snapshots from the head down to the state floor (entries only) |
 
 The memory backend logs only the last three rows.
 
@@ -133,7 +138,8 @@ The memory backend logs only the last three rows.
 cargo test -p golemdb-harness golem_tests -- --test-threads=1
 ```
 
-Expected result: 20 tests, 15 pass and 5 fail.
+Expected result: 21 tests, 16 pass and 5 fail, both with the default
+archive retention and with `ARKIV_STATE_RETENTION=0`.
 
 Ported from golem-db (`facade.rs`, `facade_errors.rs`, `opening.rs`,
 `immutable_data.rs`): 14 tests. They run on both arkiv backends, or on the
@@ -142,11 +148,12 @@ ports. The 5 failures come only from these divergences:
 
 - **golem-internal system records.** `#alloc` and its next record id, the
   `#recordKeys` binding and the `#roots` cell have no engine counterpart.
-- **Old commits stay readable.** Reading an old `Commit(n)` returns data
-  where golem expects `CommitUnavailable`, because this engine keeps every
-  snapshot.
+- **Old commits stay readable** under the default archive retention:
+  reading an old `Commit(n)` returns data where golem expects
+  `CommitUnavailable`. With `ARKIV_STATE_RETENTION=0` this divergence
+  disappears (the same 5 tests still fail on the system records alone).
 
-Adapter tests (6, all pass):
+Adapter tests (7, all pass):
 
 - `branch_version_and_outcomes_match_golem_db_on_random_scripts` runs the
   same seeded random scripts (creates, patches, removes, empty patches,
@@ -156,8 +163,10 @@ Adapter tests (6, all pass):
 - `every_golem_cell_type_round_trips_as_attribute_and_field`,
   `empty_patch_is_a_no_op_or_not_found_without_an_adapter_read`,
   `blake3_genesis_is_refused_at_open`,
-  `genesis_cell_limits_are_enforced_by_the_engine` and
-  `table_stats_report_redb_tables_and_engine_counts`.
+  `genesis_cell_limits_are_enforced_by_the_engine`,
+  `table_stats_report_redb_tables_and_engine_counts` and
+  `state_retention_window_refuses_commits_below_the_floor` (window 1: the
+  head and one older commit are served, older ones are `CommitUnavailable`).
 
 A failing test prints each divergent check with its line number.
 

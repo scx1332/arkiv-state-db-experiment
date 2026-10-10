@@ -28,6 +28,14 @@
 //!
 //! Two storage backends: the volatile in-memory `Engine` and the durable
 //! `DurableEngine` on a `RedbStore` file.
+//!
+//! History: the durable backend serves `ReadTarget::Commit(n)` for every
+//! commit its state retention keeps (`ArkivOptions::retention`, default
+//! archive; `ARKIV_STATE_RETENTION=archive|<N>` in the harness and the
+//! ported tests). A commit below the engine's state floor, like a future
+//! one, is `CommitUnavailable`, checked before any read. With a window of 0
+//! only the head is readable, which is golem-db's behaviour. The in-memory
+//! backend keeps every commit in memory but applies the same floor.
 
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
@@ -37,7 +45,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use arkiv_db::durable::{
     DurableEngine, DurableError, EngineGenesis, Initialization, Options, Publication, Recovery,
-    WriterState,
+    Retention, WriterState,
 };
 use arkiv_db::{
     Branch, Budget, Cell, CellKind as ArkivKind, CellName as ArkivName, Checkpoint, Effect, Engine,
@@ -77,6 +85,21 @@ pub struct ArkivOptions {
     /// Engine encoded-object cache, bytes and entries.
     pub object_cache: usize,
     pub object_cache_entries: usize,
+    /// State-history retention of the durable backend (archive by default).
+    pub retention: Retention,
+}
+
+impl ArkivOptions {
+    /// `ARKIV_STATE_RETENTION` (`archive` or a window in commits) if set and
+    /// nonempty, else archive.
+    pub fn retention_from_env() -> Retention {
+        match std::env::var("ARKIV_STATE_RETENTION") {
+            Ok(value) if !value.is_empty() => value
+                .parse()
+                .unwrap_or_else(|e| panic!("ARKIV_STATE_RETENTION: {e}")),
+            _ => Retention::Archive,
+        }
+    }
 }
 
 impl Default for ArkivOptions {
@@ -86,6 +109,7 @@ impl Default for ArkivOptions {
             // The engine's own defaults (durable::Options::default()).
             object_cache: 8 << 20,
             object_cache_entries: 16_384,
+            retention: Retention::Archive,
         }
     }
 }
@@ -140,38 +164,47 @@ struct Durable {
 }
 
 enum Backend {
-    Memory(Engine),
+    /// The volatile engine keeps every snapshot; the adapter applies the
+    /// retention floor to its reads so both backends answer alike.
+    Memory(Engine, Retention),
     Durable(Box<Durable>),
 }
 
 impl Backend {
     fn head(&self) -> SnapshotId {
         match self {
-            Self::Memory(e) => e.head(),
+            Self::Memory(e, _) => e.head(),
             Self::Durable(d) => d.engine.head(),
         }
     }
     fn head_snapshot(&self) -> Snapshot {
         match self {
-            Self::Memory(e) => e.head_snapshot(),
+            Self::Memory(e, _) => e.head_snapshot(),
             Self::Durable(d) => d.engine.head_snapshot(),
         }
     }
     fn snapshot(&self, id: SnapshotId) -> Result<Snapshot> {
         match self {
-            Self::Memory(e) => e.snapshot(id).map_err(engine),
+            Self::Memory(e, _) => e.snapshot(id).map_err(engine),
             Self::Durable(d) => d.engine.snapshot(id).map_err(durable),
+        }
+    }
+    /// The lowest snapshot the backend serves.
+    fn floor(&self) -> u64 {
+        match self {
+            Self::Memory(e, retention) => retention.floor_at(e.head().sequence()),
+            Self::Durable(d) => d.engine.state_floor().sequence(),
         }
     }
     fn begin(&self, base: SnapshotId) -> Result<Branch> {
         match self {
-            Self::Memory(e) => e.begin(base, None).map_err(engine),
+            Self::Memory(e, _) => e.begin(base, None).map_err(engine),
             Self::Durable(d) => d.engine.begin(base, None).map_err(durable),
         }
     }
     fn state_root(&self) -> [u8; 32] {
         match self {
-            Self::Memory(e) => e.head_snapshot().state_root().0,
+            Self::Memory(e, _) => e.head_snapshot().state_root().0,
             Self::Durable(d) => d.engine.head_info().state_root.0,
         }
     }
@@ -309,16 +342,17 @@ fn durable_options(options: &ArkivOptions) -> Options {
         prepare_bytes: 1 << 30,
         prepare_objects: 4_000_000,
         prepare_visits: 100_000_000,
+        retention: options.retention,
     }
 }
 
 impl ArkivDb {
     /// Volatile engine; all history retained in memory.
-    pub fn open_memory(genesis: &Genesis, _options: ArkivOptions) -> OpenResult<Self> {
+    pub fn open_memory(genesis: &Genesis, options: ArkivOptions) -> OpenResult<Self> {
         let engine_genesis = engine_genesis(genesis)?;
         let engine = Engine::with_limits(PriceSchedule::FIXTURE, engine_genesis.limits);
         Self::setup(
-            Backend::Memory(engine),
+            Backend::Memory(engine, options.retention),
             None,
             genesis,
             &engine_genesis,
@@ -497,7 +531,7 @@ impl ArkivDb {
         };
         let candidate = branch.try_seal().map_err(|e| failed(engine(e)))?;
         match &mut backend {
-            Backend::Memory(e) => {
+            Backend::Memory(e, _) => {
                 e.publish(&candidate).map_err(|e| failed(engine(e)))?;
             }
             Backend::Durable(d) => {
@@ -546,7 +580,9 @@ impl ArkivDb {
         let mut lines = Vec::new();
         let mib = |bytes: u64| bytes as f64 / (1u64 << 20) as f64;
         let snapshots = match &*backend {
-            Backend::Memory(e) => e.snapshot_count() as u64,
+            Backend::Memory(e, retention) => {
+                e.snapshot_count() as u64 - retention.floor_at(e.head().sequence())
+            }
             Backend::Durable(d) => {
                 let spaces = [
                     ("catalog", SpaceId::Catalog),
@@ -596,7 +632,8 @@ impl ArkivDb {
                     stats.cache.entries,
                     mib(stats.cache.retained_bytes as u64)
                 ));
-                d.engine.snapshot_count().map_err(durable)?
+                // Retained snapshots: the head down to the state floor.
+                d.engine.snapshot_count().map_err(durable)? - d.engine.state_floor().sequence()
             }
         };
         let count = |n: Option<usize>| n.unwrap_or(0);
@@ -1168,8 +1205,9 @@ impl Api for ArkivDb {
                         ReadTarget::Commit(requested) => {
                             match requested.get().checked_add(self.offset) {
                                 Some(seq) if seq == head.sequence() => backend.head_snapshot(),
-                                // Unlike golem-db, the engine keeps history.
-                                Some(seq) if seq < head.sequence() => {
+                                // Unlike golem-db, the engine keeps history
+                                // down to its retention floor (checked first).
+                                Some(seq) if seq < head.sequence() && seq >= backend.floor() => {
                                     backend.snapshot(SnapshotId::from_sequence(seq))?
                                 }
                                 _ => {
@@ -1376,7 +1414,7 @@ impl Api for ArkivDb {
                 let live = slot.live.take().expect("rebuilt");
                 let candidate = live.branch.try_seal().map_err(engine)?;
                 let published = match &mut *backend {
-                    Backend::Memory(e) => match e.publish(&candidate) {
+                    Backend::Memory(e, _) => match e.publish(&candidate) {
                         Ok(id) => Ok(id),
                         Err(EngineError::StaleHead { .. }) => Err(ApiError::Conflict),
                         Err(error) => Err(engine(error)),

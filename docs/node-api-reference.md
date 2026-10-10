@@ -62,6 +62,16 @@ The `GET /` operation describes a WebSocket upgrade and includes the
 sessions. The private control GET alias requires a JSON body and is not usable
 with browser Fetch; use POST for control operations.
 
+State history is served according to the node's `--state-retention`
+(archive by default). `status` reports `stateRetention`,
+`stateRetentionWindow`, `stateFloor` and `receiptFloor`. State reads below
+`stateFloor`, and logs, receipts and block JSON (which carries `logsBloom`)
+below `receiptFloor`, are refused: REST answers `410 Gone` with
+`{"error":"HistoryPruned","requestedHeight":"N","stateFloor":"F"}`, JSON-RPC
+answers code `-32001` with message `history pruned: requested N, floor F`
+and hex `data.requested`/`data.floor`. Bodies, headers and transactions stay
+available at every height. See the [pruning design](pruning-design.md).
+
 The existing [tree exploration guide](state-tree-explorer-api.md) explains
 navigating catalog, records, keys, rows, terms and postings. Tree responses are
 diagnostic data, not light-node proofs.

@@ -209,6 +209,7 @@ async fn session(mut socket: WebSocket, rt: Shared) {
             }
             _ = tick.tick(), if !subscriptions.is_empty() => {
                 let head = match rt.node.try_lock() { Ok(node) => node.head().height, Err(_) => continue };
+                let mut pruned = Vec::new();
                 for (id, subscription) in &mut subscriptions {
                     if head.saturating_sub(subscription.next_height) > MAX_LAG { return }
                     // Bound work per tick so socket input and unsubscribe remain responsive.
@@ -224,6 +225,13 @@ async fn session(mut socket: WebSocket, rt: Shared) {
                             json!({"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":[format!("0x{height:x}"),false]})
                         };
                         let answer = rpc::handle_request(&rt,request).await;
+                        if answer["error"]["code"] == rpc::HISTORY_PRUNED_CODE {
+                            // The replay position fell below the retention floor:
+                            // end the subscription explicitly, never skip events.
+                            if !send(&mut socket,&json!({"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":id,"error":answer["error"]}})).await { return }
+                            pruned.push(id.clone());
+                            break;
+                        }
                         if answer.get("error").is_some() {
                             // Retain the next height and retry; never silently skip an event.
                             break;
@@ -243,6 +251,9 @@ async fn session(mut socket: WebSocket, rt: Shared) {
                         let Some(next) = height.checked_add(1) else { return };
                         subscription.next_height = next;
                     }
+                }
+                for id in pruned {
+                    subscriptions.remove(&id);
                 }
             }
         }

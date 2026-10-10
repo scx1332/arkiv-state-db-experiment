@@ -114,6 +114,12 @@ fn head_json(h: &crate::Header) -> Json {
     json!({"height":h.height.to_string(),"hash":hex(h.hash().as_slice()),"stateRoot":hex(h.state_root.as_slice())})
 }
 pub fn status(node: &Node) -> Json {
+    let retention = match node {
+        Node::Full(h) => crate::retention::status(&h.engine),
+        Node::Light(_) => {
+            json!({"stateRetention":null,"stateRetentionWindow":null,"stateFloor":null,"receiptFloor":null})
+        }
+    };
     let (id, head, paused, health, role, revision, workload, observed, memory) = match node {
         Node::Full(h) => {
             let stats = h.engine.stats();
@@ -141,7 +147,11 @@ pub fn status(node: &Node) -> Json {
             json!({"engineCacheBytes":"0","engineCacheEntries":0,"engineCacheHits":"0","engineCacheMisses":"0","residentManifests":0}),
         ),
     };
-    json!({"apiVersion":1,"feedVersion":1,"sourceId":id.source_id,"runId":id.run_id,"genesisHash":id.genesis_hash,"chainId":id.chain_id,"sourceKind":"arkiv-native-simulator","authentication":"unsigned-simulator-v1","durability":"durable","head":head_json(head),"paused":paused,"health":health,"role":role,"configRevision":revision.to_string(),"projectionVersion":arkiv_db::LAYOUT_VERSION,"blockFormatVersion":crate::block::FORMAT_VERSION,"protocolVersion":crate::block::PROTOCOL_VERSION,"coverage":{"from":"0","through":head.height.to_string(),"complete":true},"proofProfiles":[super::profile::PROOF_PROFILE],"capabilities":super::profile::capabilities(&crate::demo::workload::genesis(0, 0).limits),"limits":{"feedPageBytes":FEED_CAP.to_string(),"pageItems":HEADER_BATCH},"workload":workload,"memory":memory,"observedPeerHeight":observed.to_string()})
+    let mut value = json!({"apiVersion":1,"feedVersion":1,"sourceId":id.source_id,"runId":id.run_id,"genesisHash":id.genesis_hash,"chainId":id.chain_id,"sourceKind":"arkiv-native-simulator","authentication":"unsigned-simulator-v1","durability":"durable","head":head_json(head),"paused":paused,"health":health,"role":role,"configRevision":revision.to_string(),"projectionVersion":arkiv_db::LAYOUT_VERSION,"blockFormatVersion":crate::block::FORMAT_VERSION,"protocolVersion":crate::block::PROTOCOL_VERSION,"coverage":{"from":"0","through":head.height.to_string(),"complete":true},"proofProfiles":[super::profile::PROOF_PROFILE],"capabilities":super::profile::capabilities(&crate::demo::workload::genesis(0, 0).limits),"limits":{"feedPageBytes":FEED_CAP.to_string(),"pageItems":HEADER_BATCH},"workload":workload,"memory":memory,"observedPeerHeight":observed.to_string()});
+    if let (Some(value), Json::Object(fields)) = (value.as_object_mut(), retention) {
+        value.extend(fields);
+    }
+    value
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -292,7 +302,25 @@ fn read(node: &Node, path: &str, q: &ReadQuery, storage: Option<&std::path::Path
     }
     Err(Error("InvalidRequest"))
 }
+/// Details of this request's `HistoryPruned` refusal, recorded on the host
+/// while the request held the node lock.
+fn refusal(rt: &Shared, result: &Result<Json>) -> Option<(u64, u64)> {
+    if !matches!(result, Err(Error("HistoryPruned"))) {
+        return None;
+    }
+    match &*rt.node.try_lock().ok()? {
+        Node::Full(host) => host.refusal.take(),
+        Node::Light(_) => None,
+    }
+}
+fn respond(rt: &Shared, result: Result<Json>, cap: usize) -> Response {
+    let refusal = refusal(rt, &result);
+    response_with(result, cap, refusal)
+}
 fn response(result: Result<Json>, cap: usize) -> Response {
+    response_with(result, cap, None)
+}
+fn response_with(result: Result<Json>, cap: usize, refusal: Option<(u64, u64)>) -> Response {
     match result.and_then(|v| json_bytes(&v, cap)) {
         Ok(bytes) => (
             StatusCode::OK,
@@ -303,6 +331,7 @@ fn response(result: Result<Json>, cap: usize) -> Response {
         Err(Error(code)) => {
             let status = match code {
                 "Unauthorized" => StatusCode::UNAUTHORIZED,
+                "HistoryPruned" => StatusCode::GONE,
                 "UnknownRun" | "UnknownBlock" | "NamespaceNotFound" => StatusCode::NOT_FOUND,
                 "IdentityMismatch"
                 | "BlockNotSynced"
@@ -321,7 +350,11 @@ fn response(result: Result<Json>, cap: usize) -> Response {
                 }
                 _ => StatusCode::BAD_REQUEST,
             };
-            (status, axum::Json(json!({"error":code}))).into_response()
+            (
+                status,
+                axum::Json(crate::retention::error_body(code, refusal)),
+            )
+                .into_response()
         }
     }
 }
@@ -400,6 +433,7 @@ async fn http_post(State(rt): State<Shared>, Path(path): Path<String>, body: Bod
             Ok(Ok(b)) => b,
             _ => return response(Err(Error("InvalidRequest")), 1024),
         };
+    let shared = rt.clone();
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let n = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
@@ -428,7 +462,7 @@ async fn http_post(State(rt): State<Shared>, Path(path): Path<String>, body: Bod
     })
     .await
     .unwrap_or(Err(Error("StorageUnavailable")));
-    response(result, RESPONSE_CAP)
+    respond(&shared, result, RESPONSE_CAP)
 }
 fn authorized(rt: &Runtime, headers: &HeaderMap) -> bool {
     let Some(expected) = rt.admin_token.as_deref().filter(|s| s.len() >= 32) else {
@@ -551,6 +585,7 @@ async fn fetch_authorized<T: serde::de::DeserializeOwned>(
             Some("UnknownBlock") => "UnknownBlock",
             Some("NamespaceNotFound") => "NamespaceNotFound",
             Some("CursorMismatch") => "CursorMismatch",
+            Some("HistoryPruned") => "HistoryPruned",
             Some("ChainConflict") => "ChainConflict",
             Some("IdentityMismatch") => "IdentityMismatch",
             Some("BlockNotSynced") => "BlockNotSynced",

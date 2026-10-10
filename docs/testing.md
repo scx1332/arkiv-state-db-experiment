@@ -86,6 +86,23 @@ files in `crates/arkiv-node/tests/`, also described below. The proof and
 availability acceptance cases further down are planned and do not describe
 guarantees established by the current suite.
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and on pull requests
+with Rust 1.90.0 (the workspace `rust-version`): `cargo fmt` and
+`cargo clippy --all-targets -- -D warnings` on the maintained crates (the
+commands under "Development" in the README), then
+`cargo test --workspace`. The `#[ignore]`d heavy and opt-in tests are not
+run.
+
+`.github/workflows/golem-conformance.yml` builds the
+[golem-db conformance kit](../conformance/golem-db/README.md#ci) in the
+harness at the pinned revisions (harness `686ddfc`, golem-db `57c48ca`, set
+as `HARNESS_REV` and `GOLEM_DB_REV` in the workflow), checks the ported
+golem-db tests against `conformance/golem-db/expected-failures.txt` and
+smoke-runs two small scenarios on each backend. A weekly non-gating job
+repeats this at the harness's and golem-db's latest revisions.
+
 ## Current coverage
 
 ### Raw KV tests (unchanged)

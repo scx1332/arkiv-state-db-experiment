@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The workspace MSRV (Cargo.toml rust-version) and the local toolchain.
+  RUST_TOOLCHAIN: 1.90.0
+  CARGO_TERM_COLOR: always
+  # The maintained crates; vendor/alloy-trie is copied upstream source and is
+  # excluded from formatting and Clippy (see README.md "Development").
+  PACKAGES: >-
+    -p arkiv-db -p arkiv-db-storage -p arkiv-db-memory -p arkiv-db-redb
+    -p arkiv-db-trie -p arkiv-node -p reth-trie
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+
+      - name: cargo fmt
+        run: cargo fmt $PACKAGES -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --offline --locked --all-targets $PACKAGES -- -D warnings
+
+      - name: cargo test
+        run: cargo test --offline --locked --workspace

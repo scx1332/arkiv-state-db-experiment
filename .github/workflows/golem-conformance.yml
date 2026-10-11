@@ -5,7 +5,7 @@ name: golem-db conformance
 
 on:
   push:
-    branches: [main]
+    branches: [main, "experimental-*"]
   pull_request:
   workflow_dispatch:
   schedule:

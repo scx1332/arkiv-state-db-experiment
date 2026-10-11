@@ -29,8 +29,8 @@ use arkiv_db::proof::{
     EqQuery, EqRequest, ProofLimits, RangeProofLimits, RangeQuery, RangeRequest, SnapshotRef,
 };
 use arkiv_db::{
-    B256, Budget, Cell, CellName, Effect, NamespaceName, OwnerId, PriceSchedule,
-    RecordKey, Value, WriteOp,
+    B256, Budget, Cell, CellName, Effect, NamespaceName, OwnerId, PriceSchedule, RecordKey, Value,
+    WriteOp,
 };
 use arkiv_db_redb::{RedbConfig, RedbStore};
 use arkiv_db_storage::versioned::VersionedStore;
@@ -53,8 +53,18 @@ impl Rng {
 }
 
 const WORDS: [&str; 12] = [
-    "red", "green", "blue", "cyan", "amber", "violet", "ok", "pending", "done", "archived",
-    "x", "teal-blue",
+    "red",
+    "green",
+    "blue",
+    "cyan",
+    "amber",
+    "violet",
+    "ok",
+    "pending",
+    "done",
+    "archived",
+    "x",
+    "teal-blue",
 ];
 
 fn name(text: &str) -> CellName {
@@ -89,12 +99,18 @@ fn cells(workload: &str, i: u64, rng: &mut Rng) -> Vec<(CellName, Cell)> {
             addr[12..].copy_from_slice(&rng.below(500).to_be_bytes());
             vec![
                 (name("created"), Cell::attribute(Value::U64(i))),
-                (name("owner"), Cell::attribute(Value::U64(rng.below(10_000)))),
+                (
+                    name("owner"),
+                    Cell::attribute(Value::U64(rng.below(10_000))),
+                ),
                 (
                     name("delta"),
                     Cell::attribute(Value::I64(rng.below(2_000) as i64 - 1_000)),
                 ),
-                (name("flag"), Cell::attribute(Value::Bool(rng.below(2) == 0))),
+                (
+                    name("flag"),
+                    Cell::attribute(Value::Bool(rng.below(2) == 0)),
+                ),
                 (name("amount"), Cell::attribute(Value::U256(word))),
                 (name("account"), Cell::attribute(Value::Addr(addr))),
             ]
@@ -109,8 +125,14 @@ fn cells(workload: &str, i: u64, rng: &mut Rng) -> Vec<(CellName, Cell)> {
                     Cell::attribute(Value::str(&format!("type-{:02}", rng.below(20)))),
                 ),
                 (name("created"), Cell::attribute(Value::U64(i))),
-                (name("owner"), Cell::attribute(Value::U64(rng.below(10_000)))),
-                (name("flag"), Cell::attribute(Value::Bool(rng.below(2) == 0))),
+                (
+                    name("owner"),
+                    Cell::attribute(Value::U64(rng.below(10_000))),
+                ),
+                (
+                    name("flag"),
+                    Cell::attribute(Value::Bool(rng.below(2) == 0)),
+                ),
                 (name("account"), Cell::attribute(Value::Addr(addr))),
             ]
         }
@@ -189,7 +211,9 @@ fn main() -> Res<()> {
         return Err("no namespace".into());
     };
     let sealed = branch.try_seal().map_err(|e| format!("seal: {e:?}"))?;
-    engine.prepare(sealed).map_err(|e| format!("prepare: {e:?}"))?;
+    engine
+        .prepare(sealed)
+        .map_err(|e| format!("prepare: {e:?}"))?;
     engine.commit().map_err(|e| format!("commit: {e:?}"))?;
 
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
@@ -222,7 +246,9 @@ fn main() -> Res<()> {
     let reach = report.levels[0].total();
     let ns_reach = report.levels[0]
         .per_space
-        .get(&arkiv_db_storage::versioned::SpaceId::Namespace(ns.ordinal()))
+        .get(&arkiv_db_storage::versioned::SpaceId::Namespace(
+            ns.ordinal(),
+        ))
         .copied()
         .unwrap_or_default();
 

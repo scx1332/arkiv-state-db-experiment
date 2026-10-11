@@ -116,7 +116,7 @@ struct Term {
 }
 
 impl TrieKey for Term {
-    const LEN: usize = 21 + 1 + 1 + 65;
+    const MAX_LEN: usize = 21 + 1 + 1 + 65;
 
     fn encode(&self) -> Vec<u8> {
         let mut key = KeyWriter::new();
@@ -182,7 +182,7 @@ fn composite_encoding_preserves_tuple_order() {
         let left = random_term(&mut rng, &names, &values);
         let right = random_term(&mut rng, &names, &values);
         let (left_key, right_key) = (left.encode(), right.encode());
-        assert_eq!(left_key.len(), Term::LEN);
+        assert_eq!(left_key.len(), Term::MAX_LEN);
         assert_eq!(
             left_key.cmp(&right_key),
             left.cmp(&right),

@@ -80,7 +80,7 @@ fn encode_leaf<T: Encode + ?Sized>(value: &T) -> Vec<u8> {
 
 /// The ordinal as 8 big-endian bytes, so the catalog iterates in id order.
 impl TrieKey for NamespaceId {
-    const LEN: usize = Self::ENCODED_LEN;
+    const MAX_LEN: usize = Self::ENCODED_LEN;
 
     fn encode(&self) -> Vec<u8> {
         self.to_bytes().to_vec()
@@ -97,7 +97,7 @@ impl TrieKey for NamespaceId {
 /// The ordinal as 8 big-endian bytes, so rows and postings iterate in id
 /// order.
 impl TrieKey for RecordId {
-    const LEN: usize = 8;
+    const MAX_LEN: usize = 8;
 
     fn encode(&self) -> Vec<u8> {
         self.ordinal().to_be_bytes().to_vec()
@@ -116,7 +116,7 @@ impl TrieKey for RecordId {
 /// bytes). The key map is only read by point lookups, so its order is
 /// never observed.
 impl TrieKey for RecordKey {
-    const LEN: usize = Self::ENCODED_LEN;
+    const MAX_LEN: usize = Self::ENCODED_LEN;
 
     fn encode(&self) -> Vec<u8> {
         self.encoded().to_vec()
@@ -143,14 +143,14 @@ pub(crate) struct RawKey(pub(crate) Arc<[u8]>);
 const RAW_KEY_MAX: u8 = Limits::MAX_RAW_KEY_LEN as u8;
 
 impl TrieKey for RawKey {
-    const LEN: usize = Limits::MAX_RAW_KEY_LEN + 1;
+    const MAX_LEN: usize = Limits::MAX_RAW_KEY_LEN + 1;
 
     /// # Panics
     ///
     /// If the key is longer than [`Limits::MAX_RAW_KEY_LEN`], which
     /// admission rejects before any key reaches a map.
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(Self::LEN);
+        let mut out = Vec::with_capacity(Self::MAX_LEN);
         encode_padded(&self.0, RAW_KEY_MAX, &mut out)
             .expect("admission bounds raw keys and prefixes by 20 bytes");
         out
@@ -221,7 +221,7 @@ impl TermKey {
 }
 
 impl TrieKey for TermKey {
-    const LEN: usize = CellName::MAX_LEN + Value::MAX_INDEXED_LEN + 4;
+    const MAX_LEN: usize = CellName::MAX_LEN + Value::MAX_INDEXED_LEN + 4;
 
     /// # Panics
     ///
@@ -729,7 +729,7 @@ mod tests {
         let models = term_models(&mut rng);
         for left in &models {
             let encoded = term(left).encode();
-            assert_eq!(encoded.len(), TermKey::LEN);
+            assert_eq!(encoded.len(), TermKey::MAX_LEN);
             assert_eq!(TermKey::decode(&encoded).unwrap(), term(left));
             for right in &models {
                 assert_eq!(
@@ -817,12 +817,12 @@ mod tests {
         assert!(TermKey::decode(&bytes_type).is_err());
         let mut existence_with_value = expected.clone();
         existence_with_value[CellName::MAX_LEN + 3] = 1;
-        existence_with_value[TermKey::LEN - 1] = 1;
+        existence_with_value[TermKey::MAX_LEN - 1] = 1;
         assert!(TermKey::decode(&existence_with_value).is_err());
         let mut short_i64 = expected;
         short_i64[CellName::MAX_LEN + 2] = 1;
         short_i64[CellName::MAX_LEN + 3] = 1;
-        short_i64[TermKey::LEN - 1] = 1;
+        short_i64[TermKey::MAX_LEN - 1] = 1;
         assert!(TermKey::decode(&short_i64).is_err(), "I64 needs 8 bytes");
     }
 

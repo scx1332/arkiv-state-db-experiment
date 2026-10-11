@@ -1,8 +1,53 @@
 use alloy_primitives::keccak256;
 use arkiv_db_trie::{
-    EMPTY_ROOT_HASH, IntervalDecision, MAX_INTERVAL_TRACE_NODES, MemoryOnly, MerkleMap, NodeKind,
-    PathChild, PathSource, Probe, ProofError, inspect_interval, walk_interval,
+    EMPTY_ROOT_HASH, IntervalDecision, IntervalLimits, KeyRange, MAX_INTERVAL_TRACE_NODES,
+    MemoryOnly, MerkleMap, NodeKind, PathChild, PathSource, Probe, ProofError,
 };
+
+/// The closed-interval form these tests were written against.
+#[allow(dead_code)]
+fn walk_interval<N: AsRef<[u8]>>(
+    root: arkiv_db_trie::ObjectId,
+    lower: &[u8],
+    upper: &[u8],
+    nodes: &[N],
+    max_entries: usize,
+) -> Result<arkiv_db_trie::IntervalEntries, ProofError> {
+    arkiv_db_trie::walk_interval(
+        root,
+        &KeyRange::closed(lower, upper),
+        nodes,
+        IntervalLimits {
+            max_entries,
+            max_key_len: 256,
+        },
+    )
+}
+
+#[allow(dead_code)]
+fn inspect_interval<N: AsRef<[u8]>>(
+    root: arkiv_db_trie::ObjectId,
+    lower: &[u8],
+    upper: &[u8],
+    nodes: &[N],
+    max_entries: usize,
+) -> Result<
+    (
+        arkiv_db_trie::IntervalEntries,
+        arkiv_db_trie::VerifiedInterval,
+    ),
+    ProofError,
+> {
+    arkiv_db_trie::inspect_interval(
+        root,
+        &KeyRange::closed(lower, upper),
+        nodes,
+        IntervalLimits {
+            max_entries,
+            max_key_len: 256,
+        },
+    )
+}
 
 fn map<const N: usize>(
     entries: impl IntoIterator<Item = ([u8; N], Vec<u8>)>,
@@ -21,8 +66,7 @@ fn proof<const N: usize>(
     lower: &[u8; N],
     upper: &[u8; N],
 ) -> Vec<Vec<u8>> {
-    map.interval_proof(lower, upper, &MemoryOnly)
-        .unwrap()
+    map.interval_proof(&KeyRange::closed(lower, upper), &MemoryOnly)
         .collect::<Result<_, _>>()
         .unwrap()
 }

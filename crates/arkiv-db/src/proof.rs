@@ -816,7 +816,7 @@ impl Serving<'_> {
         loader: &Loader<'_>,
         max_node: usize,
     ) -> Result<Vec<Vec<u8>>, ProofError> {
-        let structural = 2 * K::LEN + 1;
+        let structural = 2 * K::MAX_LEN + 1;
         self.append(4)?;
         if map.is_empty() {
             return Ok(Vec::new());

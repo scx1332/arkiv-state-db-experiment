@@ -919,23 +919,42 @@ fn hash_valid_but_noncanonical_tries_are_inconsistent() {
         Err(arkiv_db_trie::ProofError::InvalidNode { index: 1, .. })
     ));
 
-    // A root leaf two nibbles short of the four-nibble key.
+    // A root leaf two nibbles short of the four-nibble key: its key is a
+    // whole byte within the 2-byte bound, so a lookup proves the key absent;
+    // iteration decodes the stored key and rejects its width.
     let short = list(&[string(&compact(&[1, 2], true)), string(&[7])]);
     let root = put_all(&mut store, std::slice::from_ref(&short));
     let map = Map::<2>::from_root(root, 1).unwrap();
+    assert_eq!(map.get(&key, &store, &mut Probe::new()), Ok(None));
+    let items: Vec<_> = map.iter(&store).collect();
+    assert!(
+        matches!(items.as_slice(), [Err(TrieError::Key { .. })]),
+        "{items:?}"
+    );
+    assert_eq!(walk(root, &key, &[short]), Ok(None));
+
+    // A root leaf ending inside a byte, or beyond the key bound.
+    let odd = list(&[string(&compact(&[1, 2, 3], true)), string(&[7])]);
+    let root = put_all(&mut store, std::slice::from_ref(&odd));
+    let map = Map::<2>::from_root(root, 1).unwrap();
     assert_eq!(
         map.get(&key, &store, &mut Probe::new()),
-        Err(inconsistent("leaf at the wrong depth for the key length"))
+        Err(inconsistent("leaf key ends inside a byte"))
+    );
+    assert!(matches!(
+        walk(root, &key, &[odd]),
+        Err(arkiv_db_trie::ProofError::InvalidNode { index: 0, .. })
+    ));
+    let long = list(&[string(&compact(&[1, 2, 3, 4, 5, 6], true)), string(&[7])]);
+    let root = put_all(&mut store, std::slice::from_ref(&long));
+    let map = Map::<2>::from_root(root, 1).unwrap();
+    assert_eq!(
+        map.get(&key, &store, &mut Probe::new()),
+        Err(inconsistent("leaf key exceeds the key length bound"))
     );
     let items: Vec<_> = map.iter(&store).collect();
     assert_eq!(
         items,
-        [Err(inconsistent(
-            "leaf at the wrong depth for the key length"
-        ))]
+        [Err(inconsistent("leaf key exceeds the key length bound"))]
     );
-    assert!(matches!(
-        walk(root, &key, &[short]),
-        Err(arkiv_db_trie::ProofError::InvalidNode { index: 0, .. })
-    ));
 }

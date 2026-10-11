@@ -6,7 +6,7 @@ use alloy_primitives::keccak256;
 use alloy_trie::EMPTY_ROOT_HASH;
 
 use crate::{
-    Link, NodeBox, NodeKind, NodeLoader, ObjectId, TrieError, TrieKey, TrieValue,
+    KeyRange, Link, NodeBox, NodeKind, NodeLoader, ObjectId, TrieError, TrieKey, TrieValue,
     nibbles::{self, common_prefix, join},
     node::Node,
     proof::ProofIter,
@@ -96,45 +96,55 @@ where
     Ok(Some(node))
 }
 
-/// Checks that a leaf reached with `rest` key nibbles left has a path of
-/// exactly that length, as every leaf of a fixed-length key map does.
-pub(crate) fn check_leaf(path: &[u8], rest: &[u8]) -> Result<(), TrieError> {
-    if path.len() == rest.len() {
+/// Checks that a leaf whose key ends `end` nibbles below the root holds a
+/// whole-byte key of at most `max` nibbles (twice the key type's
+/// [`TrieKey::MAX_LEN`]). The bound comes from the key type, never from a
+/// requested key, so an unrelated leaf is not judged by a query's length.
+pub(crate) fn check_leaf_end(end: usize, max: usize) -> Result<(), TrieError> {
+    if !end.is_multiple_of(2) {
+        Err(TrieError::inconsistent("leaf key ends inside a byte"))
+    } else if end > max {
+        Err(TrieError::inconsistent(
+            "leaf key exceeds the key length bound",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Checks that an inner node (a branch at `end`, or an extension ending at
+/// `end`) leaves room for at least one more nibble below the key bound.
+pub(crate) fn check_inner_end(end: usize, max: usize) -> Result<(), TrieError> {
+    if end < max {
         Ok(())
     } else {
         Err(TrieError::inconsistent(
-            "leaf at the wrong depth for the key length",
+            "inner node reaches the key length bound",
         ))
     }
 }
 
-/// Checks that an extension leaves at least one nibble for its branch.
-pub(crate) fn check_extension(path: &[u8], rest: &[u8]) -> Result<(), TrieError> {
-    if path.len() < rest.len() {
-        Ok(())
-    } else {
-        Err(TrieError::inconsistent(
-            "extension reaches the end of the key",
-        ))
-    }
+/// The nibble bound of a key type: `2 · K::MAX_LEN`.
+pub(crate) const fn max_nibbles<K: TrieKey>() -> usize {
+    2 * K::MAX_LEN
 }
 
 /// Returns the key's encoding as nibbles.
 ///
 /// # Panics
 ///
-/// Panics if the key type's encoding does not have `K::LEN` bytes.
+/// Panics if the key type's encoding is longer than `K::MAX_LEN` bytes.
 pub(crate) fn key_nibbles<K: TrieKey>(key: &K) -> Vec<u8> {
     let bytes = key.encode();
-    assert_eq!(
-        bytes.len(),
-        K::LEN,
-        "TrieKey::encode returned the wrong number of bytes"
+    assert!(
+        bytes.len() <= K::MAX_LEN,
+        "TrieKey::encode returned more than MAX_LEN bytes"
     );
     nibbles::unpack(&bytes)
 }
 
-/// A persistent hexary Merkle Patricia map with fixed-length keys.
+/// A persistent hexary Merkle Patricia map with bounded, prefix-free,
+/// variable-length keys.
 ///
 /// The node encoding is the Ethereum MPT encoding of `alloy_trie::nodes`,
 /// hashed with keccak256, and the shape is canonical: branches have at least
@@ -143,7 +153,9 @@ pub(crate) fn key_nibbles<K: TrieKey>(key: &K) -> Vec<u8> {
 /// child and merges extension paths, loading the remaining sibling if it is
 /// stored). The root hash therefore depends only on the key/value set, and
 /// equals the root `alloy_trie::HashBuilder` computes over the same sorted
-/// leaves. A key path visits at most `2·K::LEN + 1` nodes.
+/// leaves. Since branches hold no values, the key set must be prefix-free
+/// (see [`TrieKey`]); keys may otherwise have any length up to
+/// `K::MAX_LEN`, and a key path visits at most `2·K::MAX_LEN + 1` nodes.
 ///
 /// A handle is a root [`Link`] and the entry count. Cloning is O(1); an
 /// update returns a new handle and shares every node off the updated path
@@ -186,7 +198,7 @@ impl<K: TrieKey, V: TrieValue> Default for MerkleMap<K, V> {
 impl<K: TrieKey, V: TrieValue> MerkleMap<K, V> {
     /// Creates an empty map.
     pub const fn new() -> Self {
-        const { assert!(K::LEN > 0, "TrieKey::LEN must be at least one byte") };
+        const { assert!(K::MAX_LEN > 0, "TrieKey::MAX_LEN must be at least one byte") };
         Self {
             root: Link::Empty,
             len: 0,
@@ -200,7 +212,7 @@ impl<K: TrieKey, V: TrieValue> MerkleMap<K, V> {
     /// empty root or a zero length is [`TrieError::InvalidHandle`]. Nothing
     /// is read: the root is a [`Link::Stored`] loaded on first use.
     pub fn from_root(root: ObjectId, len: u64) -> Result<Self, TrieError> {
-        const { assert!(K::LEN > 0, "TrieKey::LEN must be at least one byte") };
+        const { assert!(K::MAX_LEN > 0, "TrieKey::MAX_LEN must be at least one byte") };
         match (root == EMPTY_ROOT_HASH, len == 0) {
             (true, true) => Ok(Self::new()),
             (false, false) => Ok(Self {
@@ -279,6 +291,7 @@ impl<K: TrieKey, V: TrieValue> MerkleMap<K, V> {
         L: NodeLoader<V> + ?Sized,
     {
         let key = key_nibbles(key);
+        let max = max_nibbles::<K>();
         let mut link = self.root.clone();
         let mut role = Role::Root;
         let mut position = 0;
@@ -289,11 +302,11 @@ impl<K: TrieKey, V: TrieValue> MerkleMap<K, V> {
             let rest = &key[position..];
             match &node.node {
                 Node::Leaf { path, value } => {
-                    check_leaf(path, rest)?;
+                    check_leaf_end(position + path.len(), max)?;
                     return Ok((**path == *rest).then(|| value.clone()));
                 }
                 Node::Extension { path, child } => {
-                    check_extension(path, rest)?;
+                    check_inner_end(position + path.len(), max)?;
                     if !rest.starts_with(path) {
                         return Ok(None);
                     }
@@ -302,9 +315,12 @@ impl<K: TrieKey, V: TrieValue> MerkleMap<K, V> {
                     role = Role::ExtensionChild;
                 }
                 Node::Branch { children } => {
-                    let nibble = *rest
-                        .first()
-                        .ok_or(TrieError::inconsistent("branch below the key length"))?;
+                    check_inner_end(position, max)?;
+                    // A key ending at a branch is a strict prefix of stored
+                    // keys; branches hold no values, so it is absent.
+                    let Some(&nibble) = rest.first() else {
+                        return Ok(None);
+                    };
                     link = children[usize::from(nibble)].clone();
                     position += 1;
                     role = Role::Child;
@@ -334,7 +350,11 @@ impl<K: TrieKey, V: TrieValue> MerkleMap<K, V> {
             return Err(TrieError::EmptyValue.into());
         }
         let key = key_nibbles(key);
-        let (root, previous) = insert_at(&self.root, Role::Root, &key, value, loader, probe)?;
+        let at = At {
+            depth: 0,
+            max: max_nibbles::<K>(),
+        };
+        let (root, previous) = insert_at(&self.root, Role::Root, at, &key, value, loader, probe)?;
         let len = if previous.is_some() {
             self.len
         } else {
@@ -367,7 +387,11 @@ impl<K: TrieKey, V: TrieValue> MerkleMap<K, V> {
         L: NodeLoader<V> + ?Sized,
     {
         let key = key_nibbles(key);
-        match remove_at(&self.root, Role::Root, &key, loader, probe)? {
+        let at = At {
+            depth: 0,
+            max: max_nibbles::<K>(),
+        };
+        match remove_at(&self.root, Role::Root, at, &key, loader, probe)? {
             Removal::Absent => Ok((self.clone(), None)),
             Removal::Removed { replacement, value } => {
                 let len = self
@@ -404,6 +428,16 @@ impl<K: TrieKey, V: TrieValue> MerkleMap<K, V> {
         Range::new(self.root.clone(), Some(key_nibbles(lower)), loader)
     }
 
+    /// Iterates lazily, in encoded key order, over entries whose encoded
+    /// keys are at least the raw byte string `lower`, which need not be the
+    /// encoding of a key (any seek position works).
+    pub fn range_from_encoded<'l, L>(&self, lower: &[u8], loader: &'l L) -> Range<'l, K, V, L>
+    where
+        L: NodeLoader<V> + ?Sized,
+    {
+        Range::new(self.root.clone(), Some(nibbles::unpack(lower)), loader)
+    }
+
     /// Iterates lazily over all entries in encoded key order.
     pub fn iter<'l, L>(&self, loader: &'l L) -> Range<'l, K, V, L>
     where
@@ -424,30 +458,28 @@ impl<K: TrieKey, V: TrieValue> MerkleMap<K, V> {
     where
         L: NodeLoader<V> + ?Sized,
     {
-        ProofIter::new(self.root.clone(), key_nibbles(key), loader)
+        ProofIter::new(
+            self.root.clone(),
+            key_nibbles(key),
+            max_nibbles::<K>(),
+            loader,
+        )
     }
 
-    /// Emits a complete closed interval witness, opening only intersecting
-    /// key prefixes. Bounds are raw encodings of exactly `K::LEN` bytes.
-    /// Verify with [`walk_interval`](crate::walk_interval).
+    /// Emits a complete interval witness, opening only the subtrees whose
+    /// key prefix can intersect `range`. Bounds are raw encoded byte strings
+    /// (inclusive, exclusive or unbounded) and need not be encodings of
+    /// keys. Verify with [`walk_interval`](crate::walk_interval), passing
+    /// `K::MAX_LEN` as the key bound.
     pub fn interval_proof<'l, L>(
         &self,
-        lower: &[u8],
-        upper: &[u8],
+        range: &KeyRange,
         loader: &'l L,
-    ) -> Result<crate::IntervalProofIter<'l, V, L>, TrieError>
+    ) -> crate::IntervalProofIter<'l, V, L>
     where
         L: NodeLoader<V> + ?Sized,
     {
-        if lower.len() != K::LEN || upper.len() != K::LEN {
-            return Err(TrieError::inconsistent("interval key lengths disagree"));
-        }
-        Ok(crate::IntervalProofIter::new(
-            self.root.clone(),
-            lower,
-            upper,
-            loader,
-        ))
+        crate::IntervalProofIter::new(self.root.clone(), range, K::MAX_LEN, loader)
     }
 
     /// Collects [`proof`](Self::proof) into a vector, adding its visits to `probe`.
@@ -573,9 +605,27 @@ fn above<V>(prefix: &[u8], branch: Arc<NodeBox<V>>) -> Arc<NodeBox<V>> {
 /// replaced.
 type Inserted<V> = (Arc<NodeBox<V>>, Option<V>);
 
+/// Where an update stands: the depth of the node in nibbles and the key
+/// type's nibble bound.
+#[derive(Clone, Copy)]
+struct At {
+    depth: usize,
+    max: usize,
+}
+
+impl At {
+    const fn below(self, nibbles: usize) -> Self {
+        Self {
+            depth: self.depth + nibbles,
+            max: self.max,
+        }
+    }
+}
+
 fn insert_at<V, L>(
     link: &Link<V>,
     role: Role,
+    at: At,
     rest: &[u8],
     value: V,
     loader: &L,
@@ -593,12 +643,15 @@ where
             path,
             value: existing,
         } => {
-            check_leaf(path, rest)?;
+            check_leaf_end(at.depth + path.len(), at.max)?;
             if **path == *rest {
                 return Ok((leaf(rest, value), Some(existing.clone())));
             }
-            // Same length and different, so they diverge before the end.
             let common = common_prefix(path, rest);
+            if common == path.len() || common == rest.len() {
+                // One key is a strict prefix of the other.
+                return Err(TrieError::KeyNotPrefixFree.into());
+            }
             let branch = branch_of_two(
                 (
                     path[common],
@@ -609,12 +662,13 @@ where
             Ok((above(&rest[..common], branch), None))
         }
         Node::Extension { path, child } => {
-            check_extension(path, rest)?;
+            check_inner_end(at.depth + path.len(), at.max)?;
             let common = common_prefix(path, rest);
             if common == path.len() {
                 let (child, previous) = insert_at(
                     child,
                     Role::ExtensionChild,
+                    at.below(common),
                     &rest[common..],
                     value,
                     loader,
@@ -625,6 +679,10 @@ where
                     child: Link::Mem(child),
                 });
                 return Ok((extension, previous));
+            }
+            if common == rest.len() {
+                // The key ends inside the extension: a prefix of the keys below.
+                return Err(TrieError::KeyNotPrefixFree.into());
             }
             // The key leaves the extension at `common`: a new branch there
             // holds the rest of the extension (or its branch directly) and
@@ -644,12 +702,19 @@ where
             Ok((above(&rest[..common], branch), None))
         }
         Node::Branch { children } => {
-            let (&nibble, tail) = rest
-                .split_first()
-                .ok_or(TrieError::inconsistent("branch below the key length"))?;
+            check_inner_end(at.depth, at.max)?;
+            // A key ending at a branch is a prefix of the keys below it.
+            let (&nibble, tail) = rest.split_first().ok_or(TrieError::KeyNotPrefixFree)?;
             let slot = usize::from(nibble);
-            let (child, previous) =
-                insert_at(&children[slot], Role::Child, tail, value, loader, probe)?;
+            let (child, previous) = insert_at(
+                &children[slot],
+                Role::Child,
+                at.below(1),
+                tail,
+                value,
+                loader,
+                probe,
+            )?;
             let mut children = children.clone();
             children[slot] = Link::Mem(child);
             Ok((NodeBox::new(Node::Branch { children }), previous))
@@ -660,6 +725,7 @@ where
 fn remove_at<V, L>(
     link: &Link<V>,
     role: Role,
+    at: At,
     rest: &[u8],
     loader: &L,
     probe: &mut Probe,
@@ -673,7 +739,7 @@ where
     };
     match &node.node {
         Node::Leaf { path, value } => {
-            check_leaf(path, rest)?;
+            check_leaf_end(at.depth + path.len(), at.max)?;
             Ok(if **path == *rest {
                 Removal::Removed {
                     replacement: None,
@@ -684,13 +750,14 @@ where
             })
         }
         Node::Extension { path, child } => {
-            check_extension(path, rest)?;
+            check_inner_end(at.depth + path.len(), at.max)?;
             if !rest.starts_with(path) {
                 return Ok(Removal::Absent);
             }
             match remove_at(
                 child,
                 Role::ExtensionChild,
+                at.below(path.len()),
                 &rest[path.len()..],
                 loader,
                 probe,
@@ -709,11 +776,20 @@ where
             }
         }
         Node::Branch { children } => {
-            let (&nibble, tail) = rest
-                .split_first()
-                .ok_or(TrieError::inconsistent("branch below the key length"))?;
+            check_inner_end(at.depth, at.max)?;
+            // A key ending at a branch is not stored: branches hold no values.
+            let Some((&nibble, tail)) = rest.split_first() else {
+                return Ok(Removal::Absent);
+            };
             let slot = usize::from(nibble);
-            match remove_at(&children[slot], Role::Child, tail, loader, probe)? {
+            match remove_at(
+                &children[slot],
+                Role::Child,
+                at.below(1),
+                tail,
+                loader,
+                probe,
+            )? {
                 Removal::Absent => Ok(Removal::Absent),
                 Removal::Removed { replacement, value } => {
                     let mut children = children.clone();

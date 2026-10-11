@@ -9,10 +9,12 @@ use crate::{ObjectId, codec::CodecError};
 ///
 /// No variant is an answer about the map's contents: a lookup that fails
 /// with a `TrieError` has **not** established that a key is absent. Every
-/// variant except [`EmptyValue`](Self::EmptyValue) is an availability or
+/// variant except [`EmptyValue`](Self::EmptyValue) and
+/// [`KeyNotPrefixFree`](Self::KeyNotPrefixFree) is an availability or
 /// integrity failure of the node store. A host maps
 /// [`Missing`](Self::Missing) to its own "object missing" error,
-/// `EmptyValue` to a caller error and every other variant to "corrupt";
+/// `EmptyValue` and `KeyNotPrefixFree` to caller errors and every other
+/// variant to "corrupt";
 /// loaders with their own error type absorb these through
 /// `From<TrieError>` (see [`NodeLoader`](crate::NodeLoader)).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,8 +50,10 @@ pub enum TrieError {
         error: CodecError,
     },
     /// Individually valid nodes contradict the map's shape, for example a
-    /// leaf at the wrong depth for the key length, an extension whose child
-    /// is not a branch, or a hash-referenced node shorter than 32 bytes.
+    /// stored key ending inside a byte or beyond the key type's
+    /// [`TrieKey::MAX_LEN`](crate::TrieKey::MAX_LEN), an extension whose
+    /// child is not a branch, or a hash-referenced node shorter than 32
+    /// bytes.
     Inconsistent {
         /// What was wrong.
         reason: &'static str,
@@ -67,6 +71,12 @@ pub enum TrieError {
     /// which no leaf can hold. A caller error, raised before anything is
     /// read or changed.
     EmptyValue,
+    /// [`MerkleMap::insert`](crate::MerkleMap::insert) was given a key that
+    /// is a strict prefix of a stored key, or that a stored key is a strict
+    /// prefix of. The [`TrieKey`](crate::TrieKey) contract requires
+    /// prefix-free encodings, so this is a caller (key codec) error, raised
+    /// before anything changes.
+    KeyNotPrefixFree,
 }
 
 impl TrieError {
@@ -103,6 +113,9 @@ impl fmt::Display for TrieError {
                 )
             }
             Self::EmptyValue => formatter.write_str("a trie value cannot have an empty encoding"),
+            Self::KeyNotPrefixFree => {
+                formatter.write_str("a trie key is a strict prefix of, or extends, a stored key")
+            }
         }
     }
 }

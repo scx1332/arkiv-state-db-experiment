@@ -260,13 +260,18 @@ pub mod reference {
                 .take_while(|(left, right)| left == right)
                 .count();
             if shared > 0 {
-                if key[depth..depth + shared] != first[depth..depth + shared] {
+                // A key ending inside the shared path is absent here.
+                if key.get(depth..depth + shared) != Some(&first[depth..depth + shared]) {
                     break;
                 }
                 depth += shared;
                 continue;
             }
-            group.retain(|(path, _)| path[depth] == key[depth]);
+            // A key ending at this branch is absent (branches hold no value).
+            let Some(&nibble) = key.get(depth) else {
+                break;
+            };
+            group.retain(|(path, _)| path[depth] == nibble);
             depth += 1;
         }
         proof

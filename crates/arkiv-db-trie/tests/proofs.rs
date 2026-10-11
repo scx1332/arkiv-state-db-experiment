@@ -168,12 +168,13 @@ fn empty_and_single_entry_maps() {
     );
 }
 
-/// `walk` cannot know the map's key length (a proof does not carry it), so
-/// a key of another length is a caller error it cannot name. Pinned here:
-/// such a key is never proven included; depending on the trie's shape it
-/// is reported as absent or as `InvalidNode`.
+/// Keys have variable length and branches hold no values, so `walk`
+/// accepts any byte string: a key that ends inside the trie's paths, or that
+/// extends a stored key, is proven absent. Pinned here: such a key is never
+/// proven included, and a proof for another key never verifies for it
+/// unless that proof also proves its absence.
 #[test]
-fn keys_of_the_wrong_length_are_never_proven_included() {
+fn prefix_related_keys_are_proven_absent_never_included() {
     // Hand-derived shape: three 8-byte keys that differ in their first
     // nibble give a root branch with leaves in slots 1, 2 and 3, each
     // holding the 15 remaining nibbles; 40-byte values make every leaf a
@@ -199,28 +200,20 @@ fn keys_of_the_wrong_length_are_never_proven_included() {
     assert_eq!(walk(root, &[0xf0], &absent), Ok(None));
     assert_eq!(walk(root, &[0xf0; 9], &absent), Ok(None));
     // Slot 1 holds a leaf of 15 nibbles, which a 1- or 9-byte key (1 or 17
-    // nibbles left there) cannot match.
-    let wrong_depth = ProofError::InvalidNode {
-        index: 1,
-        reason: "leaf at the wrong depth for the key length",
-    };
-    assert_eq!(walk(root, &[0x10], &present), Err(wrong_depth.clone()));
+    // nibbles left there) cannot match: a divergent leaf.
+    assert_eq!(walk(root, &[0x10], &present), Ok(None));
     let mut longer = [0u8; 9];
     longer[0] = 0x10;
-    assert_eq!(walk(root, &longer, &present), Err(wrong_depth));
-    // No nibble is left for the root branch.
-    assert_eq!(
-        walk(root, &[], &absent),
-        Err(ProofError::InvalidNode {
-            index: 0,
-            reason: "branch below the key length"
-        })
-    );
+    assert_eq!(walk(root, &longer, &present), Ok(None));
+    // The empty key ends at the root branch.
+    assert_eq!(walk(root, &[], &absent), Ok(None));
+    let (_, trace) = arkiv_db_trie::inspect_path(root, &[], &absent).unwrap();
+    assert_eq!(trace.terminal, arkiv_db_trie::PathTerminal::KeyEndsAtBranch);
 
     // Random maps: a present key cut short or extended with zeros follows
-    // the key's own path until it runs out or reaches the key's leaf, whose
-    // path length cannot match, so its proof gives `InvalidNode`; an absent
-    // key changed that way gives absence or `InvalidNode`. Never a value.
+    // the key's own path until it runs out (absence, or trailing nodes when
+    // the key's proof continues) or reaches the key's leaf, whose path then
+    // diverges (absence). Never a value.
     let mut rng = Rng(21);
     for round in 0..40 {
         let count = [1, 2, 5, 40, 200][round % 5];
@@ -234,17 +227,14 @@ fn keys_of_the_wrong_length_are_never_proven_included() {
                 let mut other = key.to_vec();
                 other.resize(len, 0);
                 let result = walk(root, &other, &proof);
-                if entries.contains_key(&key) {
-                    assert!(
-                        matches!(result, Err(ProofError::InvalidNode { .. })),
-                        "{result:?}"
-                    );
-                } else {
-                    assert!(
-                        matches!(result, Ok(None) | Err(ProofError::InvalidNode { .. })),
-                        "{result:?}"
-                    );
-                }
+                assert!(
+                    matches!(
+                        result,
+                        Ok(None)
+                            | Err(ProofError::TrailingNodes { .. } | ProofError::Incomplete { .. })
+                    ),
+                    "{result:?}"
+                );
             }
         }
     }

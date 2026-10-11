@@ -3555,7 +3555,7 @@
         },
         "default": [],
         "description": "Root-relative child slots: branch 0\u201315; extension child 16. Copy children[].path from the preceding response. Smaller per-map key-width bounds also apply.",
-        "maxItems": 328
+        "maxItems": 1096
       },
       "ExploreRequest": {
         "type": "object",
@@ -6623,6 +6623,14 @@
                   },
                   "upperKeyNibbles": {
                     "type": "string"
+                  },
+                  "lowerInclusive": {
+                    "type": "boolean",
+                    "description": "Whether the lower term-key endpoint is included (state layout 2)."
+                  },
+                  "upperInclusive": {
+                    "type": "boolean",
+                    "description": "Whether the upper term-key endpoint is included (state layout 2)."
                   },
                   "suppliedNodeCount": {
                     "type": "integer",

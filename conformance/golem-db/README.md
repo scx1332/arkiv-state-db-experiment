@@ -209,7 +209,7 @@ kit needs porting.
   `max_cell_name_len`, `max_str_len` and `max_bytes_len` are the engine's
   limits, and `max_str_len` is also its indexed-string limit, because golem
   indexes `str` attributes up to `max_str_len`. Values above the engine's
-  caps (32-byte names, 128-byte indexed values) and a Blake3 hash are
+  caps (32-byte names, 512-byte indexed values since state layout 2) and a Blake3 hash are
   refused with `InvalidConfig`, not narrowed.
 - **Namespace and commit numbering.** The adapter uses one namespace,
   `golemdb`, created in a setup commit, so golem commit N is engine snapshot

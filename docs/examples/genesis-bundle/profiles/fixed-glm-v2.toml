@@ -2,7 +2,7 @@
 schema = "arkiv-genesis-profile-v1"
 entity_rules = "arkiv-entity-v2"
 account_rules = "glm-v2"
-state_layout = 1
+state_layout = 2
 codec_version = 1
 admins = []
 

@@ -1219,7 +1219,7 @@ mod tests {
     fn compiled_preset_expansion_is_frozen() {
         assert_eq!(
             sha256(PRESET.as_bytes()),
-            "a796e17bd1747864933bd262b2fc5af1b7a6c49aec0cc9fcf41e502e64da27ea"
+            "fa7abfe2e56853b6f4c22f2c3e8f1a3b9fa575002ee7b475a1a228795d716b8a"
         );
     }
 

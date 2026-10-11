@@ -177,7 +177,7 @@ struct Wire {
 impl Wire {
     fn parse(bytes: &[u8]) -> Self {
         let mut d = Decoder::new(bytes);
-        assert_eq!(d.u32().unwrap(), 1);
+        assert_eq!(d.u32().unwrap(), 2);
         let snapshot = d.get().unwrap();
         let digest = d.get().unwrap();
         let tag = d.u8().unwrap();
@@ -209,7 +209,7 @@ impl Wire {
     }
     fn bytes(&self) -> Vec<u8> {
         let mut e = Encoder::new();
-        e.u32(1);
+        e.u32(2);
         e.put(&self.snapshot);
         e.put(&self.digest);
         e.u8(self.tag);
@@ -256,20 +256,17 @@ fn pages_match_independent_scan_and_posting_root_with_changing_sizes() {
                 .collect();
             let posting_root = hash_builder_root(&leaves);
             assert_eq!(posting_root, reference::root(&leaves));
-            // An independent 164-byte term key; no layout::TermKey reuse.
-            let mut term_key = vec![0; CellName::MAX_LEN + Value::MAX_INDEXED_LEN + 4];
-            term_key[..4].copy_from_slice(b"kind");
-            term_key[CellName::MAX_LEN] = 4;
+            // An independent term key, no layout::TermKey reuse: the name and
+            // its 00 terminator, the tag, presence 01, then the value (a
+            // `Str` shifted by one and terminated, a scalar as is).
+            let mut term_key = b"kind\0".to_vec();
             let (tag, value) = match &request.query.value {
-                Value::Str(s) => (2, s.as_bytes().to_vec()),
+                Value::Str(s) => (2, s.bytes().map(|b| b + 1).chain([0]).collect::<Vec<u8>>()),
                 Value::U64(n) => (13, n.to_be_bytes().to_vec()),
                 _ => unreachable!(),
             };
-            term_key[CellName::MAX_LEN + 1] = tag;
-            term_key[CellName::MAX_LEN + 2] = 1;
-            term_key[CellName::MAX_LEN + 3..CellName::MAX_LEN + 3 + value.len()]
-                .copy_from_slice(&value);
-            term_key[CellName::MAX_LEN + Value::MAX_INDEXED_LEN + 3] = value.len() as u8;
+            term_key.extend([tag, 1]);
+            term_key.extend(&value);
             let roots = snapshot.try_namespace_roots(ns(1)).unwrap().unwrap();
             let leaf = arkiv_db_trie::walk(roots.terms.0, &term_key, &wire.term)
                 .unwrap()
@@ -577,14 +574,14 @@ fn resource_caps_reject_before_large_allocation_and_never_return_partial_rows() 
 }
 
 #[test]
-fn codecs_have_literal_version_one_vectors_and_reject_unknown_tags() {
+fn codecs_have_literal_version_two_vectors_and_reject_unknown_tags() {
     let query = EqQuery {
         namespace: ns(1),
         attribute: name("a"),
         value: Value::I64(-2),
     };
     let expected = [
-        0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'a', 17, 127, 255, 255, 255, 255, 255,
+        0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'a', 17, 127, 255, 255, 255, 255, 255,
         255, 254, 1, 1,
     ];
     assert_eq!(encode(&query), expected);
@@ -595,7 +592,7 @@ fn codecs_have_literal_version_one_vectors_and_reject_unknown_tags() {
         block_hash: B256::repeat_byte(0x22),
         state_root: B256::repeat_byte(0x33),
     };
-    let mut expected_snapshot = vec![0, 0, 0, 1];
+    let mut expected_snapshot = vec![0, 0, 0, 2];
     expected_snapshot.extend([0x11; 32]);
     expected_snapshot.extend([0, 0, 0, 0, 0, 0, 0, 9]);
     expected_snapshot.extend([0x22; 32]);
@@ -606,7 +603,7 @@ fn codecs_have_literal_version_one_vectors_and_reject_unknown_tags() {
         query_digest: B256::repeat_byte(0x44),
         last_id: id(7),
     };
-    let mut expected_cursor = vec![0, 0, 0, 1];
+    let mut expected_cursor = vec![0, 0, 0, 2];
     expected_cursor.extend(expected_snapshot);
     expected_cursor.extend([0x44; 32]);
     expected_cursor.extend([0, 0, 0, 0, 0, 0, 0, 7]);
@@ -698,22 +695,16 @@ fn independent_witness(mutation: u8) -> (EqRequest, Wire) {
             }
         }
         rows.insert(n.to_be_bytes().to_vec(), row);
-        let mut key = vec![0; 33];
-        key[0] = 2;
-        key[1..3].copy_from_slice(&raw_key);
+        let mut key = vec![2];
+        key.extend_from_slice(&raw_key);
         let bound = if mutation == 8 && n == 1 { 2u64 } else { n };
         keys.insert(key, bound.to_be_bytes().to_vec());
         posting.insert(n.to_be_bytes().to_vec(), vec![1]);
     }
     let posting_root = reference::root(&posting);
     assert_eq!(posting_root, hash_builder_root(&posting));
-    let mut term_key = vec![0; CellName::MAX_LEN + Value::MAX_INDEXED_LEN + 4];
-    term_key[0] = b'a';
-    term_key[CellName::MAX_LEN] = 1;
-    term_key[CellName::MAX_LEN + 1] = 1;
-    term_key[CellName::MAX_LEN + 2] = 1;
-    term_key[CellName::MAX_LEN + 3] = 1;
-    term_key[CellName::MAX_LEN + Value::MAX_INDEXED_LEN + 3] = 1;
+    // `a = true`: name, terminator, Bool (1), presence 01, value 01.
+    let term_key = vec![b'a', 0, 1, 1, 1];
     let mut posting_leaf = posting_root.to_vec();
     let count = match mutation {
         10 => 3u64,
@@ -744,7 +735,7 @@ fn independent_witness(mutation: u8) -> (EqRequest, Wire) {
     }
     let catalog = BTreeMap::from([(1u64.to_be_bytes().to_vec(), catalog_leaf)]);
     let header = StateHeader {
-        format: 1,
+        format: 2,
         catalog_root: reference::root(&catalog),
         catalog_len: 1,
         next_namespace: 2,
@@ -1117,9 +1108,9 @@ fn empty_namespace_proof_has_hand_built_canonical_bytes() {
         input.extend(bytes);
         alloy_primitives::keccak256(input)
     }
-    // Header: format 1, empty catalog, allocator 1, schedule 7 with
+    // Header: format 2, empty catalog, allocator 1, schedule 7 with
     // thirty-one weights of one, empty host map. No production codecs.
-    let mut header = vec![0, 0, 0, 1];
+    let mut header = vec![0, 0, 0, 2];
     header.extend(alloy_trie::EMPTY_ROOT_HASH.as_slice());
     header.extend([0; 8]);
     header.extend([0, 0, 0, 0, 0, 0, 0, 1]);
@@ -1131,10 +1122,10 @@ fn empty_namespace_proof_has_hand_built_canonical_bytes() {
     header.extend([0; 8]);
     let root = independent_digest(b"arkiv/state/v1", &header);
     let query_bytes = [
-        0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'a', 1, 1, 1, 1,
+        0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'a', 1, 1, 1, 1,
     ];
     let query_digest = independent_digest(b"arkiv/eq-query/v1", &query_bytes);
-    let mut expected = vec![0, 0, 0, 1, 0, 0, 0, 1]; // response version, snapshot version
+    let mut expected = vec![0, 0, 0, 2, 0, 0, 0, 2]; // response version, snapshot version
     expected.extend([0x11; 32]);
     expected.extend([0; 8]);
     expected.extend([0x22; 32]);

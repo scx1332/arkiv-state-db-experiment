@@ -54,8 +54,10 @@ use crate::{
 /// Version of the encoding rules and of every layout in this module.
 ///
 /// A change to any layout, tag or rule needs a new version; decoders of one
-/// version never accept another version's bytes as their own.
-pub const CODEC_VERSION: u32 = crate::LAYOUT_VERSION;
+/// version never accept another version's bytes as their own. Independent
+/// of [`LAYOUT_VERSION`](crate::LAYOUT_VERSION): layout 2 changed only trie
+/// key encodings, none of the codec's layouts.
+pub const CODEC_VERSION: u32 = 1;
 
 // Enum tags. Every table is documented in docs/block-format.md; a tag is
 // never reused and never derived from a Rust discriminant.

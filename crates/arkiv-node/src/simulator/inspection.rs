@@ -171,11 +171,21 @@ pub fn range_json(request: &RangeRequest, inspection: &RangeInspection) -> Value
                 "parentIndex":node.parent_index,"parentSlot":node.parent_slot.map(|s|format!("{s:x}")),
                 "prefix":nibbles(&node.prefix),"leaf":leaf})
         }).collect::<Vec<_>>();
-        let empty_reason = if interval.lower > interval.upper { Some("reversed-bounds") }
+        let empty_reason = if interval.range.is_empty() { Some("reversed-bounds") }
             else if interval.root == arkiv_db_trie::EMPTY_ROOT_HASH { Some("empty-root") } else { None };
+        // Endpoints are raw term-key bytes with their own inclusivity; an
+        // unbounded end has no key.
+        let endpoint = |bound: &std::ops::Bound<Vec<u8>>| match bound {
+            std::ops::Bound::Included(key) => (Some(hex(key)), Some(hex(key)[2..].to_owned()), Some(true)),
+            std::ops::Bound::Excluded(key) => (Some(hex(key)), Some(hex(key)[2..].to_owned()), Some(false)),
+            std::ops::Bound::Unbounded => (None, None, None),
+        };
+        let (lower, lower_nibbles, lower_inclusive) = endpoint(&interval.range.lower);
+        let (upper, upper_nibbles, upper_inclusive) = endpoint(&interval.range.upper);
         json!({"id":"terms:range","map":"terms","namespaceId":namespace_id,
-            "root":hex(interval.root.as_slice()),"lowerKey":hex(&interval.lower),"upperKey":hex(&interval.upper),
-            "lowerKeyNibbles":hex(&interval.lower)[2..],"upperKeyNibbles":hex(&interval.upper)[2..],
+            "root":hex(interval.root.as_slice()),"lowerKey":lower,"upperKey":upper,
+            "lowerKeyNibbles":lower_nibbles,"upperKeyNibbles":upper_nibbles,
+            "lowerInclusive":lower_inclusive,"upperInclusive":upper_inclusive,
             "suppliedNodeCount":interval.supplied_nodes,"emptyReason":empty_reason,"nodes":nodes})
     });
     result

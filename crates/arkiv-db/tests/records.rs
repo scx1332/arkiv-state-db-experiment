@@ -640,66 +640,28 @@ fn assert_read_sweep<T: Debug + PartialEq>(
 // ---------------------------------------------------------------------------
 
 #[test]
-fn record_keys_take_1_to_32_bytes_and_encode_as_length_bytes_padding() {
+fn record_keys_take_1_to_32_bytes_and_encode_as_length_and_bytes() {
     assert_eq!(RecordKey::MAX_LEN, 32);
-    assert_eq!(RecordKey::ENCODED_LEN, 33);
     assert_eq!(RecordKey::new(b""), None, "empty keys are refused");
     assert_eq!(RecordKey::new(&[7u8; 33]), None, "33-byte keys are refused");
-
-    // b"a" -> 01 61 00…00 (33 bytes).
+    // The one canonical form, in the codec and as the key-binding trie key:
+    // `len ‖ bytes`, no padding. b"a" -> 01 61.
     let short = RecordKey::new(b"a").expect("one byte is a key");
     assert_eq!(short.as_bytes(), b"a");
-    let mut expected = [0u8; 33];
-    expected[0] = 0x01;
-    expected[1] = 0x61;
-    assert_eq!(short.encoded(), expected);
-    assert_eq!(RecordKey::decode(expected), Some(short.clone()));
-
-    // [0u8; 31] -> 1f 00…00: 31 zero bytes are a key distinct from any shorter
-    // run of zeros because the length byte differs.
+    assert_eq!(arkiv_db::encode(&short), [0x01, 0x61]);
+    // 31 zero bytes differ from one zero byte in the length byte.
     let zeros = RecordKey::new(&[0u8; 31]).expect("31 bytes are a key");
-    assert_eq!(zeros.as_bytes(), &[0u8; 31]);
-    let mut expected = [0u8; 33];
-    expected[0] = 0x1f;
-    assert_eq!(zeros.encoded(), expected);
-    assert_eq!(RecordKey::decode(expected), Some(zeros.clone()));
     let one_zero = RecordKey::new(&[0u8]).expect("one zero byte is a key");
     assert_ne!(one_zero, zeros);
-    assert_ne!(one_zero.encoded(), zeros.encoded());
-
-    // A 32-byte key, the width of an SDK entity key: [0xee; 32] -> 20 ee…ee,
-    // every byte after the length byte is key, none is padding.
-    let entity = RecordKey::new(&[0xee; 32]).expect("32 bytes are a key");
-    let mut expected = [0xeeu8; 33];
-    expected[0] = 0x20;
-    assert_eq!(entity.encoded(), expected);
-    assert_eq!(RecordKey::decode(expected), Some(entity.clone()));
-    // [0u8; 32] -> 20 00…00 differs from 31 zero bytes only in the length.
-    let zeros_32 = RecordKey::new(&[0u8; 32]).expect("32 zero bytes are a key");
-    let mut expected = [0u8; 33];
-    expected[0] = 0x20;
-    assert_eq!(zeros_32.encoded(), expected);
-    assert_eq!(RecordKey::decode(expected), Some(zeros_32.clone()));
-    assert_ne!(zeros_32, zeros);
-
-    // decode rejects length 0, length 33 and non-zero padding.
-    assert_eq!(RecordKey::decode([0u8; 33]), None, "length byte 0");
-    let mut too_long = [0u8; 33];
-    too_long[0] = 33;
-    assert_eq!(RecordKey::decode(too_long), None, "length byte 33");
-    let mut dirty = short.encoded();
-    dirty[32] = 0x01;
-    assert_eq!(RecordKey::decode(dirty), None, "non-zero padding");
-
+    assert_eq!(arkiv_db::encode(&one_zero), [0x01, 0x00]);
     // Every accepted length round-trips.
     for len in 1..=32usize {
         let bytes: Vec<u8> = (0..len).map(|i| u8::try_from(i).unwrap() + 1).collect();
         let key = RecordKey::new(&bytes).unwrap_or_else(|| panic!("{len} bytes are a key"));
-        let encoded = key.encoded();
+        let encoded = arkiv_db::encode(&key);
         assert_eq!(usize::from(encoded[0]), len);
-        assert_eq!(&encoded[1..=len], bytes.as_slice());
-        assert!(encoded[len + 1..].iter().all(|&byte| byte == 0));
-        assert_eq!(RecordKey::decode(encoded), Some(key));
+        assert_eq!(&encoded[1..], bytes.as_slice());
+        assert_eq!(arkiv_db::decode_exact::<RecordKey>(&encoded).unwrap(), key);
     }
 }
 
@@ -883,7 +845,7 @@ fn limits_are_fixed_per_engine() {
         max_groups: 8,
         max_literals: 8,
         max_cell_name_len: CellName::MAX_LEN,
-        max_indexed_len: Value::MAX_INDEXED_LEN,
+        max_indexed_len: arkiv_db::Limits::DEFAULT_INDEXED_LEN,
     };
     assert_eq!(Limits::DEFAULT, defaults);
     assert_eq!(DEFAULT_NAMESPACE_CAP, 1 << 32);
@@ -2305,9 +2267,10 @@ fn raw_bytes_and_typed_records_share_a_namespace_but_never_a_key() {
     let mut model = Model::default();
     let mut branch = fresh_branch(&engine);
     let record = key("a");
-    // Even a valid raw prefix of the typed encoding cannot reach typed data.
-    // The full 33-byte encoding exceeds the raw key cap.
-    let encoded = record.encoded()[..20].to_vec();
+    // Even the typed key's own encoding (zero-extended to the 20-byte raw
+    // key cap), used as a raw key, cannot reach typed data.
+    let mut encoded = arkiv_db::encode(&record);
+    encoded.resize(20, 0);
     let cells = vec![(name("kind"), attr(Value::str("book")))];
     // create: 1 + 3 + {20 + 4 + (4 + 4) + RowByte (1 + 8) + RootUpdate 3*2}
     // + two new terms * (36 + RootUpdate 2*2) = 4 + 47 + 80 = 131.

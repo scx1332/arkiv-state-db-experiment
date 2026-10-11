@@ -38,7 +38,7 @@ fn publish(engine: &mut DurableEngine, branch: Branch) {
 fn hand_built_profile_and_manifest_vectors() {
     let g = EngineGenesis::new([9; 32], PriceSchedule::uniform(1, 2));
     let mut expected = b"ARKENG01".to_vec();
-    for version in [1u32, 1, 1, 3, 2, 1] {
+    for version in [2u32, 1, 2, 3, 2, 2] {
         expected.extend(version.to_be_bytes());
     }
     expected.extend([9; 32]);
@@ -76,7 +76,7 @@ fn hand_built_profile_and_manifest_vectors() {
     bytes.extend(0u64.to_be_bytes());
     bytes.push(0);
     let empty = arkiv_db_trie::EMPTY_ROOT_HASH;
-    bytes.extend(1u32.to_be_bytes());
+    bytes.extend(2u32.to_be_bytes()); // state format 2
     bytes.extend(empty);
     bytes.extend(0u64.to_be_bytes());
     bytes.extend(1u64.to_be_bytes());

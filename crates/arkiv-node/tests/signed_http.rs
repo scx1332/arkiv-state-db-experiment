@@ -1010,10 +1010,12 @@ async fn range_inspection_exposes_only_complete_authenticated_branching_witnesse
         &interval["lowerKey"].as_str().unwrap()[2..]
     );
     let nodes = interval["nodes"].as_array().unwrap();
+    // The excluded endpoint 20 is never included; with whole-key exclusive
+    // endpoints (state layout 2) its leaf is not even opened.
     assert!(
-        nodes
+        !nodes
             .iter()
-            .any(|node| node["leaf"]["value"] == "20" && node["leaf"]["included"] == false)
+            .any(|node| node["leaf"]["value"] == "20" && node["leaf"]["included"] == true)
     );
     assert!(
         !nodes

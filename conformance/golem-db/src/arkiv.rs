@@ -264,7 +264,8 @@ pub struct ArkivDb {
 /// golem refuses settings its backend cannot hold. golem's three cell limits
 /// map one to one. golem indexes a `str` attribute up to `max_str_len`, so
 /// that is also the engine's indexed-string limit; a value above the
-/// engine's caps (32-byte names, 128-byte indexed values) is refused rather
+/// engine's caps (32-byte names, 512-byte indexed values: the generic profile
+/// ceiling of state layout 2) is refused rather
 /// than silently narrowed. golem has no per-record cell count: the engine's
 /// default (64) applies.
 pub fn engine_genesis(genesis: &Genesis) -> OpenResult<EngineGenesis> {
@@ -275,12 +276,12 @@ pub fn engine_genesis(genesis: &Genesis) -> OpenResult<EngineGenesis> {
         )));
     }
     let golem = genesis.cell_limits;
-    if golem.max_str_len as usize > Value::MAX_INDEXED_LEN {
+    if golem.max_str_len as usize > Value::INDEXED_LEN_CEILING {
         return Err(OpenError::InvalidConfig(format!(
             "max_str_len {} exceeds the arkiv engine's indexed-value cap of {} bytes \
              (golem indexes str attributes up to max_str_len)",
             golem.max_str_len,
-            Value::MAX_INDEXED_LEN
+            Value::INDEXED_LEN_CEILING
         )));
     }
     let limits = Limits {

@@ -309,7 +309,7 @@ fn genesis_block_header() {
 
 /// The hash of `support::genesis()`, pinned so a change to any genesis or
 /// header byte is deliberate.
-const GENESIS_HASH: &str = "f0832101fb49ad2da2f67475fd77493af8d784261de679cfc8cebf28a52a250e";
+const GENESIS_HASH: &str = "ed25478e4032be24ec845e467a622ec08ed9dcfcf1483c18cef4aa2e5d128d09";
 
 #[test]
 fn admin_inputs() {

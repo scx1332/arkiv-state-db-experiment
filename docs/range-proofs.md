@@ -10,7 +10,8 @@ total order for the floats, `false < true`, unsigned bytewise for `addr`,
 `bytes4/8/16/32` and `key`, and UTF-8 bytewise for `str` (a proper prefix
 first, `"" < "a" < "a\0" < "ab"`; see `docs/block-format.md`, "Value types
 and order"). A `str` bound is at most the engine's indexed-string limit
-(`Limits::indexed_value_len`, hard cap 128 bytes), as for equality. The
+(`Limits::indexed_value_len`: 128 bytes by default, at most the 512-byte
+ceiling), as for equality. The
 signed HTTP adapter (`/signed/v1/query/range/*`) accepts the same types it
 resolves for equality requests. Reversed bounds and equal excluded bounds
 produce a complete empty result; so does an excluded upper bound of `""`,
@@ -18,11 +19,16 @@ which nothing is below. Different types, fields, and missing attributes do
 not match. All cells and keys of matching rows are returned in RecordId
 order.
 
-The proof walks the term map's closed key interval. An excluded lower bound
-starts at the bound's fixed-width successor key (its length byte plus one,
-which never carries); an excluded upper bound ends at its predecessor key,
-which for the empty string borrows into the presence byte and falls below
-the run, giving the empty interval.
+The proof walks a term-key interval with the query's own inclusivity (state
+layout 2, `docs/experimental-prekucki-v1.md`). Within the value run `P =
+bytes⁰(name) ‖ tag ‖ 01`, the lower endpoint is `P` (unbounded) or the
+bound's term key, included or excluded as requested; the upper endpoint is
+`prefix_successor(P)`, excluded (unbounded), or the bound's term key with
+its inclusivity. Term keys are prefix-free and preserve value order, so an
+excluded endpoint excludes exactly that value; no successor or predecessor
+key is computed. The producer and the verifier share the interval and its
+pruning rule (`KeyRange::may_hold`), and the response envelope carries the
+layout version (2).
 
 There is **no pagination**: no query limit, offset, cursor or continuation.
 An oversized result returns `ProofLimitExceeded` or `BudgetExceeded`; it never

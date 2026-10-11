@@ -94,7 +94,8 @@ using hex must lower the binary cap, for example to
 The decoder checks response bytes before parsing. It checks declared
 sequence counts against both semantic caps and remaining payload before
 reserving vectors. Paths borrow supplied node bytes, have catalog/term/row/
-key bounds of 17/177/17/67, and strict trie traversal enforces these same
+key bounds of 17/`2L + 1`/17/67 (`L = TermKey::max_len_for(limits)`, 164 for the
+default limits, so 329 term nodes), and strict trie traversal enforces these same
 structural bounds including inline descendants. Node lengths are bounded
 before walking, hashing or copying their values. The entire posting set
 must be sorted, unique, nonzero, of the exact committed count and rebuild

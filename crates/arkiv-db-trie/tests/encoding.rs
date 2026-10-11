@@ -1,22 +1,27 @@
-//! The order-preserving fixed-width key encoders of `arkiv_db_trie::order`.
+//! The order-preserving, prefix-free key encoders of `arkiv_db_trie::order`.
 //!
 //! Establishes, on random inputs compared with Rust's own bytewise slice
 //! ordering and lexicographic tuple ordering (the independent model): the
-//! padded-with-length encoding preserves the order of byte strings up to a
-//! maximum length, including empty strings, strings differing only in
-//! trailing zero bytes, strings that are prefixes of others and strings of
-//! the maximum length, and is injective and decodable; the composite
-//! `(name ≤ 20 bytes, tag, presence, value ≤ 64 bytes)` encoding (88 bytes,
-//! the building blocks of the engine's planned term key) preserves tuple
-//! order; and a map keyed by such an encoding iterates in tuple order.
+//! escaped (`encode_bytes`) and shifted (`encode_shifted`) encodings
+//! preserve the order of byte strings, including empty strings, strings
+//! differing only in trailing zero bytes, strings that are prefixes of
+//! others and `00`/`01`/`ff`-heavy strings; they are prefix-free, injective
+//! and decodable, and their unterminated forms select exactly the strings
+//! with a prefix; the composite `(name ≤ 20 bytes, tag, presence, value ≤
+//! 64 bytes)` encoding (the building blocks of the engine's term key)
+//! preserves tuple order and is prefix-free; and a map keyed by such an
+//! encoding iterates in tuple order.
 
 mod support;
 
 use std::cmp::Ordering;
 
 use arkiv_db_trie::{
-    CodecError, MemoryOnly, MerkleMap, Probe, TrieKey,
-    order::{KeyReader, KeyWriter, decode_padded, encode_padded, padded_width},
+    CodecError, KeyRange, MemoryOnly, MerkleMap, Probe, TrieKey, is_prefix_free,
+    order::{
+        KeyReader, KeyWriter, decode_bytes, decode_shifted, encode_bytes, encode_shifted,
+        escape_bytes, shift_bytes,
+    },
 };
 use support::Rng;
 
@@ -50,60 +55,91 @@ fn tricky(rng: &mut Rng, max: usize, pool: &[Vec<u8>]) -> Vec<u8> {
     }
 }
 
-fn padded(value: &[u8], max: u8) -> Vec<u8> {
+fn escaped(value: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
-    encode_padded(value, max, &mut out).unwrap();
+    encode_bytes(value, &mut out);
     out
 }
 
+fn shifted(value: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    encode_shifted(value, &mut out).ok()?;
+    Some(out)
+}
+
 #[test]
-fn padded_encoding_preserves_bytewise_order() {
+fn byte_string_encodings_preserve_order_and_are_prefix_free() {
     let mut rng = Rng(1);
-    for max in [0u8, 1, 2, 3, 20, 64] {
-        let mut pool: Vec<Vec<u8>> = vec![Vec::new(), vec![0; max as usize]];
+    for max in [0usize, 1, 2, 3, 20, 64] {
+        let mut pool: Vec<Vec<u8>> = vec![Vec::new(), vec![0; max]];
         if max > 0 {
-            pool.push(vec![0]);
+            pool.extend([vec![0], vec![1], vec![0xff]]);
         }
         for _ in 0..200 {
-            let next = tricky(&mut rng, max as usize, &pool);
+            let next = tricky(&mut rng, max, &pool);
             pool.push(next);
         }
+        let mut codes: Vec<Vec<u8>> = pool.iter().map(|value| escaped(value)).collect();
+        codes.sort();
+        codes.dedup();
+        assert!(is_prefix_free(&codes), "escaped at max {max}");
+        let mut codes: Vec<Vec<u8>> = pool.iter().filter_map(|value| shifted(value)).collect();
+        codes.sort();
+        codes.dedup();
+        assert!(is_prefix_free(&codes), "shifted at max {max}");
         for _ in 0..20_000 {
             let left = &pool[rng.below(pool.len())];
             let right = &pool[rng.below(pool.len())];
-            let (left_code, right_code) = (padded(left, max), padded(right, max));
-            assert_eq!(left_code.len(), padded_width(max));
+            let (left_code, right_code) = (escaped(left), escaped(right));
             assert_eq!(
                 left_code.cmp(&right_code),
                 left.cmp(right),
-                "{left:?} vs {right:?} at max {max}"
+                "{left:?} vs {right:?}"
             );
-            assert_eq!(decode_padded(&left_code, max), Ok(left.as_slice()));
+            assert_eq!(decode_bytes(&left_code, max), Ok((left.clone(), &[][..])));
+            if let (Some(left_code), Some(right_code)) = (shifted(left), shifted(right)) {
+                assert_eq!(left_code.cmp(&right_code), left.cmp(right));
+                assert_eq!(left_code.len(), left.len() + 1);
+                assert_eq!(decode_shifted(&left_code, max), Ok((left.clone(), &[][..])));
+            }
+            // The unterminated form selects exactly the extensions.
+            let mut prefix = Vec::new();
+            escape_bytes(left, &mut prefix);
+            assert_eq!(
+                KeyRange::prefix(&prefix).contains(&escaped(right)),
+                right.starts_with(left),
+                "{left:?} prefix of {right:?}"
+            );
+            let mut prefix = Vec::new();
+            if shift_bytes(left, &mut prefix).is_ok()
+                && let Some(right_code) = shifted(right)
+            {
+                assert_eq!(
+                    KeyRange::prefix(&prefix).contains(&right_code),
+                    right.starts_with(left)
+                );
+            }
         }
     }
 }
 
 #[test]
-fn padded_encoding_edge_cases() {
-    // Trailing zeros are told apart by the length byte alone.
-    assert!(padded(b"a", 4) < padded(b"a\0", 4));
-    assert!(padded(b"a\0", 4) < padded(b"a\0\0", 4));
-    assert!(padded(b"", 4) < padded(b"\0", 4));
-    // A proper prefix sorts first even against a zero continuation.
-    assert!(padded(b"ab", 4) < padded(b"ab\0\0", 4));
-    assert!(padded(b"ab\0\0", 4) < padded(b"ab\x01", 4));
-    // Maximum length and overflow.
-    assert_eq!(
-        padded(&[0xff; 64], 64),
-        [[0xff; 64].as_slice(), &[64]].concat()
-    );
-    let mut out = vec![9];
-    assert!(encode_padded(&[0; 65], 64, &mut out).is_err());
-    assert_eq!(out, [9]);
-    // Every width is fixed; a wrong-width, overlong or dirty field is rejected.
-    assert!(decode_padded(&[0; 64], 64).is_err());
-    assert!(decode_padded(&[[0; 64].as_slice(), &[65]].concat(), 64).is_err());
-    assert!(decode_padded(&[[1, 0, 1].as_slice(), &[1]].concat(), 3).is_err());
+fn byte_string_encoding_edge_cases() {
+    // Trailing zeros and proper prefixes.
+    assert!(escaped(b"a") < escaped(b"a\0"));
+    assert!(escaped(b"a\0") < escaped(b"a\0\0"));
+    assert!(escaped(b"") < escaped(b"\0"));
+    assert!(escaped(b"ab\0\0") < escaped(b"ab\x01"));
+    assert!(!escaped(b"a\0").starts_with(&escaped(b"a")));
+    // Worst-case escaping doubles the length; shifting never does.
+    assert_eq!(escaped(&[0; 64]).len(), 129);
+    assert_eq!(shifted(&[0; 64]).unwrap().len(), 65);
+    assert_eq!(shifted(&[0xff]), None);
+    // Noncanonical and over-long fields are rejected.
+    assert!(decode_bytes(&escaped(&[7; 65]), 64).is_err());
+    assert!(decode_bytes(&[0x01, 0x00], 4).is_err());
+    assert!(decode_shifted(&shifted(&[7; 65]).unwrap(), 64).is_err());
+    assert!(decode_shifted(&[0x05], 4).is_err());
 }
 
 /// The planned term-key building blocks: name, type tag, presence, value.
@@ -116,25 +152,23 @@ struct Term {
 }
 
 impl TrieKey for Term {
-    const MAX_LEN: usize = 21 + 1 + 1 + 65;
+    const MAX_LEN: usize = 41 + 1 + 1 + 129;
 
     fn encode(&self) -> Vec<u8> {
         let mut key = KeyWriter::new();
-        key.padded(&self.name, 20)
-            .expect("names are at most 20 bytes")
+        key.bytes(&self.name)
             .byte(self.tag)
             .byte(self.presence)
-            .padded(&self.value, 64)
-            .expect("values are at most 64 bytes");
+            .bytes(&self.value);
         key.finish()
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
         let mut reader = KeyReader::new(bytes);
-        let name = reader.padded(20)?.to_vec();
+        let name = reader.bytes(20)?;
         let tag = reader.byte()?;
         let presence = reader.byte()?;
-        let value = reader.padded(64)?.to_vec();
+        let value = reader.bytes(64)?;
         reader.finish()?;
         Ok(Self {
             name,
@@ -178,11 +212,13 @@ fn pools(rng: &mut Rng) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
 fn composite_encoding_preserves_tuple_order() {
     let mut rng = Rng(2);
     let (names, values) = pools(&mut rng);
+    let mut keys = Vec::new();
     for _ in 0..50_000 {
         let left = random_term(&mut rng, &names, &values);
         let right = random_term(&mut rng, &names, &values);
         let (left_key, right_key) = (left.encode(), right.encode());
-        assert_eq!(left_key.len(), Term::MAX_LEN);
+        assert!(left_key.len() <= Term::MAX_LEN);
+        keys.push(left_key.clone());
         assert_eq!(
             left_key.cmp(&right_key),
             left.cmp(&right),
@@ -193,6 +229,9 @@ fn composite_encoding_preserves_tuple_order() {
             assert_eq!(left, right);
         }
     }
+    keys.sort();
+    keys.dedup();
+    assert!(is_prefix_free(&keys));
     // Existence (presence 0) sorts before every value of its name and tag,
     // including the empty value.
     let existence = Term {

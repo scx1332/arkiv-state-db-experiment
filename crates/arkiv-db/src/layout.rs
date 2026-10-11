@@ -1,20 +1,31 @@
-//! The key and leaf encodings of the engine's trie maps (state format 1).
+//! The key and leaf encodings of the engine's trie maps (state format 2).
 //!
-//! Every map is an [`arkiv_db_trie::MerkleMap`] with a fixed key length; it
-//! orders entries by the unsigned bytewise order of the key encodings, so
-//! each key encoding below preserves the order the engine relies on. Leaf
-//! values are canonical-codec encodings (codec version
-//! [`CODEC_VERSION`](crate::CODEC_VERSION)) and never empty.
+//! Every map is an [`arkiv_db_trie::MerkleMap`] with bounded, prefix-free
+//! keys; it orders entries by the unsigned bytewise order of the key
+//! encodings, so each key encoding below preserves the order the engine
+//! relies on, and no encoding is a strict prefix of another of its map (a
+//! trie branch holds no value). Leaf values are canonical-codec encodings
+//! (codec version [`CODEC_VERSION`](crate::CODEC_VERSION)) and never empty.
+//!
+//! `bytes⁰` is [`order::encode_bytes`]: `00 → 01 01`, `01 → 01 02`, then a
+//! `00` terminator. `text⁺` is [`order::encode_shifted`]: every UTF-8 byte
+//! plus one, then a `00` terminator (exactly `len + 1` bytes; UTF-8 never
+//! holds `ff`). Both are prefix-free and order as the strings do.
 //!
 //! | Map | Key | Bytes | Leaf value |
 //! | --- | --- | --- | --- |
 //! | catalog | [`NamespaceId`] big-endian | 8 | [`NamespaceState`]: `descriptor ‖ next_record u64 ‖ records ‖ keys ‖ rows ‖ terms`, each map as `root ‖ len u64` |
 //! | host | raw `[u8; 32]` | 32 | [`Blob`]: `u32 len ‖ bytes` |
-//! | records (raw) | [`RawKey`]: `key ‖ 0x00 pad to 20 ‖ len` | 21 | [`Blob`]: `u32 len ‖ bytes` |
-//! | keys | [`RecordKey`]: `len ‖ bytes ‖ 0x00 pad` | 33 | [`RecordId`]: `u64` (nonzero) |
+//! | records (raw) | [`RawKey`]: `bytes⁰(key)` | 1–41 | [`Blob`]: `u32 len ‖ bytes` |
+//! | keys | [`RecordKey`]: `len ‖ bytes` | 2–33 | [`RecordId`]: `u64` (nonzero) |
 //! | rows | [`RecordId`] big-endian | 8 | [`StoredRecord`]: `RecordKey ‖ Vec<(CellName, Cell)>` sorted by name |
-//! | terms | [`TermKey`]: `name ‖ 0x00 pad to 32 ‖ name_len ‖ tag ‖ presence ‖ term bytes ‖ 0x00 pad to 128 ‖ term_len` | 164 | [`Posting`]: `posting root ‖ posting len u64` (len ≥ 1) |
+//! | terms | [`TermKey`]: `bytes⁰(name) ‖ tag ‖ 00` (existence) or `bytes⁰(name) ‖ tag ‖ 01 ‖ value` | 4–[`TermKey::MAX_LEN`] | [`Posting`]: `posting root ‖ posting len u64` (len ≥ 1) |
 //! | postings | [`RecordId`] big-endian | 8 | [`Member`]: `01` |
+//!
+//! A term's `value` is `text⁺(utf8)` for `Str` and the type's fixed-width
+//! order-preserving term bytes ([`Value::term_bytes`]) for every other
+//! indexable type. Names never contain `00` or `01` (the name grammar), so
+//! `bytes⁰(name)` is the name and a `00`.
 //!
 //! A nested map is written as its root hash and entry count; `(EMPTY_ROOT_HASH,
 //! 0)` is the empty map and every other pairing of the empty root or a zero
@@ -35,7 +46,7 @@ use std::sync::Arc;
 
 use arkiv_db_trie::{
     CodecError, EMPTY_ROOT_HASH, MerkleMap, ObjectSink, TrieError, TrieKey, TrieValue,
-    order::{KeyReader, KeyWriter, decode_padded, encode_padded},
+    order::{decode_bytes, decode_shifted, encode_bytes, encode_shifted, encoded_bytes_max},
 };
 
 use crate::{
@@ -112,52 +123,67 @@ impl TrieKey for RecordId {
     }
 }
 
-/// The version-2 canonical encoding, `len ‖ bytes ‖ 0x00 padding` (33
-/// bytes). The key map is only read by point lookups, so its order is
-/// never observed.
+/// `len ‖ bytes` (2 to 33 bytes): prefix-free, since the length byte fixes
+/// the width. The key map is only read by point lookups, so its order (by
+/// length first) is never observed.
 impl TrieKey for RecordKey {
-    const MAX_LEN: usize = Self::ENCODED_LEN;
+    const MAX_LEN: usize = 1 + RecordKey::MAX_LEN;
 
     fn encode(&self) -> Vec<u8> {
-        self.encoded().to_vec()
+        let bytes = self.as_bytes();
+        let mut out = Vec::with_capacity(1 + bytes.len());
+        out.push(u8::try_from(bytes.len()).expect("record keys are at most 32 bytes"));
+        out.extend_from_slice(bytes);
+        out
     }
 
+    /// Rejects a length byte of 0 or above 32 and a length disagreeing with
+    /// the bytes that follow.
     fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
-        let bytes = bytes
-            .try_into()
-            .map_err(|_| CodecError::new("record key is not 33 bytes"))?;
-        Self::decode(bytes).ok_or_else(|| CodecError::new("record key encoding is not canonical"))
+        let (&len, key) = bytes
+            .split_first()
+            .ok_or_else(|| CodecError::new("record key is empty"))?;
+        if usize::from(len) != key.len() {
+            return Err(CodecError::new("record key length byte disagrees"));
+        }
+        RecordKey::new(key).ok_or_else(|| CodecError::new("record key length out of range"))
     }
 }
 
 /// A raw record key of at most [`Limits::MAX_RAW_KEY_LEN`] bytes, empty
-/// included, keyed as `key ‖ 0x00 pad to 20 ‖ len` (21 bytes).
+/// included, keyed as `bytes⁰(key)` ([`order::encode_bytes`], 1 to 41
+/// bytes).
 ///
-/// The padded encoding orders exactly as the keys' bytewise order (see
-/// [`arkiv_db_trie::order`]), and the encoding of a prefix is at most the
-/// encoding of every key that starts with it and above every smaller key,
-/// so a prefix scan seeks to the encoding of the prefix itself.
+/// The encoding orders exactly as the keys' bytewise order, and the encoding
+/// of a prefix is at most the encoding of every key that starts with it and
+/// above every smaller key, so a prefix scan seeks to the encoding of the
+/// prefix itself.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct RawKey(pub(crate) Arc<[u8]>);
 
-const RAW_KEY_MAX: u8 = Limits::MAX_RAW_KEY_LEN as u8;
-
 impl TrieKey for RawKey {
-    const MAX_LEN: usize = Limits::MAX_RAW_KEY_LEN + 1;
+    const MAX_LEN: usize = encoded_bytes_max(Limits::MAX_RAW_KEY_LEN);
 
     /// # Panics
     ///
     /// If the key is longer than [`Limits::MAX_RAW_KEY_LEN`], which
     /// admission rejects before any key reaches a map.
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(Self::MAX_LEN);
-        encode_padded(&self.0, RAW_KEY_MAX, &mut out)
-            .expect("admission bounds raw keys and prefixes by 20 bytes");
+        assert!(
+            self.0.len() <= Limits::MAX_RAW_KEY_LEN,
+            "admission bounds raw keys and prefixes by 20 bytes"
+        );
+        let mut out = Vec::with_capacity(self.0.len() + 1);
+        encode_bytes(&self.0, &mut out);
         out
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
-        decode_padded(bytes, RAW_KEY_MAX).map(|key| Self(Arc::from(key)))
+        let (key, rest) = decode_bytes(bytes, Limits::MAX_RAW_KEY_LEN)?;
+        if !rest.is_empty() {
+            return Err(CodecError::new("trailing bytes after a raw key"));
+        }
+        Ok(Self(Arc::from(key)))
     }
 }
 
@@ -166,21 +192,23 @@ impl TrieKey for RawKey {
 const PRESENCE_EXISTENCE: u8 = 0;
 const PRESENCE_VALUE: u8 = 1;
 
-/// Width of the name field of a term key: [`CellName::MAX_LEN`].
-const TERM_NAME_MAX: u8 = CellName::MAX_LEN as u8;
-/// Width of the value field of a term key: [`Value::MAX_INDEXED_LEN`].
-const TERM_VALUE_MAX: u8 = Value::MAX_INDEXED_LEN as u8;
+/// The widest fixed-width term value (`U256`, `I256`, `Dec`, `Bytes32`,
+/// `Key`).
+const WIDEST_SCALAR_TERM: usize = 32;
 
 /// One index term: a value term (`value = Some`, its term bytes) or the
 /// existence term of a `(name, type)` (`value = None`).
 ///
-/// Keyed as `name ‖ 0x00 pad to 32 ‖ name_len ‖ tag ‖ presence ‖ term bytes
-/// ‖ 0x00 pad to 128 ‖ term_len` (164 bytes, presence `00` for existence with
-/// an empty value field, `01` for a value). Every field has a fixed width
-/// and the padded fields preserve bytewise order, so terms order by name,
-/// then type id, then existence before every value, then value bytes: every
-/// `(name, type)` is one contiguous run in value order, as the derived
-/// order of this struct's fields is.
+/// Keyed as `bytes⁰(name) ‖ tag ‖ 00` (existence) or `bytes⁰(name) ‖ tag ‖
+/// 01 ‖ value` (value term), where `value` is `text⁺(utf8)` for `Str` and the
+/// fixed-width term bytes of every other type. Within one `(name, tag)` the
+/// value parts are prefix-free (one fixed width per scalar type; `text⁺` is
+/// prefix-free), the name encoding is prefix-free, and existence and value
+/// keys differ at the presence byte, so the whole key set is prefix-free.
+/// Every part preserves order, so terms order by name, then type id, then
+/// existence before every value, then value bytes: every `(name, type)` is
+/// one contiguous run in value order, as the derived order of this
+/// struct's fields is.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct TermKey {
     pub(crate) name: CellName,
@@ -210,7 +238,9 @@ impl TermKey {
     }
 
     /// The value term with raw term `bytes`: a seek position inside the
-    /// `(name, tag)` run.
+    /// `(name, tag)` run. For `Str` it sorts at or before every value that
+    /// starts with `bytes`; for a scalar type, empty `bytes` is the start of
+    /// the run.
     pub(crate) fn run_start(name: &CellName, tag: TypeTag, bytes: &[u8]) -> Self {
         Self {
             name: name.clone(),
@@ -218,54 +248,114 @@ impl TermKey {
             value: Some(Arc::from(bytes)),
         }
     }
+
+    /// `bytes⁰(name) ‖ tag ‖ 01`: the prefix shared by every value term of
+    /// `(name, tag)` and by no other key. The run of value terms is
+    /// `[run, prefix_successor(run))`.
+    pub(crate) fn value_run(name: &CellName, tag: TypeTag) -> Vec<u8> {
+        let mut out = Vec::with_capacity(name.as_str().len() + 3);
+        encode_bytes(name.as_str().as_bytes(), &mut out);
+        out.extend([tag.id(), PRESENCE_VALUE]);
+        out
+    }
+
+    /// The run of `Str` value terms of `(name, Str)` whose value starts with
+    /// `prefix`: `[run ‖ shift(prefix), prefix_successor(run ‖ shift(prefix)))`.
+    /// Prefix reads seek to `text⁺(prefix)`, the run's smallest key, and stop
+    /// at the first value without the prefix; this states the run exactly.
+    #[cfg(test)]
+    pub(crate) fn str_prefix_run(name: &CellName, prefix: &[u8]) -> arkiv_db_trie::KeyRange {
+        let mut start = Self::value_run(name, TypeTag::Str);
+        arkiv_db_trie::order::shift_bytes(prefix, &mut start).expect("UTF-8 never holds ff");
+        arkiv_db_trie::KeyRange::prefix(&start)
+    }
+
+    /// The longest term key under `limits`: `bytes⁰(name)`, tag, presence
+    /// and the longer of a `text⁺` value at the indexed-string limit and the
+    /// widest scalar. Bounds proof-walk depth and reservations for one
+    /// instance; [`TrieKey::MAX_LEN`] is this at the hard caps.
+    pub(crate) const fn max_len_for(limits: &Limits) -> usize {
+        let value = limits.indexed_value_len() + 1;
+        let value = if value > WIDEST_SCALAR_TERM {
+            value
+        } else {
+            WIDEST_SCALAR_TERM
+        };
+        // Names never contain 00 or 01, so `bytes⁰(name)` is `len + 1`.
+        (limits.max_cell_name_len + 1) + 2 + value
+    }
 }
 
 impl TrieKey for TermKey {
-    const MAX_LEN: usize = CellName::MAX_LEN + Value::MAX_INDEXED_LEN + 4;
+    /// At the hard caps: a 32-byte name (33 encoded), tag, presence and a
+    /// `Str` value at [`Value::INDEXED_LEN_CEILING`] (plus its terminator).
+    const MAX_LEN: usize = (CellName::MAX_LEN + 1) + 2 + Value::INDEXED_LEN_CEILING + 1;
 
     /// # Panics
     ///
-    /// If the name exceeds 32 bytes or the value 128, which name validation
-    /// and admission rule out before any term is built.
+    /// If the name exceeds 32 bytes or a `Str` value the indexed-string
+    /// ceiling, which name validation and admission rule out before any term
+    /// is built.
     fn encode(&self) -> Vec<u8> {
-        let mut key = KeyWriter::new();
-        key.padded(self.name.as_str().as_bytes(), TERM_NAME_MAX)
-            .expect("cell names are at most 32 bytes")
-            .byte(self.tag.id());
+        let name = self.name.as_str().as_bytes();
+        let value_len = self.value.as_ref().map_or(0, |value| value.len() + 1);
+        let mut key = Vec::with_capacity(name.len() + 3 + value_len);
+        encode_bytes(name, &mut key);
+        key.push(self.tag.id());
         match &self.value {
-            None => key
-                .byte(PRESENCE_EXISTENCE)
-                .padded(&[], TERM_VALUE_MAX)
-                .expect("empty"),
-            Some(bytes) => key
-                .byte(PRESENCE_VALUE)
-                .padded(bytes, TERM_VALUE_MAX)
-                .expect("indexed values and query bounds are at most 128 bytes"),
-        };
-        key.finish()
+            None => key.push(PRESENCE_EXISTENCE),
+            Some(bytes) => {
+                key.push(PRESENCE_VALUE);
+                if self.tag == TypeTag::Str {
+                    assert!(
+                        bytes.len() <= Value::INDEXED_LEN_CEILING,
+                        "indexed values and query bounds are within the ceiling"
+                    );
+                    encode_shifted(bytes, &mut key).expect("UTF-8 never holds ff");
+                } else {
+                    key.extend_from_slice(bytes);
+                }
+            }
+        }
+        key
     }
 
     /// Rejects a name outside the grammar, an unknown or unindexable type,
     /// a presence byte other than `00`/`01`, an existence term with value
-    /// bytes, and value bytes that are not the term bytes of the type.
+    /// bytes, value bytes that are not the term bytes of the type, a `Str`
+    /// value over the ceiling or without its terminator, and trailing bytes.
     fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
-        let mut reader = KeyReader::new(bytes);
-        let name = std::str::from_utf8(reader.padded(TERM_NAME_MAX)?)
+        let (name, rest) = decode_bytes(bytes, CellName::MAX_LEN)?;
+        let name = std::str::from_utf8(&name)
             .ok()
             .and_then(|name| CellName::new(name).ok())
             .ok_or_else(|| CodecError::new("term name is not a valid cell name"))?;
-        let tag_id = reader.byte()?;
+        let (&tag_id, rest) = rest
+            .split_first()
+            .ok_or_else(|| CodecError::new("term key has no type"))?;
         let tag = TypeTag::ALL
             .into_iter()
             .find(|tag| tag.id() == tag_id && tag.is_indexable())
             .ok_or_else(|| CodecError::new("term type is not an indexable type id"))?;
-        let presence = reader.byte()?;
-        let value = reader.padded(TERM_VALUE_MAX)?;
-        reader.finish()?;
+        let (&presence, value) = rest
+            .split_first()
+            .ok_or_else(|| CodecError::new("term key has no presence byte"))?;
         let value = match presence {
             PRESENCE_EXISTENCE if value.is_empty() => None,
-            PRESENCE_VALUE if Value::from_term_bytes(tag, value).is_some() => {
-                Some(Arc::from(value))
+            PRESENCE_VALUE => {
+                let term: Vec<u8> = if tag == TypeTag::Str {
+                    let (text, trailing) = decode_shifted(value, Value::INDEXED_LEN_CEILING)?;
+                    if !trailing.is_empty() {
+                        return Err(CodecError::new("trailing bytes after a term value"));
+                    }
+                    text
+                } else {
+                    value.to_vec()
+                };
+                if Value::from_term_bytes(tag, &term).is_none() {
+                    return Err(CodecError::new("term value is not the type's term bytes"));
+                }
+                Some(Arc::from(term))
             }
             _ => return Err(CodecError::new("term presence and value disagree")),
         };
@@ -408,8 +498,9 @@ pub(crate) struct StoredRecord {
 
 /// `RecordKey (u8 len ‖ bytes) ‖ Vec<(CellName, Cell)>` with the cells in
 /// strictly ascending name order and every attribute indexable: a type
-/// other than `Bytes` and at most [`Value::MAX_INDEXED_LEN`] encoded bytes,
-/// as admission guarantees for every stored row.
+/// other than `Bytes` and at most [`Value::INDEXED_LEN_CEILING`] encoded
+/// bytes, as admission guarantees for every stored row (the instance's own
+/// indexed-string limit is at most that ceiling).
 impl TrieValue for StoredRecord {
     fn encode(&self) -> Vec<u8> {
         let mut encoder = Encoder::new();
@@ -438,10 +529,10 @@ impl TrieValue for StoredRecord {
         if cells.iter().any(|(_, cell)| {
             cell.is_attribute()
                 && (!cell.value.tag().is_indexable()
-                    || cell.value.encoded_len() > Value::MAX_INDEXED_LEN)
+                    || cell.value.encoded_len() > Value::INDEXED_LEN_CEILING)
         }) {
             return Err(CodecError::new(
-                "a row attribute is not indexable or longer than 128 bytes",
+                "a row attribute is not indexable or longer than the indexed ceiling",
             ));
         }
         Ok(Self {
@@ -571,9 +662,9 @@ mod tests {
         }
     }
 
-    /// Raw keys biased toward the cases where a padded encoding could go
-    /// wrong: empty keys, zero bytes, trailing zeros, prefixes of each
-    /// other and the full 20 bytes.
+    /// Raw keys biased toward the cases where an escaped encoding could go
+    /// wrong: empty keys, zero and one bytes, trailing zeros, prefixes of
+    /// each other and the full 20 bytes.
     fn raw_keys(rng: &mut Rng) -> Vec<Vec<u8>> {
         let mut keys = vec![
             vec![],
@@ -609,7 +700,6 @@ mod tests {
         let mut rng = Rng(0x5eed_0001);
         let keys = raw_keys(&mut rng);
         for left in &keys {
-            assert_eq!(raw(left).len(), 21);
             assert_eq!(
                 RawKey::decode(&raw(left)).unwrap().0.as_ref(),
                 left.as_slice()
@@ -622,6 +712,13 @@ mod tests {
                 );
             }
         }
+        let encodings: Vec<_> = keys.iter().map(|key| raw(key)).collect();
+        assert!(arkiv_db_trie::is_prefix_free(&{
+            let mut unique = encodings.clone();
+            unique.sort();
+            unique.dedup();
+            unique
+        }));
         // A prefix seeks at or before every key that extends it, and after
         // every smaller key that does not.
         for prefix in &keys {
@@ -633,23 +730,44 @@ mod tests {
                 }
             }
         }
-        // Hand-written vectors: the empty key, a trailing zero, a full key.
-        let mut empty = [0u8; 21];
-        empty[20] = 0;
-        assert_eq!(raw(b""), empty);
-        let mut zero = [0u8; 21];
-        zero[20] = 1;
-        assert_eq!(raw(b"\x00"), zero);
-        let mut full = [0xffu8; 21];
-        full[20] = 20;
+        // Hand-written vectors: the empty key, a zero byte, a one byte, a
+        // full key.
+        assert_eq!(raw(b""), [0x00]);
+        assert_eq!(raw(b"\x00"), [0x01, 0x01, 0x00]);
+        assert_eq!(raw(b"a\x01"), [b'a', 0x01, 0x02, 0x00]);
+        let mut full = vec![0xffu8; 20];
+        full.push(0);
         assert_eq!(raw(&[0xff; 20]), full);
-        assert!(RawKey::decode(&[0u8; 20]).is_err(), "wrong width");
-        let mut dirty = zero;
-        dirty[5] = 1;
-        assert!(RawKey::decode(&dirty).is_err(), "nonzero padding");
-        let mut long = [0u8; 21];
-        long[20] = 21;
+        assert_eq!(raw(&[0; 20]).len(), RawKey::MAX_LEN);
+        assert!(RawKey::decode(b"ab").is_err(), "no terminator");
+        assert!(RawKey::decode(&[0x01, 0x03, 0x00]).is_err(), "bad escape");
+        assert!(
+            RawKey::decode(&[b'a', 0x00, 0x00]).is_err(),
+            "trailing bytes"
+        );
+        let mut long = vec![b'a'; 21];
+        long.push(0);
         assert!(RawKey::decode(&long).is_err(), "length above 20");
+    }
+
+    #[test]
+    fn record_keys_are_length_prefixed() {
+        let key = |bytes: &[u8]| RecordKey::new(bytes).unwrap();
+        assert_eq!(TrieKey::encode(&key(b"r")), [1, b'r']);
+        assert_eq!(
+            TrieKey::encode(&key(&[0; 32])).len(),
+            RecordKey::MAX_LEN + 1
+        );
+        for bytes in [&b"r"[..], &[0; 32], b"\0a"] {
+            let encoded = TrieKey::encode(&key(bytes));
+            assert_eq!(
+                <RecordKey as TrieKey>::decode(&encoded).unwrap(),
+                key(bytes)
+            );
+        }
+        for bad in [&[][..], &[0], &[2, b'r'], &[1, b'r', 0], &[33; 34]] {
+            assert!(<RecordKey as TrieKey>::decode(bad).is_err(), "{bad:?}");
+        }
     }
 
     /// The model of a term: `(name, type id, None | Some(term bytes))`,
@@ -727,10 +845,12 @@ mod tests {
     fn term_order_is_the_derived_tuple_order() {
         let mut rng = Rng(0x5eed_0002);
         let models = term_models(&mut rng);
+        let mut encodings = Vec::new();
         for left in &models {
             let encoded = term(left).encode();
-            assert_eq!(encoded.len(), TermKey::MAX_LEN);
+            assert!(encoded.len() <= TermKey::max_len_for(&Limits::DEFAULT));
             assert_eq!(TermKey::decode(&encoded).unwrap(), term(left));
+            encodings.push(encoded.clone());
             for right in &models {
                 assert_eq!(
                     encoded.cmp(&term(right).encode()),
@@ -741,26 +861,17 @@ mod tests {
                 assert_eq!(term(left).cmp(&term(right)), left.cmp(right));
             }
         }
-        // Existence sorts directly before the empty value of its run.
+        encodings.sort();
+        encodings.dedup();
+        assert!(arkiv_db_trie::is_prefix_free(&encodings));
+        // Existence sorts directly before the empty value of its run; they
+        // differ at the presence byte.
         let name = CellName::new("s").unwrap();
         let existence = TermKey::existence(&name, TypeTag::Str).encode();
         let empty = TermKey::value(&name, &Value::str("")).encode();
         assert_eq!(existence.cmp(&empty), Ordering::Less);
-        assert_eq!(
-            existence[..CellName::MAX_LEN + 2],
-            empty[..CellName::MAX_LEN + 2]
-        );
-        assert_eq!(
-            (
-                existence[CellName::MAX_LEN + 2],
-                empty[CellName::MAX_LEN + 2]
-            ),
-            (0, 1)
-        );
-        assert_eq!(
-            existence[CellName::MAX_LEN + 3..],
-            empty[CellName::MAX_LEN + 3..]
-        );
+        assert_eq!(existence, [b's', 0, 2, 0]);
+        assert_eq!(empty, [b's', 0, 2, 1, 0]);
     }
 
     #[test]
@@ -791,39 +902,120 @@ mod tests {
 
     #[test]
     fn term_keys_have_the_documented_layout() {
-        // Built by hand: "c" padded to 32, length 1, type Str (2), value
-        // presence, "red" padded to 128, length 3.
-        let mut expected = vec![b'c'];
-        expected.extend(vec![0; CellName::MAX_LEN - 1]);
-        expected.extend([1, 2, 1]);
-        expected.extend(b"red");
-        expected.extend(vec![0; Value::MAX_INDEXED_LEN - 3]);
-        expected.push(3);
+        // Built by hand: "c" and its terminator, type Str (2), value
+        // presence, "red" shifted by one and its terminator.
         let name = CellName::new("c").unwrap();
-        assert_eq!(TermKey::value(&name, &Value::str("red")).encode(), expected);
+        let red = TermKey::value(&name, &Value::str("red")).encode();
+        assert_eq!(red, [b'c', 0, 2, 1, b's', b'f', b'e', 0]);
+        // Embedded NUL and multibyte UTF-8 keep their length plus one.
+        assert_eq!(
+            TermKey::value(&name, &Value::str("a\0é")).encode(),
+            [b'c', 0, 2, 1, 0x62, 0x01, 0xc4, 0xaa, 0]
+        );
         // The existence term of n: I64 (17).
-        let mut expected = vec![b'n'];
-        expected.extend(vec![0; CellName::MAX_LEN - 1]);
-        expected.extend([1, 17, 0]);
-        expected.extend(vec![0; Value::MAX_INDEXED_LEN + 1]);
         let name = CellName::new("n").unwrap();
-        assert_eq!(TermKey::existence(&name, TypeTag::I64).encode(), expected);
+        let existence = TermKey::existence(&name, TypeTag::I64).encode();
+        assert_eq!(existence, [b'n', 0, 17, 0]);
+        // A scalar value term: its fixed-width term bytes, no terminator.
+        let one = TermKey::value(&name, &Value::I64(1)).encode();
+        assert_eq!(one, [b'n', 0, 17, 1, 0x80, 0, 0, 0, 0, 0, 0, 1]);
+        assert_eq!(
+            TermKey::decode(&one).unwrap(),
+            TermKey::value(&name, &Value::I64(1))
+        );
+        // The longest keys: a 32-byte name and a ceiling-length string, and
+        // the default instance bound equals the old fixed width.
+        let longest = TermKey::value(
+            &CellName::new(&"n".repeat(CellName::MAX_LEN)).unwrap(),
+            &Value::str(&"\0".repeat(Value::INDEXED_LEN_CEILING)),
+        );
+        assert_eq!(longest.encode().len(), TermKey::MAX_LEN);
+        assert_eq!(TermKey::decode(&longest.encode()).unwrap(), longest);
+        assert_eq!(TermKey::max_len_for(&Limits::DEFAULT), 164);
         // Malformed keys are rejected.
-        let mut bad_presence = expected.clone();
-        bad_presence[CellName::MAX_LEN + 2] = 2;
+        let mut bad_presence = existence.clone();
+        bad_presence[3] = 2;
         assert!(TermKey::decode(&bad_presence).is_err());
-        let mut bytes_type = expected.clone();
-        bytes_type[CellName::MAX_LEN + 1] = TypeTag::Bytes.id();
+        let mut bytes_type = existence.clone();
+        bytes_type[2] = TypeTag::Bytes.id();
         assert!(TermKey::decode(&bytes_type).is_err());
-        let mut existence_with_value = expected.clone();
-        existence_with_value[CellName::MAX_LEN + 3] = 1;
-        existence_with_value[TermKey::MAX_LEN - 1] = 1;
+        let mut existence_with_value = existence.clone();
+        existence_with_value.push(0);
         assert!(TermKey::decode(&existence_with_value).is_err());
-        let mut short_i64 = expected;
-        short_i64[CellName::MAX_LEN + 2] = 1;
-        short_i64[CellName::MAX_LEN + 3] = 1;
-        short_i64[TermKey::MAX_LEN - 1] = 1;
-        assert!(TermKey::decode(&short_i64).is_err(), "I64 needs 8 bytes");
+        assert!(
+            TermKey::decode(&one[..one.len() - 1]).is_err(),
+            "I64 needs 8 bytes"
+        );
+        let mut long_i64 = one.clone();
+        long_i64.push(0);
+        assert!(TermKey::decode(&long_i64).is_err(), "I64 has 8 bytes");
+        assert!(
+            TermKey::decode(&red[..red.len() - 1]).is_err(),
+            "no terminator"
+        );
+        let mut trailing = red.clone();
+        trailing.push(1);
+        assert!(TermKey::decode(&trailing).is_err(), "trailing bytes");
+        let mut not_utf8 = red.clone();
+        not_utf8[4] = 0xff;
+        assert!(TermKey::decode(&not_utf8).is_err(), "invalid UTF-8");
+        assert!(
+            TermKey::decode(&[b'n', 17, 0]).is_err(),
+            "unterminated name"
+        );
+        assert!(TermKey::decode(&[b'1', 0, 17, 0]).is_err(), "name grammar");
+        assert!(
+            TermKey::decode(&[0x01, 0x01, 0, 17, 0]).is_err(),
+            "name grammar"
+        );
+        let over = TermKey::value(
+            &CellName::new("s").unwrap(),
+            &Value::str(&"x".repeat(Value::INDEXED_LEN_CEILING)),
+        );
+        let mut over = over.encode();
+        over.insert(4, b'y');
+        assert!(TermKey::decode(&over).is_err(), "above the ceiling");
+    }
+
+    #[test]
+    fn str_prefix_runs_hold_exactly_the_strings_with_the_prefix() {
+        let name = CellName::new("s").unwrap();
+        let strings = [
+            "",
+            "\0",
+            "\0\0",
+            "\u{1}",
+            "a",
+            "a\0",
+            "a\0b",
+            "a\u{1}",
+            "aa",
+            "ab",
+            "b",
+            "é",
+            "éa",
+            "\u{10ffff}",
+        ];
+        for prefix in strings {
+            let run = TermKey::str_prefix_run(&name, prefix.as_bytes());
+            for text in strings {
+                let key = TermKey::value(&name, &Value::str(text)).encode();
+                assert_eq!(
+                    run.contains(&key),
+                    text.starts_with(prefix),
+                    "{prefix:?} {text:?}"
+                );
+            }
+            // Never another type, name or the existence term.
+            for other in [
+                TermKey::existence(&name, TypeTag::Str).encode(),
+                TermKey::value(&CellName::new("t").unwrap(), &Value::str(prefix)).encode(),
+                TermKey::value(&CellName::new("sa").unwrap(), &Value::str(prefix)).encode(),
+                TermKey::value(&name, &Value::Bool(true)).encode(),
+            ] {
+                assert!(!run.contains(&other));
+            }
+        }
     }
 
     #[test]
@@ -895,7 +1087,7 @@ mod tests {
             key: key.clone(),
             cells: vec![(CellName::new("c").unwrap(), cell)].into(),
         };
-        let long = "x".repeat(Value::MAX_INDEXED_LEN + 1);
+        let long = "x".repeat(Value::INDEXED_LEN_CEILING + 1);
         for accepted in [
             one(Cell::attribute(Value::str(&"x".repeat(64)))),
             one(Cell::field(Value::bytes(b"b"))),

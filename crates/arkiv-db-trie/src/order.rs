@@ -19,13 +19,10 @@
 //!   not prefix-free as a whole key: `61 00` encodes `"a"` and is a strict
 //!   prefix of `61 00 ff 00`, the encoding of `"a\0"`. Branches here hold
 //!   no values, so the variable part of a key must be strictly prefix-free.)
-//! - [`encode_padded`]: a byte string of at most `max_len` bytes becomes
-//!   `bytes ‖ 0x00 × (max_len − len) ‖ len`, `max_len + 1` bytes wide. For
-//!   two strings, the first differing padded byte decides exactly as the
-//!   bytewise comparison of the strings does (a string that ends earlier
-//!   shows `0x00` where the longer one continues, and a proper prefix is
-//!   smaller); when the padded bytes are all equal, one string is the other
-//!   plus trailing zero bytes and the length byte puts the shorter first.
+//! - [`encode_shifted`]: for byte strings without `ff` (UTF-8 text never
+//!   holds `f5`–`ff`), every byte plus one, then a `00` terminator: exactly
+//!   `len + 1` bytes, prefix-free and order-preserving for the same reasons,
+//!   without the worst-case doubling of escapes.
 //! - Fixed-width fields (single bytes, big-endian integers, fixed arrays)
 //!   compare as their values do.
 //! - Concatenating prefix-free fields gives lexicographic tuple order and a
@@ -61,6 +58,51 @@ pub fn escape_bytes(value: &[u8], out: &mut Vec<u8>) {
 pub fn encode_bytes(value: &[u8], out: &mut Vec<u8>) {
     escape_bytes(value, out);
     out.push(TERMINATOR);
+}
+
+/// Appends the shifted form of `value` without a terminator: every byte
+/// plus one. Fails, appending nothing, if `value` holds an `ff` byte.
+///
+/// It is a prefix of [`encode_shifted`] of every string starting with
+/// `value` and of no other encoding, and the smallest such string.
+pub fn shift_bytes(value: &[u8], out: &mut Vec<u8>) -> Result<(), CodecError> {
+    if value.contains(&0xff) {
+        return Err(CodecError::new("an ff byte cannot be shifted"));
+    }
+    out.extend(value.iter().map(|byte| byte + 1));
+    Ok(())
+}
+
+/// Appends the prefix-free, order-preserving encoding of a byte string that
+/// never contains `ff`: every byte plus one, then a `00` terminator.
+/// Exactly `len + 1` bytes.
+///
+/// For UTF-8 text, which never contains the bytes `f5`–`ff`, this is a
+/// tight alternative to [`encode_bytes`]: no escape can double the length.
+/// The terminator is the smallest byte and occurs nowhere else, and adding
+/// one to every byte keeps their order, so encodings are prefix-free and
+/// order as the strings do (a proper prefix first). Fails, appending
+/// nothing, if `value` holds an `ff` byte.
+pub fn encode_shifted(value: &[u8], out: &mut Vec<u8>) -> Result<(), CodecError> {
+    shift_bytes(value, out)?;
+    out.push(TERMINATOR);
+    Ok(())
+}
+
+/// Decodes one [`encode_shifted`] field at the start of `bytes`, returning
+/// the value and the bytes after its terminator. Rejects a missing
+/// terminator and a value longer than `max_len`; every accepted field is the
+/// unique encoding of its value.
+pub fn decode_shifted(bytes: &[u8], max_len: usize) -> Result<(Vec<u8>, &[u8]), CodecError> {
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == TERMINATOR)
+        .ok_or_else(|| CodecError::new("shifted field has no terminator"))?;
+    if end > max_len {
+        return Err(CodecError::new("shifted field longer than its bound"));
+    }
+    let value = bytes[..end].iter().map(|byte| byte - 1).collect();
+    Ok((value, &bytes[end + 1..]))
 }
 
 /// The longest [`encode_bytes`] output for an input of `max_len` bytes.
@@ -115,55 +157,15 @@ pub fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
     Some(successor)
 }
 
-/// The encoded width of a padded field that holds up to `max_len` bytes.
-pub const fn padded_width(max_len: u8) -> usize {
-    max_len as usize + 1
-}
-
-/// Appends `value ‖ 0x00 × (max_len − len) ‖ len`.
-///
-/// Fails, appending nothing, when `value` is longer than `max_len`.
-pub fn encode_padded(value: &[u8], max_len: u8, out: &mut Vec<u8>) -> Result<(), CodecError> {
-    let length = u8::try_from(value.len())
-        .ok()
-        .filter(|length| *length <= max_len)
-        .ok_or_else(|| CodecError::new("value longer than the padded field"))?;
-    out.extend_from_slice(value);
-    out.resize(out.len() + usize::from(max_len - length), 0);
-    out.push(length);
-    Ok(())
-}
-
-/// Decodes a padded field of exactly [`padded_width`]`(max_len)` bytes.
-///
-/// Rejects a length above `max_len` and nonzero padding, so every accepted
-/// field is the unique encoding of the returned bytes.
-pub fn decode_padded(field: &[u8], max_len: u8) -> Result<&[u8], CodecError> {
-    if field.len() != padded_width(max_len) {
-        return Err(CodecError::new("padded field has the wrong width"));
-    }
-    let (body, length) = field.split_at(usize::from(max_len));
-    let length = usize::from(length[0]);
-    if length > usize::from(max_len) {
-        return Err(CodecError::new("padded length exceeds the field"));
-    }
-    let (value, padding) = body.split_at(length);
-    if padding.iter().any(|byte| *byte != 0) {
-        return Err(CodecError::new("nonzero padding in a padded field"));
-    }
-    Ok(value)
-}
-
-/// Builds a fixed-width, order-preserving key from fields in order.
+/// Builds an order-preserving, prefix-free key from fields in order.
 ///
 /// ```
 /// use arkiv_db_trie::order::KeyWriter;
 ///
-/// // (name ≤ 20 bytes, tag, presence, value ≤ 64 bytes) → 88 bytes.
+/// // (name, tag, presence, value) → "color" 00 04 01 "red" 00.
 /// let mut key = KeyWriter::new();
-/// key.padded(b"color", 20)?.byte(4).byte(1).padded(b"red", 64)?;
-/// assert_eq!(key.finish().len(), 88);
-/// # Ok::<(), arkiv_db_trie::CodecError>(())
+/// key.bytes(b"color").byte(4).byte(1).bytes(b"red");
+/// assert_eq!(key.finish().len(), 12);
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct KeyWriter {
@@ -174,12 +176,6 @@ impl KeyWriter {
     /// Starts an empty key.
     pub const fn new() -> Self {
         Self { bytes: Vec::new() }
-    }
-
-    /// Appends a padded variable-length field; see [`encode_padded`].
-    pub fn padded(&mut self, value: &[u8], max_len: u8) -> Result<&mut Self, CodecError> {
-        encode_padded(value, max_len, &mut self.bytes)?;
-        Ok(self)
     }
 
     /// Appends a self-delimiting byte string; see [`encode_bytes`].
@@ -231,11 +227,6 @@ impl<'a> KeyReader<'a> {
         let (field, rest) = self.rest.split_at(width);
         self.rest = rest;
         Ok(field)
-    }
-
-    /// Reads a padded field written with the same `max_len`.
-    pub fn padded(&mut self, max_len: u8) -> Result<&'a [u8], CodecError> {
-        decode_padded(self.take(padded_width(max_len))?, max_len)
     }
 
     /// Reads a self-delimiting byte string of at most `max_len` bytes.
@@ -307,10 +298,7 @@ impl<const MAX: usize> crate::TrieKey for ByteKey<MAX> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        KeyReader, KeyWriter, decode_bytes, decode_padded, encode_bytes, encode_padded,
-        escape_bytes, padded_width, prefix_successor,
-    };
+    use super::{KeyReader, KeyWriter, decode_bytes, encode_bytes, escape_bytes, prefix_successor};
 
     fn enc(value: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -361,6 +349,46 @@ mod tests {
     }
 
     #[test]
+    fn shifted_field_vectors() {
+        use super::{decode_shifted, encode_shifted, shift_bytes};
+        let shifted = |value: &[u8]| {
+            let mut out = Vec::new();
+            encode_shifted(value, &mut out).unwrap();
+            out
+        };
+        assert_eq!(shifted(b""), [0x00]);
+        assert_eq!(shifted(b"a\0"), [0x62, 0x01, 0x00]);
+        assert_eq!(shifted(&[0xfe]), [0xff, 0x00]);
+        let mut out = vec![7];
+        assert!(encode_shifted(&[1, 0xff], &mut out).is_err());
+        assert_eq!(out, [7], "a failed encode appends nothing");
+        assert_eq!(
+            decode_shifted(&[0x62, 0x01, 0x00, 9], 2),
+            Ok((b"a\0".to_vec(), &[9][..]))
+        );
+        assert!(decode_shifted(&[0x62], 4).is_err());
+        assert!(decode_shifted(&[0x62, 0x62, 0x00], 1).is_err());
+        let ordered = [
+            &b""[..],
+            b"\0",
+            b"\0\0",
+            b"\x01",
+            b"a",
+            b"a\0",
+            b"aa",
+            "é".as_bytes(),
+        ];
+        for pair in ordered.windows(2) {
+            assert!(shifted(pair[0]) < shifted(pair[1]));
+            assert!(!shifted(pair[1]).starts_with(&shifted(pair[0])));
+        }
+        let mut prefix = Vec::new();
+        shift_bytes(b"a", &mut prefix).unwrap();
+        assert!(shifted(b"a\0b").starts_with(&prefix));
+        assert!(!shifted(b"b").starts_with(&prefix));
+    }
+
+    #[test]
     fn prefix_successor_vectors() {
         assert_eq!(prefix_successor(b""), None);
         assert_eq!(prefix_successor(&[0xff, 0xff]), None);
@@ -370,50 +398,27 @@ mod tests {
     }
 
     #[test]
-    fn padded_vectors() {
-        let mut out = Vec::new();
-        encode_padded(b"ab", 4, &mut out).unwrap();
-        assert_eq!(out, [b'a', b'b', 0, 0, 2]);
-        out.clear();
-        encode_padded(b"", 3, &mut out).unwrap();
-        assert_eq!(out, [0, 0, 0, 0]);
-        out.clear();
-        encode_padded(b"abc", 3, &mut out).unwrap();
-        assert_eq!(out, [b'a', b'b', b'c', 3]);
-        assert!(encode_padded(b"abcd", 3, &mut out).is_err());
-        assert_eq!(
-            out,
-            [b'a', b'b', b'c', 3],
-            "a failed encode appends nothing"
-        );
-        assert_eq!(padded_width(64), 65);
-        assert_eq!(decode_padded(&[b'a', b'b', 0, 0, 2], 4), Ok(&b"ab"[..]));
-        assert!(decode_padded(&[b'a', b'b', 0, 1, 2], 4).is_err());
-        assert!(decode_padded(&[b'a', b'b', 0, 0, 5], 4).is_err());
-        assert!(decode_padded(&[b'a', b'b', 0, 2], 4).is_err());
-    }
-
-    #[test]
     fn writer_and_reader_round_trip() {
         let mut writer = KeyWriter::new();
         writer
-            .padded(b"name", 20)
-            .unwrap()
+            .bytes(b"name")
             .byte(7)
             .u64(0x0102_0304_0506_0708)
             .fixed(&[9, 9]);
         let key = writer.finish();
-        assert_eq!(key.len(), 21 + 1 + 8 + 2);
+        assert_eq!(key.len(), 5 + 1 + 8 + 2);
         let mut reader = KeyReader::new(&key);
-        assert_eq!(reader.padded(20).unwrap(), b"name");
+        assert_eq!(reader.bytes(20).unwrap(), b"name");
         assert_eq!(reader.byte().unwrap(), 7);
         assert_eq!(reader.u64().unwrap(), 0x0102_0304_0506_0708);
         assert_eq!(reader.fixed(2).unwrap(), [9, 9]);
         reader.finish().unwrap();
-        let mut short = KeyReader::new(&key[..5]);
-        assert!(short.padded(20).is_err());
+        let mut short = KeyReader::new(&key[..4]);
+        assert!(short.bytes(20).is_err());
+        let mut long = KeyReader::new(&key);
+        assert!(long.bytes(3).is_err());
         let mut trailing = KeyReader::new(&key);
-        trailing.padded(20).unwrap();
+        trailing.bytes(20).unwrap();
         assert!(trailing.finish().is_err());
     }
 }

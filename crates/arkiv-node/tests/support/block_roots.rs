@@ -1,4 +1,4 @@
-//! Independent state-format-1 leaf construction over the logical block model.
+//! Independent state-format-2 leaf construction over the logical block model.
 //! No engine codec/layout/digest or trie implementation under test is used.
 use super::{CellKind, Model, Value, Weights};
 use alloy_primitives::{B256, keccak256};
@@ -10,10 +10,17 @@ fn bytes(b: &[u8]) -> Vec<u8> {
     v.extend(b);
     v
 }
-fn padded(b: &[u8], n: usize) -> Vec<u8> {
-    let mut v = b.to_vec();
-    v.resize(n, 0);
-    v.push(b.len() as u8);
+/// Escaped (`00 → 01 01`, `01 → 01 02`) and `00`-terminated.
+fn escaped(b: &[u8]) -> Vec<u8> {
+    let mut v = Vec::new();
+    for &x in b {
+        match x {
+            0 => v.extend([1, 1]),
+            1 => v.extend([1, 2]),
+            x => v.push(x),
+        }
+    }
+    v.push(0);
     v
 }
 fn tag(v: &Value) -> u8 {
@@ -45,11 +52,20 @@ fn term_value(v: &Value) -> Vec<u8> {
         _ => panic!("scalar outside the root fixture"),
     }
 }
+/// `escaped(name) ‖ tag ‖ presence ‖ value`; a `Str` value (tag 2) is its
+/// bytes plus one and a `00` terminator, a scalar its term bytes.
 fn term(name: &str, t: u8, v: Option<Vec<u8>>) -> Vec<u8> {
-    let mut b = padded(name.as_bytes(), 32);
+    let mut b = escaped(name.as_bytes());
     b.push(t);
     b.push(u8::from(v.is_some()));
-    b.extend(padded(&v.unwrap_or_default(), 128));
+    match v {
+        Some(v) if t == 2 => {
+            b.extend(v.iter().map(|x| x + 1));
+            b.push(0);
+        }
+        Some(v) => b.extend(v),
+        None => {}
+    }
     b
 }
 fn handle(m: &BTreeMap<Vec<u8>, Vec<u8>>) -> Vec<u8> {
@@ -100,18 +116,13 @@ fn schedule(w: Weights) -> Vec<u8> {
 pub(super) fn root(model: &Model) -> B256 {
     let mut catalog = BTreeMap::new();
     for (id, ns) in &model.namespaces {
-        let raw = ns
-            .raw
-            .iter()
-            .map(|(k, v)| (padded(k, 20), bytes(v)))
-            .collect();
+        let raw = ns.raw.iter().map(|(k, v)| (escaped(k), bytes(v))).collect();
         let mut keys = BTreeMap::new();
         let mut rows = BTreeMap::new();
         let mut posts: BTreeMap<Vec<u8>, BTreeSet<u64>> = BTreeMap::new();
         for (key, row) in &ns.records {
             let mut bound = vec![key.len() as u8];
             bound.extend(key);
-            bound.resize(33, 0);
             keys.insert(bound, row.id.to_be_bytes().to_vec());
             let mut leaf = vec![key.len() as u8];
             leaf.extend(key);
@@ -173,7 +184,7 @@ pub(super) fn root(model: &Model) -> B256 {
         key[1..9].copy_from_slice(&height.to_be_bytes());
         host.insert(key, bytes(&count.to_be_bytes()));
     }
-    let mut header = 1u32.to_be_bytes().to_vec();
+    let mut header = 2u32.to_be_bytes().to_vec();
     header.extend(handle(&catalog));
     header.extend(model.next_namespace.to_be_bytes());
     header.extend(schedule(model.pending));

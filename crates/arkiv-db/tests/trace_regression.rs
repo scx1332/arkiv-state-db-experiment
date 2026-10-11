@@ -44,7 +44,7 @@
 //! What it does not establish: charge rules beyond the receipts repeated
 //! here (`query_metering.rs` owns them), query semantics (`queries.rs`), the
 //! traces of writes, and anything about a durable backend. The counts
-//! describe the trie layout of state format 1 and change with it.
+//! describe the trie layout of state format 2 and change with it.
 
 use std::{fmt::Debug, ops::Bound};
 
@@ -72,7 +72,7 @@ const LIMIT: usize = 10;
 /// the attributes `c: Str` and `n: I64`.
 const RECORDS: [(&str, &str, i64); 4] = [
     ("a", "red", 1),
-    ("b", "rose", 2),
+    ("b", "rise", 2),
     ("c", "red", 3),
     ("d", "ruby", 4),
 ];
@@ -96,31 +96,35 @@ const RECORDS: [(&str, &str, i64); 4] = [
 /// leaves (6 nodes). A row load is a lookup of the extension, the branch and
 /// the leaf: 3 nodes for every id.
 ///
-/// Term map, keys are `name ‖ pad to 20 ‖ name_len ‖ tag ‖ presence ‖ value
-/// ‖ pad to 64 ‖ value_len` (88 bytes). T1 = c:Str:∅, T2 = c:"red", T3 =
-/// c:"rose", T4 = c:"ruby", T5 = n:I64:∅, T6 to T9 = n:1 to n:4. `c` is 0x63
-/// and `n` 0x6e: every key starts with nibble 6, then 3 or e. Within a
-/// name, the padding, the name length, the tag and the presence byte's high
-/// nibble are shared (43 nibbles); the presence byte's low nibble is 0 for
-/// the existence term and 1 for values. The `c` values `r e d`, `r o s e`,
-/// `r u b y` share `r` (0x72: nibbles 7, 2), then split on 6 (`e`, `o`:
-/// 0x65, 0x6f) or 7 (`u`: 0x75), and `red`/`rose` split on 5 or f. The I64
-/// term bytes of 1 to 4 are 0x80 00 00 00 00 00 00 0k: 15 shared nibbles,
-/// then k.
+/// Term map, keys (state layout 2) are `name ‖ 00 ‖ tag ‖ presence` for an
+/// existence term and `name ‖ 00 ‖ tag ‖ 01 ‖ value` for a value, a `Str`
+/// value as its bytes plus one and a `00` terminator. T1 = c:Str:∅, T2 =
+/// c:"red", T3 = c:"rise", T4 = c:"ruby", T5 = n:I64:∅, T6 to T9 = n:1 to
+/// n:4. `c` is 0x63 and `n` 0x6e: every key starts with nibble 6, then 3 or
+/// e. Within a name, the terminator, the tag and the presence byte's high
+/// nibble are shared (5 nibbles); the presence byte's low nibble is 0 for
+/// the existence term and 1 for values. The shifted `c` values `s f e`,
+/// `s j t f`, `s v c z` (0x73 0x66 0x65, 0x73 0x6a 0x74 0x66, 0x73 0x76 0x63
+/// 0x7a, each then 00) share 0x73 (nibbles 7, 3), then split on 6 (`f`,
+/// `j`) or 7 (`v`), and `red`/`rise` split on 6 or a. The I64 term bytes of
+/// 1 to 4 are 0x80 00 00 00 00 00 00 0k: 15 shared nibbles, then k. (The
+/// fixture uses `rise` rather than layout 1's `rose`: shifted, `o` is 0x70
+/// and would move `rose` under `ruby`'s branch; `rise` keeps the shape the
+/// counts below were derived for.)
 ///
 /// ```text
 /// R  extension [6]
 /// └ B0 branch
-///   ├ 3: Ec extension (43 nibbles)
+///   ├ 3: Ec extension (5 nibbles)
 ///   │    └ Bc branch
 ///   │      ├ 0: T1 c:∅ leaf
-///   │      └ 1: Ecv extension [7, 2]
+///   │      └ 1: Ecv extension [7, 3]
 ///   │           └ Bcv branch
 ///   │             ├ 6: Bcv6 branch
-///   │             │    ├ 5: T2 c:red leaf
-///   │             │    └ f: T3 c:rose leaf
+///   │             │    ├ 6: T2 c:red leaf
+///   │             │    └ a: T3 c:rise leaf
 ///   │             └ 7: T4 c:ruby leaf
-///   └ e: En extension (43 nibbles)
+///   └ e: En extension (5 nibbles)
 ///        └ Bn branch
 ///          ├ 0: T5 n:∅ leaf
 ///          └ 1: Env extension [8, 0 × 14]
@@ -130,7 +134,7 @@ const RECORDS: [(&str, &str, i64); 4] = [
 /// ```
 ///
 /// Postings (sets of ids, keyed like the rows): c:red = {1, 3} is an
-/// extension, a branch and two leaves (4 nodes); c:rose = {2}, c:ruby = {4}
+/// extension, a branch and two leaves (4 nodes); c:rise = {2}, c:ruby = {4}
 /// and n:1 to n:4 are single leaves; c:∅ = n:∅ = {1, 2, 3, 4} have the row
 /// map's shape (6 nodes).
 ///
@@ -405,7 +409,7 @@ fn rows(ids: &[u64], keys: bool) -> Page {
 
 /// `[Eq(c, "red"), Range(n, >= 2)] OR [StartsWith(c, "r")] OR
 /// [NOT Eq(c, "red")]`. G1's source is c:red's posting with one probe; G2's
-/// is the run c:red, c:rose, c:ruby; G3's is the row map, probed by its own
+/// is the run c:red, c:rise, c:ruby; G3's is the row map, probed by its own
 /// negated literal. G1 matches {3}, G2 {1, 2, 3, 4}, G3 {2, 4}.
 fn three_groups() -> Query {
     Query {
@@ -438,14 +442,14 @@ fn three_groups_opening_and_heads() -> Vec<Point> {
         point("G2 QueryGroup", 5, 10, nodes(1, 0, 8)),
         point("G2 TermSeek", 4, 15, nodes(1, 0, 8)),
         // The run's seek for c:"r" descends R, B0, Ec, Bc, Ecv and Bcv,
-        // whose slot 0 (the padding after "r") is empty (6); the step that
+        // whose slot 0 (the terminator after "r") is empty (6); the step that
         // reveals c:red visits Bcv6 and T2 (run 8).
         point("G2 TermVisit c:red", 3, 19, nodes(1, 0, 8 + 8)),
         // c:red's posting is positioned (its first step: 3) and the step
-        // revealing c:rose visits T3 (run 9). The positioned posting was
+        // revealing c:rise visits T3 (run 9). The positioned posting was
         // lost before N0a.
-        point("G2 TermVisit c:rose", 3, 22, nodes(1, 0, 8 + 9 + 3)),
-        // c:rose's posting is positioned (1); revealing c:ruby pops Bcv6
+        point("G2 TermVisit c:rise", 3, 22, nodes(1, 0, 8 + 9 + 3)),
+        // c:rise's posting is positioned (1); revealing c:ruby pops Bcv6
         // and visits T4 (run 10).
         point("G2 TermVisit c:ruby", 3, 25, nodes(1, 0, 8 + 10 + 3 + 1)),
         // c:ruby's posting is positioned (1); the step to T5, which ends
@@ -485,7 +489,7 @@ fn every_budget_of_a_three_group_page_notes_each_visited_node_once() {
         // the 1-byte key: {ResultRow 1, ReadByte 1} = 4.
         point("emit id 1", 4, 46, nodes(1, 13, 31)),
         point("G2 PostingEntry id 2", 1, 50, nodes(1, 13, 31)),
-        // G3 holds row 2. c:rose's posting had no further step to visit.
+        // G3 holds row 2. c:rise's posting had no further step to visit.
         point("emit id 2", 4, 51, nodes(1, 13, 31)),
         point("G2 PostingEntry id 3", 1, 55, nodes(1, 13, 31)),
         // The row map steps to row 3, then row 4: all 6 nodes visited.
@@ -509,7 +513,7 @@ fn every_budget_of_a_three_group_page_notes_each_visited_node_once() {
             // (3 + 3) + row 1 loaded for emission (3).
             6 + 3 + 3 + 3,
             // G1: lookup (8) + the whole c:red posting (4); G2: the run (13)
-            // + the whole c:red, c:rose and c:ruby postings (4 + 1 + 1).
+            // + the whole c:red, c:rise and c:ruby postings (4 + 1 + 1).
             (8 + 4) + 13 + (4 + 1 + 1),
         ),
         value: rows(&[1, 2, 3, 4], true),
@@ -562,16 +566,16 @@ fn every_budget_of_a_three_group_count_notes_each_visited_node_once() {
 #[test]
 fn a_later_group_failing_to_open_keeps_the_earlier_groups_visits() {
     let (snapshot, ns) = fixture();
-    // [Exists(c, Str)] OR [NotEq(n, 1)] OR [StartsWith(c, "ro")]: G1 walks
+    // [Exists(c, Str)] OR [NotEq(n, 1)] OR [StartsWith(c, "ri")]: G1 walks
     // c:∅'s posting, G2 n:∅'s posting probed by its own literal, and G3 the
-    // one-term run c:rose. G1 matches {1, 2, 3, 4}, G2 {2, 3, 4}, G3 {2}.
+    // one-term run c:rise. G1 matches {1, 2, 3, 4}, G2 {2, 3, 4}, G3 {2}.
     // G1 and G2 look their terms up while opening; their postings are
     // stepped at their first head pulls.
     let query = Query {
         groups: vec![
             vec![Literal::of(Term::exists(name("c"), TypeTag::Str))],
             vec![Literal::of(Term::not_eq(name("n"), Value::I64(1)))],
-            vec![Literal::of(Term::starts_with(name("c"), "ro"))],
+            vec![Literal::of(Term::starts_with(name("c"), "ri"))],
         ],
     };
     let points = [
@@ -584,11 +588,11 @@ fn a_later_group_failing_to_open_keeps_the_earlier_groups_visits() {
         // G2 is open: the lookup of n:∅ (R, B0, En, Bn, T5: 5).
         point("G3 QueryGroup", 5, 19, nodes(1, 0, 5 + 5)),
         point("G3 TermSeek", 4, 24, nodes(1, 0, 10)),
-        // The run's seek for c:"ro" descends R, B0, Ec, Bc, Ecv, Bcv (slot
-        // 6), Bcv6 (slot f) and T3, whose rest is above the padding after
-        // "ro", so T3 is the first entry (8).
-        point("G3 TermVisit c:rose", 3, 28, nodes(1, 0, 10 + 8)),
-        // c:rose's posting is positioned (1). The step to c:ruby (T4),
+        // The run's seek for c:"ri" descends R, B0, Ec, Bc, Ecv, Bcv (slot
+        // 6), Bcv6 (slot a) and T3, whose rest is above the terminator after
+        // "ri", so T3 is the first entry (8).
+        point("G3 TermVisit c:rise", 3, 28, nodes(1, 0, 10 + 8)),
+        // c:rise's posting is positioned (1). The step to c:ruby (T4),
         // which ends the run, pops Bcv6 and visits T4 (run 9). G1's first
         // pull steps c:∅'s posting (3).
         point("G1 PostingEntry id 1", 1, 31, nodes(1, 0, 10 + 9 + 1 + 3)),
@@ -631,7 +635,7 @@ fn a_later_group_failing_to_open_keeps_the_earlier_groups_visits() {
             // loaded for emission (3).
             4 * 3 + 3,
             // G1: lookup (5) + whole c:∅ posting (6); G2: lookup (5) + whole
-            // n:∅ posting (6); G3: run (9) + c:rose's posting (1).
+            // n:∅ posting (6); G3: run (9) + c:rise's posting (1).
             (5 + 6) + (5 + 6) + (9 + 1),
         ),
         value: rows(&[1, 2, 3, 4], false),
@@ -661,10 +665,10 @@ fn a_prefix_run_failing_at_each_term_visit_keeps_its_positioned_postings() {
         // Seek for c:"r": R, B0, Ec, Bc, Ecv, Bcv (6); revealing c:red
         // visits Bcv6 and T2 (run 8).
         point("TermVisit c:red", 3, 10, nodes(1, 0, 8)),
-        // c:red positioned (3); revealing c:rose visits T3 (run 9). Before
+        // c:red positioned (3); revealing c:rise visits T3 (run 9). Before
         // N0a only the run's nodes were reported.
-        point("TermVisit c:rose", 3, 13, nodes(1, 0, 9 + 3)),
-        // c:rose positioned (1); revealing c:ruby visits T4 (run 10).
+        point("TermVisit c:rise", 3, 13, nodes(1, 0, 9 + 3)),
+        // c:rise positioned (1); revealing c:ruby visits T4 (run 10).
         point("TermVisit c:ruby", 3, 16, nodes(1, 0, 10 + 3 + 1)),
         // c:ruby positioned (1); the step to T5 ending the run visits En,
         // Bn and T5 (run 13). Before N0a a failing first head pull
@@ -684,7 +688,7 @@ fn a_prefix_run_failing_at_each_term_visit_keeps_its_positioned_postings() {
         // 1 + 5 + 4 + 3 × 3 terms + 4 candidates + 3 × 4 rows.
         total: 1 + 5 + 4 + 9 + 4 + 12,
         // Rows 1 to 4 loaded for emission; the run (13) and the whole
-        // c:red, c:rose and c:ruby postings.
+        // c:red, c:rise and c:ruby postings.
         trace: nodes(1, 4 * 3, 13 + (4 + 1 + 1)),
         value: rows(&[1, 2, 3, 4], false),
     };

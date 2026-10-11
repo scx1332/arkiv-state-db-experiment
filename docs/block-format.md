@@ -111,13 +111,9 @@ host's static validation (N0b-3). `codec.rs` tests this boundary.
 - A `PriceSchedule` encodes one weight per operation class. Counting-rule
   version 3 has 31 classes; a schedule with another count is rejected
   (`ClassCountMismatch`), never padded with default weights.
-- `RecordKey` has two canonical forms for two purposes: the codec's
-  variable-width `u8 len ‖ bytes` used inside encoded values, and the fixed
-  33-byte key encoding (`len ‖ bytes ‖ zero padding`, `RecordKey::encoded`)
-  used where keys must sort as fixed-width map keys (N3b). They differ in
-  length for every key shorter than 32 bytes; for a 32-byte key they are
-  the same 33 bytes and read back as the same key, so neither form is ever
-  misread as the other.
+- `RecordKey` has one canonical form, `u8 len ‖ bytes`, used inside encoded
+  values and (since state layout 2) as the key-binding map's trie key; the
+  length byte makes it prefix-free.
 - A receipt's debug ledger is never encoded: receipts that differ only in
   their ledgers have equal bytes, and a decoded receipt has `ledger: None`.
 
@@ -155,14 +151,18 @@ The four cell limits follow golem-db's genesis `cell_limits`:
 
 | Field | Bounds | Default | Hard cap |
 | --- | --- | --- | --- |
-| `max_cell_name_len` | every cell name a write sets or removes (`$` counted) | 32 | 32 (term-key name width) |
+| `max_cell_name_len` | every cell name a write sets or removes (`$` counted) | 32 | 32 (name grammar) |
 | `max_str_len` | every `Str` value, attribute or field | 4096 | none (codec `u32`) |
 | `max_bytes_len` | every `Bytes` value (fields only) | 4096 | none (codec `u32`) |
-| `max_indexed_len` | `Str` attributes and `Str` query values, range bounds, prefixes and `terms` bounds; effective bound `min(max_indexed_len, max_str_len)` | 128 | 128 (term-key value width) |
+| `max_indexed_len` | `Str` attributes and `Str` query values, range bounds, prefixes and `terms` bounds; effective bound `min(max_indexed_len, max_str_len)`, UTF-8 bytes | 128 (`Limits::DEFAULT_INDEXED_LEN`, the Arkiv profile) | 512 (`Value::INDEXED_LEN_CEILING`, representation/resource ceiling) |
 
-The term key pads a name to 32 bytes and an indexed value to 128 bytes
-(`docs/state-trie.md`), so those two limits cannot exceed their caps;
-`Limits::validate` rejects such a configuration (and a zero name limit),
+Term keys store names and `Str` values unpadded (state layout 2,
+`docs/experimental-prekucki-v1.md`), so the indexed-string limit is
+admission policy, not a key width: the default and Arkiv-facing profile
+stays at 128 bytes, and a generic instance may configure up to the
+512-byte ceiling, which keeps a worst-case term leaf below the 1 KiB proof
+node limit. `Limits::validate` rejects a configuration above a cap (and a
+zero name limit),
 the engine constructors and a durable genesis require it, and the node
 checks it with the chain parameters. Fixed-width types have no
 configurable limit. A durable database persists its limits in its genesis,
@@ -241,11 +241,11 @@ order of the term bytes, which is golem-db's attribute order:
 
 golem stores a `str` with no length prefix and lets it run to the end of
 its index key, so its order is plain bytewise order over the UTF-8 bytes.
-The engine's term key pads the value to the 128-byte cap and appends its
-length; that encoding orders exactly as bytewise order on the unpadded
-bytes (a shorter string that is a prefix of a longer one compares on the
-length byte, after equal zero padding), so the two orders agree, including
-strings that contain `\0`. `Str` also supports prefix predicates. Values
+The engine's term key stores a `str` as its UTF-8 bytes each plus one and a
+`00` terminator (`text⁺`, state layout 2); adding one keeps byte order and
+the terminator is smaller than every shifted byte, so a proper prefix
+sorts first and the order is exactly bytewise order on the unshifted
+bytes, including strings that contain `\0`. `Str` also supports prefix predicates. Values
 of different types never compare: a range is typed by its bounds and
 matches only attributes of that type.
 

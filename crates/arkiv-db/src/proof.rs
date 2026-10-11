@@ -22,7 +22,7 @@ pub use range::{
     verify_range, verify_range_inspected,
 };
 
-use arkiv_db_trie::{MemoryOnly, MerkleMap, Probe, TrieKey, TrieValue, walk};
+use arkiv_db_trie::{KeyRange, MemoryOnly, MerkleMap, Probe, TrieKey, TrieValue, walk};
 
 use crate::{
     B256, Budget, Cell, CellKind, CellName, Decode, DecodeError, Decoder, Encode, Encoder, Limits,
@@ -82,7 +82,7 @@ impl Decode for EqQuery {
         let query = Self {
             namespace: d.get()?,
             attribute: d.get()?,
-            value: bounded_value(d, Value::MAX_INDEXED_LEN)?,
+            value: bounded_value(d, Value::INDEXED_LEN_CEILING)?,
         };
         if !query.value.tag().is_indexable() || d.u8()? != 1 || d.u8()? != 1 {
             return Err(invalid_codec("unsupported equality profile"));
@@ -538,7 +538,9 @@ fn decode_row(
             return Err(ProofError::InvalidProof);
         }
         if kind == CellKind::Attribute
-            && (!value.tag().is_indexable() || value.encoded_len() > Value::MAX_INDEXED_LEN)
+            && (!value.tag().is_indexable()
+                || (matches!(value, Value::Str(_))
+                    && value.encoded_len() > limits.indexed_value_len()))
         {
             return Err(ProofError::InvalidProof);
         }
@@ -671,7 +673,14 @@ fn verify_eq_inner(
         });
     }
     let term_key = TermKey::value(&request.query.attribute, &request.query.value);
-    let term_path = read_path(&mut d, 177, META_NODE_BYTES, &mut meter)?;
+    // A term path visits at most `2 · L + 1` nodes for the instance's
+    // longest term key `L` (329 for the default limits).
+    let term_path = read_path(
+        &mut d,
+        2 * TermKey::max_len_for(&limits) + 1,
+        META_NODE_BYTES,
+        &mut meter,
+    )?;
     let term = proven(
         namespace.typed.terms.root_hash(),
         &TrieKey::encode(&term_key),
@@ -756,7 +765,7 @@ fn verify_eq_inner(
         let path = read_path(&mut d, 67, META_NODE_BYTES, &mut meter)?;
         let binding = proven(
             namespace.typed.keys.root_hash(),
-            &key.encoded(),
+            &TrieKey::encode(key),
             &path,
             crate::MapKind::Keys,
             Some(id),
@@ -816,7 +825,21 @@ impl Serving<'_> {
         loader: &Loader<'_>,
         max_node: usize,
     ) -> Result<Vec<Vec<u8>>, ProofError> {
-        let structural = 2 * K::MAX_LEN + 1;
+        self.path_bounded(map, key, loader, max_node, K::MAX_LEN)
+    }
+    /// [`Self::path`] for a map whose keys this instance bounds below
+    /// `K::MAX_LEN` (term keys under the instance's limits): a path for a
+    /// key of at most `max_key_len` bytes visits at most `2 · max_key_len + 1`
+    /// nodes.
+    fn path_bounded<K: TrieKey, V: TrieValue + Send + Sync + 'static>(
+        &mut self,
+        map: &MerkleMap<K, V>,
+        key: &K,
+        loader: &Loader<'_>,
+        max_node: usize,
+        max_key_len: usize,
+    ) -> Result<Vec<Vec<u8>>, ProofError> {
+        let structural = 2 * max_key_len + 1;
         self.append(4)?;
         if map.is_empty() {
             return Ok(Vec::new());
@@ -922,11 +945,12 @@ pub(crate) fn generate(
         {
             return Err(ProofError::ProofLimitExceeded);
         }
-        let term_path = serving.path(
+        let term_path = serving.path_bounded(
             &namespace.typed.terms,
             &term_key,
             &loaders.terms,
             META_NODE_BYTES,
+            TermKey::max_len_for(&limits),
         )?;
         write_path(&mut e, &term_path);
         serving.append(4)?;

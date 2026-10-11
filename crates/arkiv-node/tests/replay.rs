@@ -246,7 +246,7 @@ fn multi_operation_transaction() {
     fixture.finish(&[GOLDEN_MULTI_OP]);
 }
 
-const GOLDEN_MULTI_OP: &str = "306193a6bb897fa5adddd0aba9fa1f575c2e0bea0ebd49eb1470ef51725db7b8";
+const GOLDEN_MULTI_OP: &str = "dce35afc56e3aba8e8e4ea30dc8684705e1b8e283d50e1c5dda90b91621b315d";
 
 /// A transaction failing mid-way is rolled back with its receipts kept,
 /// its later operations not executed, and the block continues; exact and
@@ -309,8 +309,8 @@ fn failing_transaction_rolls_back() {
     fixture.finish(&[GOLDEN_ROLLBACK_1, GOLDEN_ROLLBACK_2]);
 }
 
-const GOLDEN_ROLLBACK_1: &str = "3481980a59360ebd4118229909be069c7a81147704d87181d2abb63494fbd79d";
-const GOLDEN_ROLLBACK_2: &str = "bacf0ed24a5f52dcc20511b88351fa62ad93449c40841b80be58f5ece3c8672a";
+const GOLDEN_ROLLBACK_1: &str = "737b788d4bc78bb0e27e506edd7035beb8d3e164c64c449d04b32835eede6832";
+const GOLDEN_ROLLBACK_2: &str = "1d25ab1da79ecb7477f5e06cce658c53715a036f4babf55ff60f225f80205468";
 
 /// A transfer takes effect for the next transaction of the same block:
 /// the old owner is refused, the new owner writes; a stale revision is
@@ -386,8 +386,8 @@ fn same_block_ownership_transfer() {
     fixture.finish(&[GOLDEN_TRANSFER_1, GOLDEN_TRANSFER_2]);
 }
 
-const GOLDEN_TRANSFER_1: &str = "3481980a59360ebd4118229909be069c7a81147704d87181d2abb63494fbd79d";
-const GOLDEN_TRANSFER_2: &str = "fc54249601a24c8dbeef9e9249a0b206d46525b8118c3f034626fa0d1f0b7b94";
+const GOLDEN_TRANSFER_1: &str = "737b788d4bc78bb0e27e506edd7035beb8d3e164c64c449d04b32835eede6832";
+const GOLDEN_TRANSFER_2: &str = "1af2551642d7fd3cce10238bbc2c9c1bb43d095814442e26688e3ec07327acaa";
 
 /// Records expiring at height 3 are present at height 2 and deleted in
 /// block 3, before any user transaction: block 3's transactions already
@@ -504,10 +504,10 @@ fn expiry_at_the_boundary() {
     ]);
 }
 
-const GOLDEN_BOUNDARY_1: &str = "3b849daba80bdb119058b2f8c1a946d00a96cc822e2755e2805e458f548387c3";
-const GOLDEN_BOUNDARY_2: &str = "244d353e9c22e2204648d01e5d3209572af8c391e04491a0f31665774c3850ba";
-const GOLDEN_BOUNDARY_3: &str = "c99e584bf867d7335cf115ad75511e3c030a1a3e9d75154f4d9b33d00fceffec";
-const GOLDEN_BOUNDARY_4: &str = "c14297ec9ee79fe95f7556db10158565600bd35bcbab9e2d52e72f13e5cfa7df";
+const GOLDEN_BOUNDARY_1: &str = "e1a173ae17f98c5a1f58aae39fadfa4e809953509cdaffb54ff872300bca6e13";
+const GOLDEN_BOUNDARY_2: &str = "e59b84eacfe16394aca58ba23d0980b1b48e89fb52a8fe32d45993ea357d3409";
+const GOLDEN_BOUNDARY_3: &str = "e3d16627bda53501f5623482f0172a085a1e080b4a822d26a547fddaa78cfc64";
+const GOLDEN_BOUNDARY_4: &str = "8fd75c192ecf903a71d06587d841b29578e5c7e682edbb9db8f54f082a5bf4c1";
 
 /// Eight cells, all attributes, under a 32-byte key: the most expensive
 /// record to expire.
@@ -637,10 +637,10 @@ fn expiry_at_capacity() {
     ]);
 }
 
-const GOLDEN_CAPACITY_1: &str = "253d914844ca2dfa30871593c031afd4d4f5ef6f5139cf1da93c5b54c3a2d94f";
-const GOLDEN_CAPACITY_2: &str = "6136587fd2c3d887011f5eb74807f0f8d47b783e42537b38efeeff2f6f5b57e7";
-const GOLDEN_CAPACITY_3: &str = "4690b2bfc9db06a7e4edc13c9a43e426509c8ff45960918460a950c01b3880eb";
-const GOLDEN_CAPACITY_4: &str = "6e5ecef1fad7937baadfe6a46b3266e173b871b166352d3cb24fc44442d6973c";
+const GOLDEN_CAPACITY_1: &str = "68d84451db2bd0098a602a0faa4d3c3764fcfb30e50580943ea27a6a4bad65f9";
+const GOLDEN_CAPACITY_2: &str = "9ae758d982d1fd5a95408bd2db8c568c1f9023baf381b9796ef8f7a74cab9355";
+const GOLDEN_CAPACITY_3: &str = "42747e583d8d243238f0e4106fdab2165a468064c5058f40e51fd1b781972ccf";
+const GOLDEN_CAPACITY_4: &str = "0396f07bef27878a59beeaeda44bfe895fb8a9dff5b31de36247896762fbcfd8";
 
 /// Every read weight ×100 (DirectoryLookup, PointRead, ScanSeek, ScanEntry,
 /// ReadByte, QueryGroup, TermSeek, TermVisit, PostingEntry, RowVisit,
@@ -737,9 +737,9 @@ fn set_pricing_raises_read_weights() {
     fixture.finish(&[GOLDEN_PRICING_1, GOLDEN_PRICING_2, GOLDEN_PRICING_3]);
 }
 
-const GOLDEN_PRICING_1: &str = "23df031e1f9a9ef109e860f974a03cc3cc1846d6e784bb188fb04e19d004eaf3";
-const GOLDEN_PRICING_2: &str = "9ab948d08d24af5f8a5b7b2196fdcd131942b87b60969c92bdd57db63fef55ca";
-const GOLDEN_PRICING_3: &str = "edf234275f00b928171ff3d75050d3f4be94017b291ed4791640d11488396167";
+const GOLDEN_PRICING_1: &str = "328c389bf6b957bb9ce862709761965ce5768874a5398d62eaa918cd1a49c45d";
+const GOLDEN_PRICING_2: &str = "1fb6af2953cfac1c92c05b0b5ec456677f81798d2df425f40331b505234090ed";
+const GOLDEN_PRICING_3: &str = "ae0822024ce5863bcc415e4d927545050248168f68b8fb920916e42bffa074dc";
 
 /// Permanent records: `expires_at = u64::MAX` stores `U64(u64::MAX)` and
 /// schedules nothing; extending a finite record to permanent removes its
@@ -815,9 +815,9 @@ fn permanent_expiry() {
     fixture.finish(&[GOLDEN_PERMANENT_1, GOLDEN_PERMANENT_2, GOLDEN_PERMANENT_3]);
 }
 
-const GOLDEN_PERMANENT_1: &str = "72cd1359eb119560bf19831595d137bf2346e0b0a9ffa5b4e10602f1ac2415d5";
-const GOLDEN_PERMANENT_2: &str = "14e2389bba9bc32c2dea43192b82453d00b04d9acac0a565d2719cffe2772436";
-const GOLDEN_PERMANENT_3: &str = "80662fe78b51f510705d745a29eff05c57f43d3dc0c03c389e11ebdcf23c54cf";
+const GOLDEN_PERMANENT_1: &str = "6719df8cb5d3c27059905ef30cd091626a8ed78513cf4a0f2741f85aff74ebec";
+const GOLDEN_PERMANENT_2: &str = "df7f3925445f739f5b13ed0c6334b4c7b34bb8a16f0ef2188a10101b9006a64a";
+const GOLDEN_PERMANENT_3: &str = "c5d7eacfd4a7fbc367834eef1b3424c1c7d74d5e1bc6bc023281b9dc7c0997c2";
 
 /// Expiry only extends: an earlier height is refused, the same height is
 /// accepted without moving the schedule, a later height moves it.
@@ -903,13 +903,13 @@ fn expiry_extends_only() {
     ]);
 }
 
-const GOLDEN_EXTEND_1: &str = "890f2650a930082442fb4491d48fd7e74d3c496907c87993fbef9862bcc8aa4f";
-const GOLDEN_EXTEND_2: &str = "358760068744efd49555d48ccddc0dd8762d7d38ed23b18aa02e86a4dc09263a";
-const GOLDEN_EXTEND_3: &str = "86815b154fb4e8953ec7a84032777d7f78c2b203ae6f0ce3822bb4185e1007e9";
-const GOLDEN_EXTEND_4: &str = "5e453954697ad11eb1e4fa5be4602c3c1009a5150fc75d15af3caf03fb566216";
-const GOLDEN_EXTEND_5: &str = "968cf71800743b1b8717287cb66069b86c324028e188d60e31284e09efad2068";
-const GOLDEN_EXTEND_6: &str = "f6792054ad1da6fe1b9adb67c19274f8cbca37361badd28166c44520e9982974";
-const GOLDEN_EXTEND_7: &str = "caad4b6b4c783d6d101b5f1ec30f6d7cd29efaa89eadd6ba8d7d86a2f1d84b95";
+const GOLDEN_EXTEND_1: &str = "04fd3d5bcb84b8190b9f02b13412a2795c7db4c34216ca0916b6e2dbe45b0941";
+const GOLDEN_EXTEND_2: &str = "723c20efb60522549a1bf0701040c017900f55889500034f43fab8afd7d9d317";
+const GOLDEN_EXTEND_3: &str = "7a205e724d0e490d8ff03287c691f4f5b4c0f06889a74c0e9780ea4000d8fa40";
+const GOLDEN_EXTEND_4: &str = "19aaadcb025bf18300d89ba7afdd6f5c6d2ba4f5535da9353e748e8078c60a10";
+const GOLDEN_EXTEND_5: &str = "f4e9e9beaa153b26dd58c29b2c5ba2e8ed55333fbdeeb345ced7a0f2e282d140";
+const GOLDEN_EXTEND_6: &str = "0a6e9caf5a54038b47730c1146d656c6aacceb197bfbd5de1a2540dcbc0e7f7d";
+const GOLDEN_EXTEND_7: &str = "6866dcd071a3e6c1d89bc0dc1515e65eb925f9b8600d5d2a10892cde697375de";
 
 /// Expiry pairs that do not resolve: dead on arrival, too far, and an
 /// overflowing `height + min_lifetime` (reachable only with a huge
@@ -1003,10 +1003,10 @@ fn unresolvable_expiry_is_host_rejected() {
     fixture.finish(&[GOLDEN_TOO_FAR_1, GOLDEN_TOO_FAR_2]);
 }
 
-const GOLDEN_FAULTS_1: &str = "c6cd430c287505b6ac6751cb2bd5bf3eebff3637a78ee6cc579c9206868ad536";
-const GOLDEN_FAULTS_2: &str = "3aa7192ea5e1605e1899b35bd31c7780b827a4fcedffa24aaf0f9b18c71aa8ca";
-const GOLDEN_TOO_FAR_1: &str = "3481980a59360ebd4118229909be069c7a81147704d87181d2abb63494fbd79d";
-const GOLDEN_TOO_FAR_2: &str = "4608254bacf39bfa01f85747526e0223496730f3c80a5ad5856b91526adaafad";
+const GOLDEN_FAULTS_1: &str = "d19e5163e00f70925852e006213cb5e50dbe0cf52855d1dbb109c1395b0bb32e";
+const GOLDEN_FAULTS_2: &str = "9877015280267a3eeb3be3bbeace3a5e160c91c25fde9604bd88843dfef6237a";
+const GOLDEN_TOO_FAR_1: &str = "737b788d4bc78bb0e27e506edd7035beb8d3e164c64c449d04b32835eede6832";
+const GOLDEN_TOO_FAR_2: &str = "d646baed75131bd26d12ee35bb58ad339b2da439449c1e38b07ed50176849a9c";
 
 /// Empty blocks still have headers, digests and outcomes; the timestamp may
 /// repeat the parent's.
@@ -1032,9 +1032,9 @@ fn empty_blocks() {
     fixture.finish(&[GOLDEN_EMPTY_1, GOLDEN_EMPTY_2, GOLDEN_EMPTY_3]);
 }
 
-const GOLDEN_EMPTY_1: &str = "b1379725fce5ee154bc51905cf425e75d627ab4fa4a6cdcda8c84cd14db36606";
-const GOLDEN_EMPTY_2: &str = "19e02bd57d9c703a31be2dde26714ae61cb123e8da4a8314712a6f3c4c055367";
-const GOLDEN_EMPTY_3: &str = "c4334b14b91513765ac9cc81dbc5060ba14e48524a8a4add0ab8c18c20dba403";
+const GOLDEN_EMPTY_1: &str = "06b9f3900549ffd92ea175becb0bb62e6b3b86a8835d0670df023b19d58e17de";
+const GOLDEN_EMPTY_2: &str = "3d3b69e87316b6d249bd999412fd38c33ba15689741406450b5aa04b3ef3b1ba";
+const GOLDEN_EMPTY_3: &str = "657e5c9c231363da6f2e7c989d48abbe851d5808c75601a830b4c8a7ae929788";
 
 /// A recorded block whose header follows the chain but whose inputs repeat
 /// an identity: within the block, or one included earlier. Replay refuses
@@ -1116,7 +1116,7 @@ fn replay_rejects_duplicate_identities() {
     fixture.finish(&[GOLDEN_IDENTITY_1]);
 }
 
-const GOLDEN_IDENTITY_1: &str = "bb76cb6156905f538839670367d5daa2be7f82756b11c9b8eed7df4efbb88310";
+const GOLDEN_IDENTITY_1: &str = "687ef26e8e86142aedf49f18dba584c0f799595dbb46e67ccb2d6fe9687edc75";
 
 /// Replay refuses a recorded block with a statically invalid request, a
 /// broken selection limit, a wrong parent, or outcomes or a header that
@@ -1240,8 +1240,8 @@ fn replay_rejects_invalid_blocks() {
     fixture.finish(&[GOLDEN_INVALID_1, GOLDEN_INVALID_2]);
 }
 
-const GOLDEN_INVALID_1: &str = "3481980a59360ebd4118229909be069c7a81147704d87181d2abb63494fbd79d";
-const GOLDEN_INVALID_2: &str = "790ba482fe15fc254a7be635d6553064b7424e122cb658333b4d0a47fa6897b5";
+const GOLDEN_INVALID_1: &str = "737b788d4bc78bb0e27e506edd7035beb8d3e164c64c449d04b32835eede6832";
+const GOLDEN_INVALID_2: &str = "2c3005e2c15f0e8e3c35d2138f3bb7909d41e82d332a6877a1da922b0a14c910";
 
 /// A statically valid operation refused at engine admission is a broken
 /// invariant, never an outcome: here the (unchecked) genesis reserves less

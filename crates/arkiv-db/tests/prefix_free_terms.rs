@@ -640,3 +640,121 @@ fn tampered_or_misdirected_proofs_never_verify_to_another_result() {
         );
     }
 }
+
+/// The worst-case term keys: a 32-byte attribute name and indexed strings
+/// at the 512-byte ceiling (548-byte term keys), alone and sharing long
+/// prefixes (so leaves and extensions carry near-maximal paths), all queried
+/// and proven at the generic ceiling profile.
+#[test]
+fn ceiling_profile_longest_names_and_values_query_and_prove() {
+    let limits = Limits {
+        max_indexed_len: Value::INDEXED_LEN_CEILING,
+        ..Limits::DEFAULT
+    };
+    let max = limits.indexed_value_len();
+    let attribute = "n".repeat(CellName::MAX_LEN);
+    let long = "x".repeat(max);
+    let strings: Vec<String> = vec![
+        String::new(),
+        "x".repeat(max - 1),
+        format!("{}\0", "x".repeat(max - 1)),
+        format!("{}y", "x".repeat(max - 1)),
+        long.clone(),
+        "\0".repeat(max),
+        "\u{10ffff}".repeat(max / 4),
+    ];
+    // One record each, plus a single-entry namespace whose term map is one
+    // leaf holding the whole 548-byte key.
+    for values in [strings.clone(), vec![long.clone()]] {
+        let mut engine = Engine::with_limits(PriceSchedule::FIXTURE, limits);
+        let mut branch = engine.begin(engine.head(), None).unwrap();
+        branch
+            .execute(
+                OWNER,
+                WriteOp::CreateNamespace {
+                    name: NamespaceName::new("ceiling").unwrap(),
+                },
+                Budget::unlimited(),
+            )
+            .unwrap();
+        let mut model = Vec::new();
+        for (i, text) in values.iter().enumerate() {
+            let key = RecordKey::new(&(i as u64).to_be_bytes()).unwrap();
+            let cells = vec![(name(&attribute), Cell::attribute(Value::str(text)))];
+            branch
+                .execute(
+                    OWNER,
+                    WriteOp::CreateRecord {
+                        namespace: ns(1),
+                        key: key.clone(),
+                        cells: cells.clone(),
+                    },
+                    Budget::unlimited(),
+                )
+                .unwrap();
+            model.push(Row {
+                id: RecordId::from_ordinal(i as u64 + 1).unwrap(),
+                key: Some(key),
+                cells,
+            });
+        }
+        engine.publish(&branch.seal()).unwrap();
+        let snapshot = engine.snapshot(engine.head()).unwrap();
+        for (index, text) in values.iter().enumerate() {
+            let request = EqRequest {
+                snapshot: snapshot_ref(&snapshot),
+                query: EqQuery {
+                    namespace: ns(1),
+                    attribute: name(&attribute),
+                    value: Value::str(text),
+                },
+                limit: 64,
+                continuation: None,
+            };
+            let bytes = snapshot
+                .prove_eq(&request, ProofLimits::default(), Budget::unlimited())
+                .unwrap()
+                .bytes;
+            let VerifiedEq::Page(page) =
+                verify_eq(&request, None, &bytes, ProofLimits::default(), limits).unwrap()
+            else {
+                panic!("namespace absent")
+            };
+            assert_eq!(page.rows, vec![model[index].clone()]);
+        }
+        let request = RangeRequest {
+            snapshot: snapshot_ref(&snapshot),
+            query: RangeQuery {
+                namespace: ns(1),
+                attribute: name(&attribute),
+                lower: Included(Value::str("")),
+                upper: Unbounded,
+            },
+        };
+        let bytes = snapshot
+            .prove_range(&request, RangeProofLimits::default(), Budget::unlimited())
+            .unwrap()
+            .bytes;
+        let VerifiedRange::Complete(result) =
+            verify_range(&request, &bytes, RangeProofLimits::default(), limits).unwrap()
+        else {
+            panic!("namespace absent")
+        };
+        let mut expected = model.clone();
+        expected.sort_by(|a, b| value_of(a).cmp_ordered(value_of(b)).unwrap());
+        let mut rows = result.rows;
+        rows.sort_by(|a, b| value_of(a).cmp_ordered(value_of(b)).unwrap());
+        assert_eq!(rows, expected);
+        // The default-profile verifier bounds term keys at 164 bytes, so it
+        // rejects these proofs instead of misreading them.
+        assert!(
+            verify_range(
+                &request,
+                &bytes,
+                RangeProofLimits::default(),
+                Limits::DEFAULT
+            )
+            .is_err()
+        );
+    }
+}

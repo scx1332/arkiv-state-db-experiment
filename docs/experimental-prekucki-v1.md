@@ -142,6 +142,17 @@ width; at the 512-byte ceiling it is 548 bytes (`TermKey::MAX_LEN`).
   derived for layout 1) and verifier reservations derive from
   `TermKey::max_len_for(limits)`, which is 164 for the default limits, the
   old fixed width.
+- Verifiers must use the instance's committed genesis `Limits`. Equality
+  and range verifiers bound decoded term-key lengths with
+  `TermKey::max_len_for(limits)`. A verifier using smaller limits than
+  the producing instance rejects honest proofs as `InvalidNode`. It never
+  accepts a wrong result, but proofs from a 512-byte generic instance fail
+  under the default profile's limits.
+- Range-proof serving reserves `(2·max_key_len + 1)·1024` work units per
+  witness node. At the 512-byte ceiling (548-byte keys) that is about 1.12M
+  units, against 337k for the default profile, so under the 512 MiB work cap
+  a generic instance serves about 478 witness nodes per range proof instead
+  of about 1,593. Going over is an error, never a truncated result.
 - Explorer: `MAX_TREE_PATH` is `2 · TermKey::MAX_LEN` = 1,096 route steps
   (was 328); the range inspection JSON reports term-key endpoints with
   `lowerInclusive`/`upperInclusive`.

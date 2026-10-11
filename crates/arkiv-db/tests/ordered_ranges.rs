@@ -264,9 +264,9 @@ fn bool_ranges_order_false_before_true() {
 
 #[test]
 fn str_ranges_order_by_utf8_bytes_with_prefixes_first() {
-    let longest_ascii = "z".repeat(Value::MAX_INDEXED_LEN);
+    let longest_ascii = "z".repeat(arkiv_db::Limits::DEFAULT_INDEXED_LEN);
     // 64 two-byte characters: exactly the 128-byte indexed cap.
-    let longest_utf8 = "é".repeat(Value::MAX_INDEXED_LEN / 2);
+    let longest_utf8 = "é".repeat(arkiv_db::Limits::DEFAULT_INDEXED_LEN / 2);
     let texts = [
         "ab",
         "",
@@ -345,7 +345,7 @@ fn str_ranges_order_by_utf8_bytes_with_prefixes_first() {
 fn str_range_bounds_obey_the_indexed_string_limit() {
     let fixture = fixture(&[Value::str("a")]);
     let snapshot = fixture.snapshot();
-    let too_long = Value::str(&"x".repeat(Value::MAX_INDEXED_LEN + 1));
+    let too_long = Value::str(&"x".repeat(arkiv_db::Limits::DEFAULT_INDEXED_LEN + 1));
     for (lower, upper) in [
         (Included(too_long.clone()), Unbounded),
         (Unbounded, Excluded(too_long.clone())),

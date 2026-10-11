@@ -368,7 +368,7 @@ publish an unservable height. Batch responses include only whole blocks
 and at least one when the requested next block exists. Tests cover the
 largest admitted block and an over-cap candidate leaving head unchanged.
 
-The structural path bounds are catalog 17, term 177, row 17 and key
+The structural path bounds are catalog 17, term `2L + 1` (329 for the default limits since state layout 2; 177 in layout 1), row 17 and key
 binding 67 visited nodes; inline nodes count toward traversal work, while
 wire nodes are only the root and hash-referenced descendants. Bound row
 decoding by the selected genesis's cell/value limits (at most 64 cells).

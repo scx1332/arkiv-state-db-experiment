@@ -1122,7 +1122,7 @@ fn content_addressed_but_malformed_host_row_and_posting_values_are_corruption() 
     );
 
     let key = RecordKey::new(b"r").unwrap();
-    let keys = raw_map(&key.encoded(), 1_u64.to_be_bytes().to_vec());
+    let keys = raw_map(&[1, b'r'], 1_u64.to_be_bytes().to_vec());
     let rows = raw_map(&1_u64, vec![1, b'r', 0, 0, 0, 1]); // One cell with no encoding.
     let directory = catalog([
         (EMPTY_ROOT_HASH, 0),
@@ -1147,15 +1147,11 @@ fn content_addressed_but_malformed_host_row_and_posting_values_are_corruption() 
     );
 
     let postings = raw_map(&1_u64, vec![2]); // A posting member must be exactly 01.
-    // The term key of `kind = 1u64`: name padded to 32 ‖ name_len ‖ tag ‖
-    // presence ‖ value padded to 128 ‖ value_len.
-    let mut term_key = [0_u8; 164];
-    term_key[..4].copy_from_slice(b"kind");
-    term_key[32] = 4;
-    term_key[33] = Value::U64(1).tag().id();
-    term_key[34] = 1;
-    term_key[35..43].copy_from_slice(&1_u64.to_be_bytes());
-    term_key[163] = 8;
+    // The term key of `kind = 1u64`: name ‖ 00 ‖ tag ‖ presence ‖ value.
+    let mut term_key = b"kind\0".to_vec();
+    term_key.extend([Value::U64(1).tag().id(), 1]);
+    term_key.extend(1_u64.to_be_bytes());
+    let term_key: [u8; 15] = term_key.try_into().unwrap();
     let mut handle = postings.root_hash().to_vec();
     handle.extend(1_u64.to_be_bytes());
     let terms = raw_map(&term_key, handle);

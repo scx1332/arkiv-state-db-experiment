@@ -51,7 +51,8 @@ pub fn resolve(
             Error("UnsupportedProof")
         }
     })?;
-    if matches!(&value, Value::Str(s) if s.len() > Value::MAX_INDEXED_LEN) {
+    // The representation ceiling; the instance limit is checked by the verifier.
+    if matches!(&value, Value::Str(s) if s.len() > Value::INDEXED_LEN_CEILING) {
         return Err(Error("InvalidRequest"));
     }
     if namespace == crate::arkiv::entity_namespace() {

@@ -42,7 +42,7 @@ bytes its parent embeds, so the store is content-addressed.
 
 The crate uses its own node types rather than `alloy_trie`'s `LeafNode` and
 `ExtensionNode`, because those hold paths in `nybbles::Nibbles`, which is
-capped at 64 nibbles (32-byte keys), while engine maps need 33- and 164-byte
+capped at 64 nibbles (32-byte keys), while engine maps need keys up to 548 bytes
 keys. Its paths are unpacked nibbles of any length; the byte layout is the
 same format continued to longer paths. Evidence: `node.rs` unit tests
 compare every encoding with alloy's encoders byte for byte wherever alloy
@@ -122,40 +122,41 @@ composite keys:
 - `prefix_successor(p)` increments the last byte of `p` below `ff` and drops
   the rest (none for an empty or all-`ff` prefix: unbounded). It is the
   exclusive end of a prefix run, not the successor of one key.
-
-- `encode_padded(bytes, max_len)` writes `bytes ‖ 0x00 × (max_len − len) ‖
-  len`, `max_len + 1` bytes. Order is preserved: the first differing padded
-  byte decides exactly as the bytewise comparison of the strings does (a
-  string that ends first shows `0x00` where the longer one continues, and a
-  proper prefix is smaller); if all padded bytes agree, one string is the
-  other plus trailing zero bytes and the length byte orders them. Decoding
-  rejects a length above `max_len` and nonzero padding, so the encoding is
-  unique.
+- `encode_shifted(bytes)` (for strings without `ff`, such as UTF-8) writes
+  every byte plus one and a `00` terminator: exactly `len + 1` bytes,
+  prefix-free and order-preserving for the same reasons, without the
+  worst-case doubling of escapes. `shift_bytes` is its unterminated prefix
+  form. (The padded fixed-width encoder of state layout 1 was removed.)
 - Fixed-width fields (bytes, big-endian integers) compare as their values,
   and concatenated fixed-width fields compare as tuples, because each field
   starts at the same offset in every key.
 - `KeyWriter` and `KeyReader` compose them.
 
 Evidence (`tests/encoding.rs`): random strings biased toward empty strings,
-trailing zeros, prefixes of other strings and maximum lengths (for maximum
-lengths 0, 1, 2, 3, 20 and 64) order exactly as Rust's slice ordering, and the
-88-byte composite `(name ≤ 20, tag, presence, value ≤ 64)` orders exactly as
-the Rust tuple ordering, with existence (`presence = 0`) before an empty
-value, and a map keyed by it iterates in tuple order.
+trailing zeros, `00`/`01`/`ff`-heavy strings, prefixes of other strings and
+maximum lengths (for maximum lengths 0, 1, 2, 3, 20 and 64) order exactly as
+Rust's slice ordering under both encodings, the encoded sets are
+prefix-free, unterminated forms select exactly the extensions, and the
+composite `(name ≤ 20, tag, presence, value ≤ 64)` orders exactly as the
+Rust tuple ordering, is prefix-free, puts existence (`presence = 0`) before
+an empty value, and a map keyed by it iterates in tuple order.
 
 The engine key encodings (implemented in node step N3b, in
 `crates/arkiv-db/src/layout.rs`) and the resulting bounds (see
 [Depth bound](#depth-bound) and
 [Nodes an update creates](#nodes-an-update-creates)):
 
-| Map | Key encoding | Bytes | Nodes on a path (≤ 2·L + 1) | New nodes per insert (≤ 2·L + 2) |
+State layout 2 (`docs/experimental-prekucki-v1.md`); `L` is the longest
+key, and bounds use it:
+
+| Map | Key encoding | Bytes (L) | Nodes on a path (≤ 2·L + 1) | New nodes per insert (≤ 2·L + 2) |
 | --- | --- | --- | --- | --- |
 | catalog | `NamespaceId` big-endian | 8 | 17 | 18 |
 | host | raw `[u8; 32]` | 32 | 65 | 66 |
-| records (raw) | `key ‖ 0x00 pad to 20 ‖ len` | 21 | 43 | 44 |
-| keys | RecordKey `len ‖ bytes ‖ pad` | 33 | 67 | 68 |
+| records (raw) | `bytes⁰(key)` (escaped, `00`-terminated) | 1–41 | 83 | 84 |
+| keys | RecordKey `len ‖ bytes` | 2–33 | 67 | 68 |
 | rows, postings | `RecordId` big-endian | 8 | 17 | 18 |
-| terms | `name ‖ pad to 32 ‖ name_len ‖ tag ‖ presence ‖ value ‖ pad to 128 ‖ value_len` | 164 | 329 | 330 |
+| terms | `bytes⁰(name) ‖ tag ‖ presence ‖ value` (`text⁺` for `Str`, fixed-width term bytes otherwise) | 4–164 under the default limits (548 at the ceiling) | 329 (1,097) | 330 (1,098) |
 
 ## Depth bound
 
@@ -425,12 +426,12 @@ hand-derived literals from the crafted key sets.
 | File | Establishes |
 | --- | --- |
 | `src/node.rs` (unit) | Byte equality with alloy's leaf, extension and branch encoders; long paths; strict decoding round trips; hash check on load; `from_store` inline children; rejection of noncanonical forms; 20,000 mutated inputs never panic and only canonical bytes decode; alloy's decoder panics on a 35-byte path |
-| `src/nibbles.rs`, `src/order.rs` (unit) | Hex-prefix vectors and rejections; padded-field vectors; writer/reader round trip |
+| `src/nibbles.rs`, `src/order.rs` (unit) | Hex-prefix vectors and rejections; escaped and shifted field vectors, `prefix_successor`; writer/reader round trip |
 | `tests/map.rs` | Random histories against `BTreeMap` and the root oracles for key lengths 1–88; history independence; retained versions unchanged; depth bound reached exactly (`2L + 1`, removal `2L + 2`); empty and single-entry maps; handle validation; empty values rejected by `insert` before any visit or read |
 | `tests/proofs.rs` | Proofs equal `ProofRetainer` (≤ 32 bytes) and the reference (33, 88 bytes); `walk` gives the model's answer; alloy cross-check where valid; the three alloy forgeries; randomized mutations (bit flips, truncations, reordering, duplication, extra and inline nodes, wrong roots, other keys and versions) are rejected or give the honest answer; self-consistent adversarial tries and garbage never panic; old proofs verify against old roots; lazy, counted generation; prefix-related keys proven absent, never included |
 | `tests/variable_keys.rs` | Variable-length prefix-free `ByteKey`s (`00`/`01`/`ff`-heavy, the empty key, maximum length) against a byte-ordered `BTreeMap`: insert/overwrite/remove histories, lookups, typed and raw seeks, retained handles, roots equal to `HashBuilder` and the reference, insertion-order independence, collapse back to the original root, point proofs equal to the reference, complete interval proofs over random inclusive/exclusive/unbounded raw endpoints and prefix runs (omissions, extras, entry and key-length limits rejected), stored reopen/walk/prove; a non-prefix-free codec rejected by `insert` without change |
 | `tests/store.rs` | Staging equals the reference object set; reopened maps read lazily with residency-independent visit counts; lazy updates load only touched paths; restaging is complete, minimal and bounded; the per-update creation bounds (`2L + 2` for an insert, `2L` for a removal) reached exactly; history readable; missing and corrupt objects and host loader errors surface as errors; caching loader; nested maps through the hook and `stage_with`, also when another value type staged a byte-identical leaf into the same sink first; hash-valid noncanonical tries rejected by the map and by `walk` |
-| `tests/encoding.rs` | Order preservation and uniqueness of the padded and composite encodings |
+| `tests/encoding.rs` | Order preservation, prefix-freeness and uniqueness of the escaped, shifted and composite encodings |
 
 ## Engine integration (node step N3b)
 
@@ -483,26 +484,23 @@ Evidence in `crates/arkiv-db/tests`:
 
   | Block | Hashed nodes | Staged objects | Allowed by the entry writes |
   | --- | --- | --- | --- |
-  | 200 record creations in two namespaces | 710 | 650 | 438,436 |
-  | 20 mixed blocks of 2–30 operations | 28–206 | 27–199 | 866–22,006 |
+  | 200 record creations in two namespaces | 510 (710 in layout 1) | 450 (650) | 438,436 |
+  | 20 mixed blocks of 2–30 operations | 26–199 | 25–192 | 866–22,206 |
   | One key inserted on a crafted 67-node key path | 66 key-map (71 in all) | 66 key-map (71 in all) | 68 key-map (104 in all) |
   | One key removed there, collapsing the deepest branch | 65 key-map | 65 key-map | 68 |
-  | One record added to a crafted 175-node term path | 177 term (189 in all) | 177 term (189 in all) | 660 term (800 in all) |
+  | One record added to a crafted 175-node term path | 176 term (187 in all) | 176 term (187 in all) | 660 term (800 in all) |
 
   The crafted fixtures reach the bounds as closely as valid data allows: 66
   record keys branch at every nibble a 33-byte key encoding can branch on
   (the length's low nibble cannot: 0x21–0x2f exceed 32), so the spine's
   path is 67 = `2·33 + 1` nodes and one more key rehashes 66 of them (its
-  new leaf is inline). 214 terms branch at 172 nibbles of the term
-  encoding's name and value fields; only the name length (equal padded names are
-  equal names, since names never contain 0x00) and the tag's and presence
-  byte's high nibbles cannot differ while the bytes before them agree. The
-  value length can: a `Str` value may end in zero bytes, so values that
-  agree on all padded value bytes can still differ in length. The spine
-  term's path has 175 nodes (172 branches, two extensions and a leaf).
-  Adding a record to the spine term rewrites its leaf (175 path nodes) and
-  its existence term's leaf, with one node on the existence term's side
-  of the trie (two more: 177). These are
+  new leaf is inline). In state layout 2 the spine term (name `a`×20, value
+  `a`×62 ‖ NUL) has an 87-byte key; 218 terms branch at 172 of its nibbles
+  (only the name terminator's low nibble and the presence byte's high nibble
+  cannot differ while the bytes before them agree), so its path is 175 nodes
+  (172 branches, two extensions and a leaf with an empty path). Adding a
+  record to the spine term rewrites its 175-node path and its existence
+  term's leaf, which hangs directly off the presence branch: 176. These are
   logical counts; hashing time was not measured.
 
 ## Durable integration and remaining work

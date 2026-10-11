@@ -263,7 +263,9 @@ fn unsupported_and_mixed_bounds_fail_before_reading() {
         (Included(Value::bytes(b"a")), Unbounded),
         (
             Unbounded,
-            Excluded(Value::str(&"x".repeat(Value::MAX_INDEXED_LEN + 1))),
+            Excluded(Value::str(
+                &"x".repeat(arkiv_db::Limits::DEFAULT_INDEXED_LEN + 1),
+            )),
         ),
     ] {
         let r = request(&snapshot, lower, upper);
@@ -498,7 +500,13 @@ fn omitted_terms_postings_rows_and_tampered_bindings_cannot_verify() {
     w.rows.swap(0, 1);
     reject(w);
     let mut w = wire.clone();
-    w.rows[0].2 = w.rows[1].2.clone();
+    // With unpadded 9-byte key encodings the key-binding leaves are inline,
+    // so two bindings can share one path; then cut the path instead.
+    if w.rows[0].2 == w.rows[1].2 {
+        w.rows[0].2.pop();
+    } else {
+        w.rows[0].2 = w.rows[1].2.clone();
+    }
     reject(w);
     let mut w = wire.clone();
     w.rows[0].1 = w.rows[1].1.clone();
@@ -711,10 +719,14 @@ fn inspected_range_connects_exact_boundary_nodes_postings_and_rows() {
     let interval = inspection.interval.unwrap();
     assert_eq!(interval.root, roots.terms.0);
     let leaves = interval.leaves.iter().flatten().collect::<Vec<_>>();
+    // The excluded endpoint 20 is never included. Its leaf is not even
+    // opened: exclusive endpoints compare whole keys, so the subtree whose
+    // smallest key is the endpoint itself is outside (the old fixed-width
+    // predecessor arithmetic had to open it).
     assert!(
-        leaves
+        !leaves
             .iter()
-            .any(|l| l.value == Some(Value::U64(20)) && !l.included)
+            .any(|l| l.value == Some(Value::U64(20)) && l.included)
     );
     assert!(
         !leaves

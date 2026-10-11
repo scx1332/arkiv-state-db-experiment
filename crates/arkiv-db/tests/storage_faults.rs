@@ -801,7 +801,7 @@ fn rows_whose_attributes_cannot_be_indexed_are_corrupt() {
     assert_eq!(roots.terms, (EMPTY_ROOT_HASH, 0));
 
     let bytes_value = [&[3u8, 0, 0, 0, 1][..], b"b"].concat();
-    let length = Value::MAX_INDEXED_LEN + 1;
+    let length = Value::INDEXED_LEN_CEILING + 1;
     let long_str = [
         &[2u8][..],
         &(length as u32).to_be_bytes(),

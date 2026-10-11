@@ -19,19 +19,15 @@ use std::{fmt, sync::Arc};
 /// keys are 32-byte hashes, so they fit as they are; shorter keys are
 /// accepted too.
 ///
-/// The canonical encoding is 33 bytes, `len ‖ bytes ‖ zero padding`, a
-/// bijection: short keys round-trip losslessly and every accepted byte
-/// string decodes to exactly one key. Charges count the raw key length, not
-/// the encoding.
+/// The canonical encoding (in the codec and as a trie key) is `len ‖ bytes`,
+/// 2 to 33 bytes, a bijection: every accepted byte string decodes to exactly
+/// one key. Charges count the raw key length, not the encoding.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RecordKey(Arc<[u8]>);
 
 impl RecordKey {
     /// Longest accepted key: the SDK's 32-byte entity keys.
     pub const MAX_LEN: usize = 32;
-    /// Width of the canonical encoding: the length byte plus
-    /// [`Self::MAX_LEN`] bytes.
-    pub const ENCODED_LEN: usize = 33;
 
     /// Wraps `bytes`; `None` for an empty key or one longer than [`Self::MAX_LEN`].
     pub fn new(bytes: &[u8]) -> Option<Self> {
@@ -43,27 +39,6 @@ impl RecordKey {
     /// The raw key bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
-    }
-
-    /// Canonical encoding: `len ‖ bytes ‖ 0x00…`, 33 bytes.
-    pub fn encoded(&self) -> [u8; Self::ENCODED_LEN] {
-        let mut out = [0u8; Self::ENCODED_LEN];
-        out[0] = u8::try_from(self.0.len()).expect("keys are at most 32 bytes");
-        out[1..=self.0.len()].copy_from_slice(&self.0);
-        out
-    }
-
-    /// Decodes the canonical encoding; rejects a length byte of 0 or above
-    /// 32 and any non-zero padding.
-    pub fn decode(encoded: [u8; Self::ENCODED_LEN]) -> Option<Self> {
-        let len = usize::from(encoded[0]);
-        if !(1..=Self::MAX_LEN).contains(&len) {
-            return None;
-        }
-        if encoded[len + 1..].iter().any(|&byte| byte != 0) {
-            return None;
-        }
-        Self::new(&encoded[1..=len])
     }
 }
 
@@ -149,9 +124,10 @@ impl std::error::Error for NameFault {}
 pub struct CellName(Arc<str>);
 
 impl CellName {
-    /// Longest representable name, in bytes: the hard cap fixed by the
-    /// term-index key's name width. Writes obey the
-    /// configured [`Limits::max_cell_name_len`], which is at most this.
+    /// Longest representable name, in bytes: the hard cap of the name
+    /// grammar (golem-db's cell-name limit). Writes obey the configured
+    /// [`Limits::max_cell_name_len`], which is at most this. Term keys
+    /// store names unpadded, so this is not a key-width constraint.
     pub const MAX_LEN: usize = 32;
 
     /// Validates `name` against the grammar.
@@ -594,11 +570,18 @@ pub enum Value {
 }
 
 impl Value {
-    /// Hard cap on the encoded bytes of an indexed attribute value, fixed
-    /// by the term-index key's value width. Indexed strings obey the
-    /// configured [`Limits::max_indexed_len`], which is at most this; field
-    /// values obey [`Limits::max_str_len`] and [`Limits::max_bytes_len`].
-    pub const MAX_INDEXED_LEN: usize = 128;
+    /// Safety ceiling on the encoded bytes of an indexed `Str` value: the
+    /// largest [`Limits::max_indexed_len`] any instance may configure.
+    ///
+    /// Term keys store a `Str` value unpadded (`len + 1` bytes), so this is
+    /// not a key width. It bounds the representation and resources: a term
+    /// key is at most [`TermKey::MAX_LEN`](arkiv_db_trie::TrieKey::MAX_LEN)
+    /// = 548 bytes, so a worst-case term leaf (key path, posting handle and
+    /// RLP framing) stays well below the 1 KiB proof-node limit of equality
+    /// and range proofs. The default and Arkiv-facing admission policy is
+    /// [`Limits::DEFAULT_INDEXED_LEN`] (128); field values obey
+    /// [`Limits::max_str_len`] and [`Limits::max_bytes_len`].
+    pub const INDEXED_LEN_CEILING: usize = 512;
 
     /// A text value.
     pub fn str(text: &str) -> Self {
@@ -839,10 +822,14 @@ pub struct Row {
 /// The cell limits are golem-db's genesis `cell_limits`
 /// ([`Self::max_cell_name_len`], [`Self::max_str_len`],
 /// [`Self::max_bytes_len`]) plus [`Self::max_indexed_len`] for indexed
-/// strings. The term-index key pads names and indexed values to fixed
-/// widths, so two limits have hard caps: [`CellName::MAX_LEN`] (32) and
-/// [`Value::MAX_INDEXED_LEN`] (128). [`Self::validate`] rejects a
-/// configuration above a cap.
+/// strings. Representation and admission are separate: term keys store
+/// names and values unpadded, and the admitted lengths are policy. Two
+/// limits have hard caps: [`CellName::MAX_LEN`] (32, the name grammar) and
+/// [`Value::INDEXED_LEN_CEILING`] (512, a representation/resource safety
+/// ceiling). [`Self::validate`] rejects a configuration above a cap. The
+/// default (and Arkiv-facing) profile admits indexed strings up to
+/// [`Self::DEFAULT_INDEXED_LEN`] (128) bytes; a generic instance may
+/// configure more, up to the ceiling. All lengths count UTF-8 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Most namespaces the directory admits (see
@@ -859,8 +846,8 @@ pub struct Limits {
     pub max_bytes_len: usize,
     /// Longest indexed `Str`, in bytes: a `Str` attribute, and a `Str`
     /// equality value, range bound, prefix or `terms` bound in a query. At
-    /// most [`Value::MAX_INDEXED_LEN`]; the effective bound is the smaller
-    /// of this and [`Self::max_str_len`].
+    /// most [`Value::INDEXED_LEN_CEILING`]; the effective bound is the
+    /// smaller of this and [`Self::max_str_len`].
     pub max_indexed_len: usize,
     /// Largest query page.
     pub max_page: usize,
@@ -875,15 +862,20 @@ impl Limits {
     /// The namespace is a separate fixed-width ID, not part of these bytes.
     pub const MAX_RAW_KEY_LEN: usize = 20;
 
+    /// The default and Arkiv-facing indexed-string limit: the 128-byte
+    /// public `str` profile (`docs/arkiv-system-compatibility-plan.md`).
+    /// An explicit admission policy, no longer a key width.
+    pub const DEFAULT_INDEXED_LEN: usize = 128;
+
     /// The defaults every engine uses unless configured otherwise: the name
-    /// and indexed-string limits at their caps.
+    /// limit at its cap and the 128-byte indexed-string profile.
     pub const DEFAULT: Self = Self {
         namespace_cap: crate::engine::DEFAULT_NAMESPACE_CAP,
         max_cells: 64,
         max_cell_name_len: CellName::MAX_LEN,
         max_str_len: 4096,
         max_bytes_len: 4096,
-        max_indexed_len: Value::MAX_INDEXED_LEN,
+        max_indexed_len: Self::DEFAULT_INDEXED_LEN,
         max_page: 200,
         max_groups: 8,
         max_literals: 8,
@@ -891,14 +883,15 @@ impl Limits {
 
     /// The effective bound on an indexed `Str` (attribute or query string):
     /// the smaller of [`Self::max_indexed_len`] and [`Self::max_str_len`],
-    /// never above [`Value::MAX_INDEXED_LEN`].
+    /// never above [`Value::INDEXED_LEN_CEILING`]. Applied alike to writes,
+    /// equality values, range bounds, prefixes and term-seek bounds.
     pub const fn indexed_value_len(&self) -> usize {
         let mut len = self.max_indexed_len;
         if self.max_str_len < len {
             len = self.max_str_len;
         }
-        if Value::MAX_INDEXED_LEN < len {
-            len = Value::MAX_INDEXED_LEN;
+        if Value::INDEXED_LEN_CEILING < len {
+            len = Value::INDEXED_LEN_CEILING;
         }
         len
     }
@@ -930,9 +923,9 @@ impl Limits {
         if self.max_cell_name_len == 0 {
             Err("max_cell_name_len must be positive")
         } else if self.max_cell_name_len > CellName::MAX_LEN {
-            Err("max_cell_name_len exceeds the term-key name width (32)")
-        } else if self.max_indexed_len > Value::MAX_INDEXED_LEN {
-            Err("max_indexed_len exceeds the term-key value width (128)")
+            Err("max_cell_name_len exceeds the cell-name grammar cap (32)")
+        } else if self.max_indexed_len > Value::INDEXED_LEN_CEILING {
+            Err("max_indexed_len exceeds the indexed-string ceiling (512)")
         } else {
             Ok(())
         }
@@ -998,47 +991,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keys_encode_with_a_length_byte_and_zero_padding() {
+    fn keys_hold_one_to_thirty_two_bytes() {
         assert_eq!(RecordKey::MAX_LEN, 32);
-        assert_eq!(RecordKey::ENCODED_LEN, 33);
-
-        // b"a" -> 01 61 00…00 (33 bytes).
-        let key = RecordKey::new(b"a").unwrap();
-        let mut expected = [0u8; 33];
-        expected[0] = 1;
-        expected[1] = b'a';
-        assert_eq!(key.encoded(), expected);
-        assert_eq!(RecordKey::decode(expected), Some(key.clone()));
-
-        // 31 zero bytes -> 1f 00…00.
-        let zeros = RecordKey::new(&[0u8; 31]).unwrap();
-        let mut expected = [0u8; 33];
-        expected[0] = 31;
-        assert_eq!(zeros.encoded(), expected);
-        assert_eq!(RecordKey::decode(expected), Some(zeros.clone()));
-
-        // A 32-byte key (an SDK entity hash) -> 20 ‖ the 32 bytes, no padding.
-        let digest: [u8; 32] = std::array::from_fn(|index| 0xa0 + u8::try_from(index).unwrap());
-        let full = RecordKey::new(&digest).unwrap();
-        let mut expected = [0u8; 33];
-        expected[0] = 0x20;
-        expected[1..].copy_from_slice(&digest);
-        assert_eq!(expected[1], 0xa0);
-        assert_eq!(expected[32], 0xbf);
-        assert_eq!(full.encoded(), expected);
-        assert_eq!(RecordKey::decode(expected), Some(full.clone()));
-
         assert_eq!(RecordKey::new(b""), None);
         assert_eq!(RecordKey::new(&[7u8; 33]), None);
-        assert_eq!(RecordKey::decode([0u8; 33]), None);
-        let mut bad = [0u8; 33];
-        bad[0] = 33;
-        assert_eq!(RecordKey::decode(bad), None);
-        let mut dirty = [0u8; 33];
-        dirty[0] = 1;
-        dirty[1] = b'a';
-        dirty[32] = 1;
-        assert_eq!(RecordKey::decode(dirty), None);
+        assert_eq!(RecordKey::new(&[7u8; 32]).unwrap().as_bytes(), [7u8; 32]);
     }
 
     #[test]

@@ -153,7 +153,7 @@ impl Model {
 }
 
 // ---------------------------------------------------------------------------
-// Leaves built by hand from the layout of state format 1
+// Leaves built by hand from the layout of state format 2
 // ---------------------------------------------------------------------------
 
 fn be32(value: usize) -> [u8; 4] {
@@ -167,11 +167,17 @@ fn prefixed(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// `bytes ‖ 0x00 pad to width ‖ len`.
-fn padded(bytes: &[u8], width: usize) -> Vec<u8> {
-    let mut out = bytes.to_vec();
-    out.resize(width, 0);
-    out.push(u8::try_from(bytes.len()).unwrap());
+/// Escaped and terminated: `00 → 01 01`, `01 → 01 02`, then `00`.
+fn escaped(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for &byte in bytes {
+        match byte {
+            0 => out.extend([1, 1]),
+            1 => out.extend([1, 2]),
+            other => out.push(other),
+        }
+    }
+    out.push(0);
     out
 }
 
@@ -199,22 +205,24 @@ fn term_bytes(value: &V) -> Vec<u8> {
     }
 }
 
-/// `name ‖ pad to 32 ‖ name_len ‖ tag ‖ presence ‖ value ‖ pad to 128 ‖
-/// value_len`: 164 bytes.
+/// `escaped(name) ‖ tag ‖ 00` (existence) or `escaped(name) ‖ tag ‖ 01 ‖
+/// value`, where a `Str` value (tag 2) is its UTF-8 bytes each plus one and
+/// a `00` terminator and every other value its fixed-width term bytes.
 fn term_key(name: &str, tag: u8, value: Option<&[u8]>) -> Vec<u8> {
-    let mut key = padded(name.as_bytes(), 32);
+    let mut key = escaped(name.as_bytes());
     key.push(tag);
     match value {
-        None => {
-            key.push(0);
-            key.extend(padded(&[], 128));
-        }
+        None => key.push(0),
         Some(bytes) => {
             key.push(1);
-            key.extend(padded(bytes, 128));
+            if tag == 2 {
+                key.extend(bytes.iter().map(|byte| byte + 1));
+                key.push(0);
+            } else {
+                key.extend_from_slice(bytes);
+            }
         }
     }
-    assert_eq!(key.len(), 164);
     key
 }
 
@@ -222,7 +230,7 @@ fn term_key(name: &str, tag: u8, value: Option<&[u8]>) -> Vec<u8> {
 /// 32 bytes also checked against `HashBuilder`.
 fn root(entries: &BTreeMap<Vec<u8>, Vec<u8>>) -> B256 {
     let expected = reference::root(entries);
-    if entries.keys().next().is_some_and(|key| key.len() <= 32) {
+    if entries.keys().all(|key| key.len() <= 32) {
         assert_eq!(
             hash_builder_root(entries),
             expected,
@@ -244,7 +252,7 @@ fn namespace_roots(ns: &NsModel) -> NamespaceRoots {
     let raw: BTreeMap<Vec<u8>, Vec<u8>> = ns
         .raw
         .iter()
-        .map(|(key, value)| (padded(key, 20), prefixed(value)))
+        .map(|(key, value)| (escaped(key), prefixed(value)))
         .collect();
     let keys: BTreeMap<Vec<u8>, Vec<u8>> = ns
         .rows
@@ -252,7 +260,6 @@ fn namespace_roots(ns: &NsModel) -> NamespaceRoots {
         .map(|(id, (key, _))| {
             let mut encoded = vec![u8::try_from(key.len()).unwrap()];
             encoded.extend(key);
-            encoded.resize(33, 0);
             (encoded, id.to_be_bytes().to_vec())
         })
         .collect();
@@ -340,9 +347,9 @@ fn model_roots(model: &Model) -> Roots {
         .collect();
     let catalog = (root(&catalog), catalog.len() as u64);
     let host = (root(&host), host.len() as u64);
-    // StateHeader: format 1 ‖ catalog root ‖ catalog len ‖ next namespace
+    // StateHeader: format 2 ‖ catalog root ‖ catalog len ‖ next namespace
     // ‖ pricing (id ‖ 31 ‖ 31 weights) ‖ host root ‖ host len.
-    let mut header = 1u32.to_be_bytes().to_vec();
+    let mut header = 2u32.to_be_bytes().to_vec();
     header.extend(handle(catalog.0, catalog.1 as usize));
     header.extend(model.next_namespace.to_be_bytes());
     header.extend(model.pricing.0.to_be_bytes());

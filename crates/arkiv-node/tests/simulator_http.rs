@@ -599,7 +599,7 @@ async fn inspection_returns_exact_verified_witness_and_historical_results_with_b
         assert_eq!(verified.posting_count, count);
         assert_eq!(verified.rows.len(), page["rows"].as_array().unwrap().len());
         let inspection = &page["inspection"];
-        assert_eq!(inspection["version"], 1);
+        assert_eq!(inspection["version"], arkiv_db::LAYOUT_VERSION);
         assert_eq!(
             inspection["queryDigest"],
             hex(request.query.digest().as_slice())

@@ -21,7 +21,7 @@ the node. The HTML contains a direct specification link if the script cannot
 load. No Rust dependency or frontend build step is needed. The embedded OpenAPI
 schemas and examples live beside the handler in
 `crates/arkiv-node/src/signed/state-openapi.json`; update them when the wire format
-changes. The signed API uses the Arkiv v2 layout (at most 328 path steps).
+changes. The signed API uses the Arkiv v2 layout and state layout 2 (at most 1,096 path steps).
 
 ## Endpoint
 
@@ -67,8 +67,10 @@ attribute/field kind, type and readable value. Strings show at most 256 characte
 bytes show at most 32 bytes, with `valueTruncated` and original `byteLength`.
 Complete bytes remain available in the raw node. Raw record values stay opaque.
 
-Bounds are structural: maximum path steps are twice the term key width (328 for
-the 164-byte term key), with each selected map enforcing its smaller key width.
+Bounds are structural: maximum path steps are twice the longest term key
+(state layout 2: 1,096 for the 548-byte `TermKey::MAX_LEN` at the 512-byte
+indexed-string ceiling; real paths are far shorter, since keys are unpadded),
+with each selected map enforcing its smaller key bound.
 A request traverses at most that root-relative path, the bounded catalog lookup,
 and, for postings, one bounded term lookup. Empty/invalid paths never trigger a
 scan. Node RLP plus leaf value are limited to 384 KiB before hex amplification;

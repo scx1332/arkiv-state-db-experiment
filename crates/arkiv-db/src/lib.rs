@@ -166,5 +166,8 @@ impl<S: KvStore> Database<S> {
     }
 }
 
-/// Version of the logical trie layout, the codec and the proof formats.
-pub const LAYOUT_VERSION: u32 = 1;
+/// Version of the logical trie layout and of the state and proof formats
+/// built on it. Version 2 stores term, record and raw keys unpadded
+/// (prefix-free variable-length keys); a store, genesis or proof of
+/// version 1 is rejected before interpretation.
+pub const LAYOUT_VERSION: u32 = 2;

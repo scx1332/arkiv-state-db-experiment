@@ -249,20 +249,23 @@ TermKey { name: CellName, tag: TypeTag, value: Option<term bytes> }  // None = e
 Posting(MerkleMap<RecordId, Member>)                                  // ordered set of record ids
 ```
 
-Every map has a fixed key length and orders entries by the bytes of its
-key encoding (`layout.rs`, state format 1):
+Every map has bounded, prefix-free, variable-length keys and orders entries
+by the bytes of its key encoding (`layout.rs`, state format 2; see
+`docs/experimental-prekucki-v1.md`). `bytes⁰` escapes `00 → 01 01` and
+`01 → 01 02` and appends a `00` terminator; `text⁺` adds one to every UTF-8
+byte and appends a `00` terminator:
 
 | Map | Key encoding | Bytes | Leaf value (canonical codec) |
 | --- | --- | --- | --- |
 | catalog | `NamespaceId` big-endian | 8 | `descriptor ‖ next_record u64 ‖ records ‖ keys ‖ rows ‖ terms`, each map as `root ‖ len u64` |
 | host | raw `[u8; 32]` | 32 | `u32 len ‖ bytes` |
-| records (raw) | `key ‖ 0x00 pad to 20 ‖ len` | 21 | `u32 len ‖ bytes` |
-| keys | `RecordKey` v2 `len ‖ bytes ‖ 0x00 pad` (point lookups only) | 33 | `RecordId` u64 (nonzero) |
-| rows | `RecordId` big-endian | 8 | `RecordKey (u8 len ‖ bytes) ‖ Vec<(CellName, Cell)>`, names strictly ascending, attributes indexable and at most 64 bytes |
-| terms | `name ‖ 0x00 pad to 20 ‖ name_len ‖ tag ‖ presence (00 existence, 01 value) ‖ term bytes ‖ 0x00 pad to 64 ‖ term_len` | 88 | `posting root ‖ posting len u64` (len ≥ 1) |
+| records (raw) | `bytes⁰(key)` | 1–41 | `u32 len ‖ bytes` |
+| keys | `RecordKey` `len ‖ bytes` (point lookups only) | 2–33 | `RecordId` u64 (nonzero) |
+| rows | `RecordId` big-endian | 8 | `RecordKey (u8 len ‖ bytes) ‖ Vec<(CellName, Cell)>`, names strictly ascending, attributes indexable and within the indexed ceiling |
+| terms | `bytes⁰(name) ‖ tag ‖ 00` (existence) or `bytes⁰(name) ‖ tag ‖ 01 ‖ value`, value `text⁺(str)` or the scalar's fixed-width term bytes | 4–164 (default limits), at most 548 | `posting root ‖ posting len u64` (len ≥ 1) |
 | postings | `RecordId` big-endian | 8 | `01` |
 
-The padded fields preserve bytewise order, so the raw map iterates in the
+The encodings preserve bytewise order, so the raw map iterates in the
 bytewise order of the raw keys (the empty key and trailing zeros included)
 and the term map in the order of `(name, type, existence before value, value
 bytes)`, exactly the orders the engine used before; a prefix scan seeks to
@@ -361,8 +364,8 @@ fallible surface below.
 ### Typed records and their indexes
 
 A typed record is a caller-assigned `RecordKey` (1 to 32 bytes, the width of
-the SDK's entity keys; canonical fixed-width encoding of 33 bytes
-`len ‖ bytes ‖ zero padding`) bound to a dense per-namespace
+the SDK's entity keys; canonical encoding `len ‖ bytes`, also its trie key)
+bound to a dense per-namespace
 `RecordId` (from 1, never reused: a deleted key recreated gets a new id) and
 holding up to `max_cells` named cells. A `CellName` follows a fixed ASCII
 grammar (a letter or `$` plus a letter first, then letters, digits, `_`, `-`,

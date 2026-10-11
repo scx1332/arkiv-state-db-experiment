@@ -3,12 +3,13 @@ use arkiv_db::{CellName, NamespaceName, TypeTag, Value, decode_exact, encode};
 
 #[test]
 fn profile_limits_are_explicit_and_namespaces_stay_independent() {
-    assert_eq!(arkiv_db::LAYOUT_VERSION, 1);
-    assert_eq!(arkiv_db::CODEC_VERSION, arkiv_db::LAYOUT_VERSION);
+    assert_eq!(arkiv_db::LAYOUT_VERSION, 2);
+    assert_eq!(arkiv_db::CODEC_VERSION, 1);
     assert_eq!(arkiv_db::state::STATE_FORMAT, arkiv_db::LAYOUT_VERSION);
     assert_eq!(arkiv_db::proof::PROOF_VERSION, arkiv_db::LAYOUT_VERSION);
     assert_eq!(CellName::MAX_LEN, 32);
-    assert_eq!(Value::MAX_INDEXED_LEN, 128);
+    assert_eq!(arkiv_db::Limits::DEFAULT_INDEXED_LEN, 128);
+    assert_eq!(Value::INDEXED_LEN_CEILING, 512);
     for len in [0, 20, 21, 32, 33] {
         assert_eq!(
             CellName::new(&"a".repeat(len)).is_ok(),
@@ -140,7 +141,7 @@ fn all_scalars_prove_equality_and_reject_typed_substitution() {
         Value::Bool(true),
         Value::U64(u64::MAX),
         Value::I64(i64::MIN),
-        Value::str(&"é".repeat(Value::MAX_INDEXED_LEN / 2)),
+        Value::str(&"é".repeat(arkiv_db::Limits::DEFAULT_INDEXED_LEN / 2)),
     ]);
     let attr = CellName::new(&"a".repeat(CellName::MAX_LEN)).unwrap();
     for (n, value) in all.iter().enumerate() {
@@ -235,9 +236,13 @@ fn foreign_genesis_magic_and_state_format_are_rejected() {
     let mut wire = encode(&genesis);
     wire[7] = b'2';
     assert!(decode_exact::<EngineGenesis>(&wire).is_err());
+    // A layout-1 state header (or genesis) is rejected, never reinterpreted.
     let mut state = encode(&genesis.initial_header());
-    state[..4].copy_from_slice(&2u32.to_be_bytes());
+    state[..4].copy_from_slice(&1u32.to_be_bytes());
     assert!(decode_exact::<StateHeader>(&state).is_err());
+    let mut layout_one = encode(&genesis);
+    layout_one[8..12].copy_from_slice(&1u32.to_be_bytes());
+    assert!(decode_exact::<EngineGenesis>(&layout_one).is_err());
 }
 
 #[test]
@@ -258,12 +263,27 @@ fn scalar_and_string_admission_obeys_the_caps() {
     let ns = NamespaceId::from_ordinal(1).unwrap();
     let mut ordinal = 0u8;
     for (value, accepted) in [
-        (Value::str(&"a".repeat(Value::MAX_INDEXED_LEN - 1)), true),
-        (Value::str(&"a".repeat(Value::MAX_INDEXED_LEN)), true),
-        (Value::str(&"a".repeat(Value::MAX_INDEXED_LEN + 1)), false),
-        (Value::str(&"é".repeat(Value::MAX_INDEXED_LEN / 2)), true),
         (
-            Value::str(&format!("{}x", "é".repeat(Value::MAX_INDEXED_LEN / 2))),
+            Value::str(&"a".repeat(arkiv_db::Limits::DEFAULT_INDEXED_LEN - 1)),
+            true,
+        ),
+        (
+            Value::str(&"a".repeat(arkiv_db::Limits::DEFAULT_INDEXED_LEN)),
+            true,
+        ),
+        (
+            Value::str(&"a".repeat(arkiv_db::Limits::DEFAULT_INDEXED_LEN + 1)),
+            false,
+        ),
+        (
+            Value::str(&"é".repeat(arkiv_db::Limits::DEFAULT_INDEXED_LEN / 2)),
+            true,
+        ),
+        (
+            Value::str(&format!(
+                "{}x",
+                "é".repeat(arkiv_db::Limits::DEFAULT_INDEXED_LEN / 2)
+            )),
             false,
         ),
         (Value::I32(1), true),
@@ -294,7 +314,7 @@ fn genesis_and_query_have_literal_profile_vectors() {
     let genesis = EngineGenesis::new([3; 32], PriceSchedule::FIXTURE);
     let wire = encode(&genesis);
     let mut prefix = b"ARKENG01".to_vec();
-    for version in [1u32, 1, 1, 3, 2, 1] {
+    for version in [2u32, 1, 2, 3, 2, 2] {
         prefix.extend(version.to_be_bytes());
     }
     assert_eq!(&wire[..32], &prefix);
@@ -305,12 +325,13 @@ fn genesis_and_query_have_literal_profile_vectors() {
         value: Value::I32(-2),
     };
     let mut expected = vec![
-        0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'a', 16, 127, 255, 255, 254,
+        0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'a', 16, 127, 255, 255, 254,
     ];
     // Projection flags bind both the structural key and all committed cells.
     expected.extend([1, 1]);
     assert_eq!(encode(&query), expected);
     assert_eq!(decode_exact::<EqQuery>(&expected).unwrap(), query);
-    expected[3] = 2;
+    // A layout-1 (or any other) proof version is rejected.
+    expected[3] = 1;
     assert!(decode_exact::<EqQuery>(&expected).is_err());
 }

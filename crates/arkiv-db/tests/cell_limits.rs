@@ -79,10 +79,19 @@ fn invalid(fault: ArgumentFault) -> Result<(), Rejection> {
 }
 
 #[test]
-fn defaults_are_the_hard_caps() {
+fn defaults_are_explicit_and_below_the_caps() {
     assert_eq!(Limits::DEFAULT.max_cell_name_len, CellName::MAX_LEN);
-    assert_eq!(Limits::DEFAULT.max_indexed_len, Value::MAX_INDEXED_LEN);
-    assert_eq!((CellName::MAX_LEN, Value::MAX_INDEXED_LEN), (32, 128));
+    // The 128-byte indexed-string profile is admission policy, separate
+    // from the representation ceiling.
+    assert_eq!(Limits::DEFAULT.max_indexed_len, Limits::DEFAULT_INDEXED_LEN);
+    assert_eq!(
+        (
+            CellName::MAX_LEN,
+            Limits::DEFAULT_INDEXED_LEN,
+            Value::INDEXED_LEN_CEILING
+        ),
+        (32, 128, 512)
+    );
     assert_eq!(Limits::DEFAULT.max_str_len, 4096);
     assert_eq!(Limits::DEFAULT.max_bytes_len, 4096);
     assert_eq!(Limits::DEFAULT.validate(), Ok(()));
@@ -111,14 +120,14 @@ fn limits_above_the_caps_are_invalid() {
                 max_cell_name_len: CellName::MAX_LEN + 1,
                 ..Limits::DEFAULT
             },
-            "max_cell_name_len exceeds the term-key name width (32)",
+            "max_cell_name_len exceeds the cell-name grammar cap (32)",
         ),
         (
             Limits {
-                max_indexed_len: Value::MAX_INDEXED_LEN + 1,
+                max_indexed_len: Value::INDEXED_LEN_CEILING + 1,
                 ..Limits::DEFAULT
             },
-            "max_indexed_len exceeds the term-key value width (128)",
+            "max_indexed_len exceeds the indexed-string ceiling (512)",
         ),
     ] {
         assert_eq!(limits.validate(), Err(reason));

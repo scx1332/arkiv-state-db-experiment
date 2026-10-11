@@ -63,10 +63,15 @@ const BOB: OwnerId = OwnerId::new([0xb0; 20]);
 fn bound(map: MapKind) -> u64 {
     let key_len: u64 = match map {
         MapKind::Catalog | MapKind::Rows | MapKind::Postings => 8,
-        MapKind::Records => 21,
+        // Escaped raw keys: at most two bytes per key byte plus a terminator.
+        MapKind::Records => 41,
         MapKind::Host => 32,
         MapKind::Keys => 33,
-        MapKind::Terms => (CellName::MAX_LEN + Value::MAX_INDEXED_LEN + 4) as u64,
+        // A name and its terminator, tag, presence, a default-limit `Str`
+        // and its terminator: 33 + 2 + 129.
+        MapKind::Terms => {
+            (CellName::MAX_LEN + 3 + arkiv_db::Limits::DEFAULT_INDEXED_LEN + 1) as u64
+        }
     };
     2 * key_len + 2
 }
@@ -605,35 +610,31 @@ fn value_with(position: usize, replacement: char) -> String {
 #[test]
 fn a_deep_term_path_rehashes_its_whole_path() {
     // The spine term S = (name `a`×20, Str, value `a`×62 ‖ NUL: 63 bytes).
-    // Its 88-byte key: name bytes 0x61 (nibbles 0–39: 6 1 6 1 …), name
-    // length 20 = 0x14 (nibbles 40, 41), tag Str = 04 (42, 43), presence 01
-    // (44, 45), value bytes 0–61 0x61 (46–169), value byte 62 0x00 (170,
-    // 171), padding byte 63 0x00 (172, 173), value length 63 = 0x3f (174,
-    // 175).
+    // Its 87-byte key (state layout 2): name bytes 0x61 (nibbles 0–39: 6 1
+    // 6 1 …), the name terminator 00 (40, 41), tag Str = 02 (42, 43),
+    // presence 01 (44, 45), the value shifted by one: 0x62 ×62 (46–169),
+    // NUL as 0x01 (170, 171), and the value terminator 00 (172, 173).
     //
     // Terms that part from S at a nibble force a branch there:
     // - nibbles 0–39: 40 other names, `q` (0x71) for a high nibble or `b`
     //   (0x62) for a low one at each position of `a`×20;
-    // - nibble 43: the same name with type I64 (02 against 04);
+    // - nibble 40: the name `a`×21 (0x61 against the terminator 00);
+    // - nibble 42: the same name with type I64 (0x11 against 0x02);
+    // - nibble 43: the same name with type Bool (0x01 against 0x02);
     // - nibble 45: S's existence term (presence 00);
     // - nibbles 46–169: 124 other values, `q` or `b` at each of the
-    //   positions 0–61 of `a`×64;
-    // - nibbles 170, 171: `a`×62 ‖ `q` and `a`×62 ‖ 0x01 (byte 62 0x71 or
-    //   0x01 against 0x00);
-    // - nibbles 172, 173: `a`×62 ‖ NUL ‖ `q` and `a`×62 ‖ NUL ‖ 0x01 (byte
-    //   63 against S's padding);
-    // - nibble 174: `a`×62 ‖ NUL ‖ NUL, 64 bytes: the same padded value
-    //   field, length 0x40 against 0x3f;
-    // - nibble 175: `a`×62, 62 bytes: the same padded value field, length
-    //   0x3e against 0x3f.
-    // Nibbles 40–42 (name length, tag high nibble) and 44 (presence high
-    // nibble) cannot differ while every byte before them agrees: names
-    // never contain 0x00, so equal padded names are equal names with equal
-    // lengths; type ids are 1 to 4 and presence 00 or 01. Every other
-    // nibble branches above. So S's path is 172 branches (nibbles 0–39, 43
-    // and 45–175), an extension over nibbles 40–42, one over nibble 44, and
-    // S's leaf: 175 nodes, against the `2·88 + 1` = 177 of an unconstrained
-    // 88-byte key.
+    //   positions 0–61 of `a`×64 (shifted 0x72 or 0x63 against 0x62);
+    // - nibbles 170, 171: `a`×62 ‖ `q` (0x72) and `a`×62 ‖ U+0001 (0x02)
+    //   against 0x01; `a`×62 itself (its terminator 00) also branches at 171;
+    // - nibbles 172, 173: `a`×62 ‖ NUL ‖ `q` (0x72) and `a`×62 ‖ NUL ‖ NUL
+    //   or ‖ U+0001 (0x01, 0x02) against S's terminator 00.
+    // Nibble 41 (the low nibble of the name terminator: names never contain
+    // 0x01–0x0f) and nibble 44 (presence high nibble) cannot differ while
+    // every byte before them agrees. So S's path is 172 branches (nibbles
+    // 0–40, 42, 43 and 45–173), an extension over nibble 41, one over
+    // nibble 44, and S's leaf (empty path): 175 nodes, against the `2·87 +
+    // 1` = 175 of an unconstrained 87-byte key, minus the two fixed nibbles
+    // plus their two extensions.
     let spine_name = "a".repeat(20);
     let prefix = "a".repeat(62);
     let spine_value = format!("{prefix}\0");
@@ -663,6 +664,17 @@ fn a_deep_term_path_rehashes_its_whole_path() {
         b"tag",
         vec![(spine_name.as_str(), Cell::attribute(Value::I64(1)))],
     ));
+    base.push(create(
+        1,
+        b"bool",
+        vec![(spine_name.as_str(), Cell::attribute(Value::Bool(true)))],
+    ));
+    let longer_name = "a".repeat(21);
+    base.push(create(
+        1,
+        b"longer",
+        vec![(longer_name.as_str(), Cell::attribute(Value::str("v")))],
+    ));
     let mut values: Vec<String> = (0..62)
         .flat_map(|position| [value_with(position, 'q'), value_with(position, 'b')])
         .collect();
@@ -684,23 +696,23 @@ fn a_deep_term_path_rehashes_its_whole_path() {
     }
     let measurement = chain.block(&base);
     assert_within_bounds(&measurement, "base");
-    // S, its existence term, 130 values, the I64 value and existence
-    // terms, and the 40 names' value and existence terms.
+    // S, its existence term, 130 values, the I64 and Bool value and
+    // existence terms, and the 41 other names' value and existence terms.
     let terms = chain
         .engine
         .head_snapshot()
         .term_count(ns(1))
         .expect("the namespace exists");
-    assert_eq!(terms, 1 + 1 + 130 + 2 + 2 * 40);
+    assert_eq!(terms, 1 + 1 + 130 + 2 + 2 + 2 * 41);
 
     // One more record holding S: S's posting and S's existence posting
     // gain its id, so both term leaves are rewritten. Rewriting S rebuilds
-    // its whole 175-node path; the existence leaf and its side of the trie
-    // add two nodes: 177. Every one of them
+    // its whole 175-node path; the existence leaf hangs directly off the
+    // presence branch (nibble 45) and adds one node: 176. Every one of them
     // is at least 32 bytes (each branch and extension holds a 33-byte
     // reference to the rest of the path, and both leaves hold 40-byte
     // posting handles), and no two are equal (distinct leaves, and each
-    // path node references the next), so all 177 are hashed and staged.
+    // path node references the next), so all 176 are hashed and staged.
     let measurement = chain.block(&[create(
         1,
         b"another",
@@ -711,8 +723,8 @@ fn a_deep_term_path_rehashes_its_whole_path() {
     )]);
     assert_within_bounds(&measurement, "insert on the deep term path");
     assert_eq!(measurement.writes[&MapKind::Terms], 2);
-    assert_eq!(measurement.hashed(MapKind::Terms), 177);
-    assert_eq!(measurement.staged(MapKind::Terms), 177);
+    assert_eq!(measurement.hashed(MapKind::Terms), 176);
+    assert_eq!(measurement.staged(MapKind::Terms), 176);
     assert_eq!(measurement.allowed(MapKind::Terms), 2 * 330);
     report("a record added to the 175-node term path", &measurement);
 }

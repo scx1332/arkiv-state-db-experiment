@@ -10,6 +10,9 @@ use crate::TypeTag;
 pub const RANGE_PROOF_PROFILE: &str = "range-complete-v1";
 // Distinct envelope discriminator; neither equality nor state encoding changes.
 const RANGE_VERSION: u32 = 1;
+// The response envelope: its term-key interval follows the state layout
+// (version 2: unpadded term keys and inclusive/exclusive endpoints).
+const RANGE_PROOF_VERSION: u32 = crate::LAYOUT_VERSION;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RangeQuery {
@@ -33,8 +36,8 @@ impl RangeQuery {
 
     /// Require at least one bound of an ordered type (every indexable type),
     /// with the same type at both ends, and `Str` bounds no longer than the
-    /// hard [`Value::MAX_INDEXED_LEN`]. Reversed bounds and equal excluded
-    /// bounds describe an empty interval.
+    /// hard [`Value::INDEXED_LEN_CEILING`]. Reversed bounds and equal
+    /// excluded bounds describe an empty interval.
     pub fn validate(&self) -> Result<(), ProofError> {
         self.tag().map(|_| ())
     }
@@ -65,51 +68,38 @@ impl RangeQuery {
         if [&self.lower, &self.upper]
             .into_iter()
             .filter_map(bound_value)
-            .any(|value| value.tag() != first.tag() || value.encoded_len() > Value::MAX_INDEXED_LEN)
+            .any(|value| {
+                value.tag() != first.tag() || value.encoded_len() > Value::INDEXED_LEN_CEILING
+            })
         {
             return Err(ProofError::InvalidRequest);
         }
         Ok(first.tag())
     }
 
-    fn interval(&self) -> Result<(Vec<u8>, Vec<u8>), ProofError> {
+    /// The term-key interval: within the value run `P = bytes⁰(name) ‖ tag ‖
+    /// 01`, from the lower bound's term key (or `P`) to the upper bound's
+    /// term key (or the run's end, `prefix_successor(P)`, exclusive), with
+    /// the query's own inclusivity. Term keys preserve value order and are
+    /// prefix-free, so an exclusive endpoint excludes exactly that value.
+    fn interval(&self) -> Result<KeyRange, ProofError> {
         let tag = self.tag()?;
-        let start = TrieKey::encode(&TermKey::run_start(&self.attribute, tag, &[]));
-        let mut end = start.clone();
-        // The final MAX_INDEXED_LEN + 1 bytes hold the padded value and length.
-        end[CellName::MAX_LEN + 3..].fill(255);
+        let run = TermKey::value_run(&self.attribute, tag);
+        let key = |value: &Value| TrieKey::encode(&TermKey::value(&self.attribute, value));
         let lower = match &self.lower {
-            Bound::Unbounded => start,
-            Bound::Included(value) => TrieKey::encode(&TermKey::value(&self.attribute, value)),
-            Bound::Excluded(value) => {
-                // The fixed-width successor key. The last byte is the term
-                // length (at most MAX_INDEXED_LEN < 255), so it never
-                // carries into the value, type or name.
-                let mut key = TrieKey::encode(&TermKey::value(&self.attribute, value));
-                *key.last_mut().ok_or(ProofError::InvalidRequest)? += 1;
-                key
-            }
+            Bound::Unbounded => Bound::Included(run.clone()),
+            Bound::Included(value) => Bound::Included(key(value)),
+            Bound::Excluded(value) => Bound::Excluded(key(value)),
         };
         let upper = match &self.upper {
-            Bound::Unbounded => end,
-            Bound::Included(value) => TrieKey::encode(&TermKey::value(&self.attribute, value)),
-            Bound::Excluded(value) => {
-                // The fixed-width predecessor key. Only the empty `Str` has
-                // a zero length byte; its predecessor borrows through the
-                // zero padding into the presence byte, lands below the
-                // run's first value key, and the interval is empty.
-                let mut key = TrieKey::encode(&TermKey::value(&self.attribute, value));
-                for byte in key.iter_mut().rev() {
-                    let (next, borrow) = byte.overflowing_sub(1);
-                    *byte = next;
-                    if !borrow {
-                        break;
-                    }
-                }
-                key
-            }
+            // The run prefix ends in 01, so its successor exists.
+            Bound::Unbounded => Bound::Excluded(
+                arkiv_db_trie::order::prefix_successor(&run).ok_or(ProofError::InvalidRequest)?,
+            ),
+            Bound::Included(value) => Bound::Included(key(value)),
+            Bound::Excluded(value) => Bound::Excluded(key(value)),
         };
-        Ok((lower, upper))
+        Ok(KeyRange::new(lower, upper))
     }
 }
 
@@ -131,7 +121,7 @@ fn get_bound(d: &mut Decoder<'_>) -> Result<Bound<Value>, DecodeError> {
     match tag {
         0 => Ok(Bound::Unbounded),
         1 | 2 => {
-            let value = bounded_value(d, Value::MAX_INDEXED_LEN)?;
+            let value = bounded_value(d, Value::INDEXED_LEN_CEILING)?;
             Ok(if tag == 1 {
                 Bound::Included(value)
             } else {
@@ -259,8 +249,8 @@ pub struct RangeInspection {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InspectedRangeInterval {
     pub root: B256,
-    pub lower: Vec<u8>,
-    pub upper: Vec<u8>,
+    /// The term-key interval walked, with its endpoint inclusivity.
+    pub range: KeyRange,
     pub supplied_nodes: usize,
     pub trace: arkiv_db_trie::VerifiedInterval,
     /// Successfully decoded term leaves, aligned with trace nodes. Opaque
@@ -291,11 +281,15 @@ struct RangeInspectionCollector {
     posting_sets: Vec<InspectedRangePosting>,
 }
 
-fn interval_reservation(bytes: usize, meter: &mut VerifyMeter) -> Result<(), ProofError> {
+fn interval_reservation(
+    bytes: usize,
+    max_key_len: usize,
+    meter: &mut VerifyMeter,
+) -> Result<(), ProofError> {
     // One shared prefix; at most fifteen pending siblings at each key nibble.
     // Include Vec growth, borrowed/raw child stacks, inline decoding, returned
     // key/value copies and node-path allocations before invoking the walker.
-    let depth = 2 * TermKey::MAX_LEN + 1;
+    let depth = 2 * max_key_len + 1;
     meter.allocate(depth * 16 * 256)?;
     meter.allocate(
         bytes
@@ -309,10 +303,12 @@ fn interval_reservation(bytes: usize, meter: &mut VerifyMeter) -> Result<(), Pro
     )
 }
 
-fn interval_limits(caps: RangeProofLimits) -> arkiv_db_trie::IntervalLimits {
+/// The interval walk's bounds: the term cap and the instance's longest term
+/// key (stored terms were admitted under the same limits).
+fn interval_limits(caps: RangeProofLimits, limits: &Limits) -> arkiv_db_trie::IntervalLimits {
     arkiv_db_trie::IntervalLimits {
         max_entries: caps.max_terms,
-        max_key_len: TermKey::MAX_LEN,
+        max_key_len: TermKey::max_len_for(limits),
     }
 }
 
@@ -321,9 +317,10 @@ fn terms<N: AsRef<[u8]>>(
     query: &RangeQuery,
     witness: &[N],
     caps: RangeProofLimits,
+    limits: &Limits,
     meter: &mut VerifyMeter,
 ) -> Result<Vec<(Value, Posting)>, ProofError> {
-    terms_inner(root, query, witness, caps, meter, None)
+    terms_inner(root, query, witness, caps, limits, meter, None)
 }
 
 fn terms_inner<N: AsRef<[u8]>>(
@@ -331,6 +328,7 @@ fn terms_inner<N: AsRef<[u8]>>(
     query: &RangeQuery,
     witness: &[N],
     caps: RangeProofLimits,
+    limits: &Limits,
     meter: &mut VerifyMeter,
     inspection: Option<&mut RangeInspectionCollector>,
 ) -> Result<Vec<(Value, Posting)>, ProofError> {
@@ -338,8 +336,9 @@ fn terms_inner<N: AsRef<[u8]>>(
         .iter()
         .try_fold(0usize, |n, node| n.checked_add(node.as_ref().len()))
         .ok_or(ProofError::ProofLimitExceeded)?;
-    interval_reservation(wire_bytes, meter)?;
-    let (lower, upper) = query.interval()?;
+    let max_key_len = TermKey::max_len_for(limits);
+    interval_reservation(wire_bytes, max_key_len, meter)?;
+    let range = query.interval()?;
     let map_error = |error| {
         if error == arkiv_db_trie::ProofError::EntryLimitExceeded {
             ProofError::ProofLimitExceeded
@@ -355,17 +354,13 @@ fn terms_inner<N: AsRef<[u8]>>(
         let visits = (wire_bytes / 3 + witness.len()).min(arkiv_db_trie::MAX_INTERVAL_TRACE_NODES);
         let reserve = wire_bytes
             .checked_mul(16)
-            .and_then(|n| n.checked_add(visits * (2 * TermKey::MAX_LEN + 2048)))
+            .and_then(|n| n.checked_add(visits * (2 * max_key_len + 2048)))
             .ok_or(ProofError::ProofLimitExceeded)?;
         meter.allocate(reserve)?;
         meter.work(reserve)?;
-        let (entries, trace) = arkiv_db_trie::inspect_interval(
-            root,
-            &arkiv_db_trie::KeyRange::closed(&lower, &upper),
-            witness,
-            interval_limits(caps),
-        )
-        .map_err(map_error)?;
+        let (entries, trace) =
+            arkiv_db_trie::inspect_interval(root, &range, witness, interval_limits(caps, limits))
+                .map_err(map_error)?;
         let leaves = trace
             .nodes
             .iter()
@@ -389,23 +384,17 @@ fn terms_inner<N: AsRef<[u8]>>(
             .collect();
         inspection.interval = Some(InspectedRangeInterval {
             root,
-            lower,
-            upper,
+            range: range.clone(),
             supplied_nodes: witness.len(),
             trace,
             leaves,
         });
         entries
     } else {
-        arkiv_db_trie::walk_interval(
-            root,
-            &arkiv_db_trie::KeyRange::closed(&lower, &upper),
-            witness,
-            interval_limits(caps),
-        )
-        .map_err(map_error)?
+        arkiv_db_trie::walk_interval(root, &range, witness, interval_limits(caps, limits))
+            .map_err(map_error)?
     };
-    meter.allocate(entries.len() * (size_of::<(Value, Posting)>() + TermKey::MAX_LEN + 64))?;
+    meter.allocate(entries.len() * (size_of::<(Value, Posting)>() + max_key_len + 64))?;
     entries
         .into_iter()
         .map(|(key, bytes)| {
@@ -475,7 +464,7 @@ fn verify_range_inner(
     let mut meter = VerifyMeter::new(caps.common());
     meter.work(bytes.len())?;
     let mut d = Decoder::new(bytes);
-    if d.u32()? != RANGE_VERSION || d.u8()? != 3 {
+    if d.u32()? != RANGE_PROOF_VERSION || d.u8()? != 3 {
         return Err(ProofError::UnsupportedVersion);
     }
     let snapshot: SnapshotRef = d.get()?;
@@ -531,6 +520,7 @@ fn verify_range_inner(
         &request.query,
         &witness,
         caps,
+        &limits,
         &mut meter,
         inspection.as_deref_mut(),
     )?;
@@ -629,7 +619,7 @@ fn verify_range_inner(
         let path = read_path(&mut d, 67, META_NODE_BYTES, &mut meter)?;
         let binding = proven(
             namespace.typed.keys.root_hash(),
-            &key.encoded(),
+            &TrieKey::encode(key),
             &path,
             crate::MapKind::Keys,
             Some(id),
@@ -661,7 +651,8 @@ pub(crate) fn generate_range(
     budget: Budget,
 ) -> Result<GeneratedProof, ProofError> {
     request.query.validate_limits(limits)?;
-    let (lower, upper) = request.query.interval()?;
+    let range = request.query.interval()?;
+    let max_key_len = TermKey::max_len_for(&limits);
     if header.root() != request.snapshot.state_root {
         return Err(ProofError::InvalidRequest);
     }
@@ -687,7 +678,7 @@ pub(crate) fn generate_range(
         .map_err(|_| ProofError::StorageUnavailable)?;
     let path = serving.path(catalog, &request.query.namespace, &loader, META_NODE_BYTES)?;
     let mut e = Encoder::new();
-    e.u32(RANGE_VERSION);
+    e.u32(RANGE_PROOF_VERSION);
     e.u8(3);
     e.put(&request.snapshot);
     e.put(&request.query.digest());
@@ -699,18 +690,15 @@ pub(crate) fn generate_range(
         serving
             .meter
             .charge_group(&[(Op::QueryGroup, 1), (Op::TermSeek, 1)])?;
-        interval_reservation(0, &mut guard)?;
+        interval_reservation(0, max_key_len, &mut guard)?;
         serving.append(4)?;
-        let mut iter = namespace.typed.terms.interval_proof(
-            &arkiv_db_trie::KeyRange::closed(&lower, &upper),
-            &loaders.terms,
-        );
+        let mut iter = namespace.typed.terms.interval_proof(&range, &loaders.terms);
         let mut witness = Vec::new();
         loop {
             serving.append_capacity(META_NODE_BYTES + 4)?;
             // A supplied node contains at most its byte length in inline nodes.
             // Between two yields at most a key-depth stack of such nodes ends.
-            let visit_bound = (2 * TermKey::MAX_LEN + 1) * META_NODE_BYTES;
+            let visit_bound = (2 * max_key_len + 1) * META_NODE_BYTES;
             serving
                 .meter
                 .check_capacity(&[(Op::ProofNode, visit_bound as u64)])?;
@@ -741,6 +729,7 @@ pub(crate) fn generate_range(
             &request.query,
             &witness,
             caps,
+            &limits,
             &mut guard,
         )?;
         let mut selected = BTreeMap::new();

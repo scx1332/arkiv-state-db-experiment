@@ -973,15 +973,15 @@ fn genesis_cell_limits_are_enforced_by_the_engine() {
         Err(OpenError::GenesisMismatch)
     ));
     // Limits above the engine's caps (32-byte names; golem indexes str
-    // attributes up to max_str_len, the engine up to 128 bytes) are refused
-    // at open rather than narrowed.
+    // attributes up to max_str_len, the engine up to its 512-byte ceiling
+    // since state layout 2) are refused at open rather than narrowed.
     for wide in [
         CellLimits {
             max_cell_name_len: 33,
             ..limits()
         },
         CellLimits {
-            max_str_len: 129,
+            max_str_len: 513,
             ..limits()
         },
         CellLimits {
@@ -999,7 +999,7 @@ fn genesis_cell_limits_are_enforced_by_the_engine() {
         HashAlgorithm::Keccak256,
         CellLimits {
             max_cell_name_len: 32,
-            max_str_len: 128,
+            max_str_len: 512,
             max_bytes_len: 128,
         },
     );
@@ -1009,7 +1009,7 @@ fn genesis_cell_limits_are_enforced_by_the_engine() {
         db.create(
             branch,
             RecordOp::create(KEY)
-                .attribute(&"n".repeat(32), CellValue::from_str(&"v".repeat(128)))
+                .attribute(&"n".repeat(32), CellValue::from_str(&"v".repeat(512)))
                 .unwrap()
         )
         .is_ok()

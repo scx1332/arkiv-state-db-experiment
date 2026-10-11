@@ -1,6 +1,7 @@
 //! A persistent Merkle Patricia map for authenticated, lazily loaded state.
 //!
-//! [`MerkleMap`] is a hexary Patricia trie over fixed-length keys whose node
+//! [`MerkleMap`] is a hexary Patricia trie over bounded, prefix-free,
+//! variable-length keys whose node
 //! encoding is the Ethereum MPT encoding of `alloy_trie::nodes` (RLP leaf,
 //! extension and branch nodes, hex-prefix paths, children referenced inline
 //! below 32 bytes and by keccak256 otherwise). Its shape is canonical, so
@@ -34,9 +35,10 @@
 //!   that returns the proven value or rejects the proof.
 //! - **Visit counting.** Every operation reports a [`Probe`]: nodes
 //!   examined (independent of what was cached or loaded) and loads made.
-//! - **Key encodings.** [`TrieKey`] fixes a key's length and order;
-//!   [`order`] has order-preserving fixed-width encoders for composite keys
-//!   with variable-length parts.
+//! - **Key encodings.** [`TrieKey`] bounds a key's length and fixes its
+//!   order; encodings must be prefix-free, because branches hold no values.
+//!   [`order`] has order-preserving, prefix-free encoders for composite
+//!   keys with variable-length parts.
 //!
 //! What this crate does not do: it has no durable store (the
 //! [`MemoryNodeStore`] is a test double), assigns no object spaces, keeps
@@ -81,12 +83,12 @@ mod reach;
 mod stage;
 
 pub use alloy_trie::EMPTY_ROOT_HASH;
-pub use codec::{CodecError, TrieKey, TrieValue};
+pub use codec::{CodecError, TrieKey, TrieValue, is_prefix_free};
 pub use error::TrieError;
 pub use explore::{ExploreChild, ExploreNode};
 pub use interval::{
-    IntervalDecision, IntervalEntries, IntervalNode, IntervalProofIter, MAX_INTERVAL_TRACE_NODES,
-    VerifiedInterval, inspect_interval, walk_interval,
+    IntervalDecision, IntervalEntries, IntervalLimits, IntervalNode, IntervalProofIter, KeyRange,
+    MAX_INTERVAL_TRACE_NODES, VerifiedInterval, inspect_interval, walk_interval,
 };
 pub use loader::{MemoryNodeStore, MemoryOnly, NodeLoader};
 pub use map::{MerkleMap, Probe};

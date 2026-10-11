@@ -1,7 +1,52 @@
 //! Independent interval results against a sorted-map model, including gaps.
 use std::collections::BTreeMap;
 
-use arkiv_db_trie::{MemoryOnly, MerkleMap, Probe, ProofError, inspect_interval, walk_interval};
+use arkiv_db_trie::{IntervalLimits, KeyRange, MemoryOnly, MerkleMap, Probe, ProofError};
+
+/// The closed-interval form these tests were written against.
+#[allow(dead_code)]
+fn walk_interval<N: AsRef<[u8]>>(
+    root: arkiv_db_trie::ObjectId,
+    lower: &[u8],
+    upper: &[u8],
+    nodes: &[N],
+    max_entries: usize,
+) -> Result<arkiv_db_trie::IntervalEntries, ProofError> {
+    arkiv_db_trie::walk_interval(
+        root,
+        &KeyRange::closed(lower, upper),
+        nodes,
+        IntervalLimits {
+            max_entries,
+            max_key_len: 256,
+        },
+    )
+}
+
+#[allow(dead_code)]
+fn inspect_interval<N: AsRef<[u8]>>(
+    root: arkiv_db_trie::ObjectId,
+    lower: &[u8],
+    upper: &[u8],
+    nodes: &[N],
+    max_entries: usize,
+) -> Result<
+    (
+        arkiv_db_trie::IntervalEntries,
+        arkiv_db_trie::VerifiedInterval,
+    ),
+    ProofError,
+> {
+    arkiv_db_trie::inspect_interval(
+        root,
+        &KeyRange::closed(lower, upper),
+        nodes,
+        IntervalLimits {
+            max_entries,
+            max_key_len: 256,
+        },
+    )
+}
 
 fn check<const N: usize>(model: BTreeMap<[u8; N], Vec<u8>>, bounds: Vec<[u8; N]>) {
     let mut map = MerkleMap::<[u8; N], Vec<u8>>::new();
@@ -19,8 +64,7 @@ fn check<const N: usize>(model: BTreeMap<[u8; N], Vec<u8>>, bounds: Vec<[u8; N]>
                 .map(|(key, value)| (key.to_vec(), value.clone()))
                 .collect();
             let proof: Vec<_> = map
-                .interval_proof(lower, upper, &MemoryOnly)
-                .unwrap()
+                .interval_proof(&KeyRange::closed(lower, upper), &MemoryOnly)
                 .collect::<Result<_, _>>()
                 .unwrap();
             assert_eq!(

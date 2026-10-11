@@ -1147,13 +1147,15 @@ fn content_addressed_but_malformed_host_row_and_posting_values_are_corruption() 
     );
 
     let postings = raw_map(&1_u64, vec![2]); // A posting member must be exactly 01.
-    let mut term_key = [0_u8; 88];
+    // The term key of `kind = 1u64`: name padded to 32 ‖ name_len ‖ tag ‖
+    // presence ‖ value padded to 128 ‖ value_len.
+    let mut term_key = [0_u8; 164];
     term_key[..4].copy_from_slice(b"kind");
-    term_key[20] = 4;
-    term_key[21] = Value::U64(1).tag().id();
-    term_key[22] = 1;
-    term_key[23..31].copy_from_slice(&1_u64.to_be_bytes());
-    term_key[87] = 8;
+    term_key[32] = 4;
+    term_key[33] = Value::U64(1).tag().id();
+    term_key[34] = 1;
+    term_key[35..43].copy_from_slice(&1_u64.to_be_bytes());
+    term_key[163] = 8;
     let mut handle = postings.root_hash().to_vec();
     handle.extend(1_u64.to_be_bytes());
     let terms = raw_map(&term_key, handle);

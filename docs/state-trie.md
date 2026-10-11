@@ -84,13 +84,44 @@ in the node). `MerkleMap::root_hash` is therefore infallible.
 
 ## Keys and their encodings
 
-`TrieKey` fixes a key type's encoded length `LEN` (at least one byte,
-checked at compile time) and its encoding; the map orders entries by the
-unsigned bytewise order of the encodings, so iteration is in encoded order.
-Every key has `2·LEN` nibbles. `u64` (big-endian) and `[u8; N]` implement it.
+`TrieKey` bounds a key type's encoded length by `MAX_LEN` (at least one
+byte, checked at compile time) and fixes its encoding; the map orders entries
+by the unsigned bytewise lexicographic order of the encodings (a proper
+prefix first), so iteration is in encoded order. Keys may have any length up
+to `MAX_LEN`. The contract (see `codec.rs`): encodings are injective and
+canonical (`decode` rejects every byte string `encode` does not produce),
+order-preserving and **prefix-free**: no encoding is a strict prefix of
+another. Branches carry no value (the node encoding, proof shapes and
+hashing are unchanged from the fixed-length trie), so a key that is a strict
+prefix of a stored key cannot be represented; `insert` rejects one with the
+caller error `TrieError::KeyNotPrefixFree` before changing anything, while
+`get`, `remove` and proofs simply answer absence for it. `MAX_LEN` is a
+safety bound, used to reject stored leaves whose key exceeds it or ends
+inside a byte (`TrieError::Inconsistent`), never to preallocate. Fixed-width
+keys (`u64` big-endian, `[u8; N]`, the engine's ids) are trivially
+prefix-free and keep their exact widths in their own decoders;
+`order::ByteKey<MAX>` is a bounded variable-length byte-string key (the
+empty string included). `is_prefix_free` checks a key set in tests.
 
-`arkiv_db_trie::order` provides the fixed-width, order-preserving building
-blocks for composite keys:
+`arkiv_db_trie::order` provides the order-preserving building blocks for
+composite keys:
+
+- `encode_bytes(bytes)` writes a self-delimiting string: `00 → 01 01`,
+  `01 → 01 02`, every other byte as is, then a `00` terminator. The
+  terminator occurs nowhere else, so the encoding is prefix-free; the
+  escapes keep the order of `00 < 01 < 02…` and the terminator is the
+  smallest byte, so encodings order exactly as the strings (`"" < "a" <
+  "a\0" < "aa"`). `escape_bytes` is the same without the terminator; it is a
+  prefix of the encoding of exactly the strings that start with its input,
+  so the run of those strings is `[escape(p), prefix_successor(escape(p)))`.
+  `decode_bytes` rejects a missing terminator, a bad escape and an
+  over-long value. (FoundationDB's tuple form, `00 → 00 ff` with a `00`
+  terminator, is self-delimiting only with one byte of lookahead: `61 00`
+  (`"a"`) is a strict prefix of `61 00 ff 00` (`"a\0"`), so it is not
+  prefix-free as a whole key and is not used.)
+- `prefix_successor(p)` increments the last byte of `p` below `ff` and drops
+  the rest (none for an empty or all-`ff` prefix: unbounded). It is the
+  exclusive end of a prefix run, not the successor of one key.
 
 - `encode_padded(bytes, max_len)` writes `bytes ‖ 0x00 × (max_len − len) ‖
   len`, `max_len + 1` bytes. Order is preserved: the first differing padded
@@ -205,8 +236,10 @@ decodes strictly, turns inline children into `Mem` nodes and marks every
 node it produces `from_store`. Shapes that hash correctly but are not
 canonical are errors, not answers: inside one object they are
 `TrieError::Malformed`; across objects (a stored non-root node shorter than
-32 bytes, an extension whose stored child is not a branch, a leaf at the
-wrong depth for the key length) they are `TrieError::Inconsistent`.
+32 bytes, an extension whose stored child is not a branch, a leaf whose key
+ends inside a byte or exceeds the key type's `MAX_LEN`) they are
+`TrieError::Inconsistent`. The bound comes from the key type, never from a
+requested key, so an unrelated leaf is not judged by a query's length.
 A host with its own storage error type implements `read` with that type and
 gets it back unchanged from every operation (trie failures arrive through
 `From<TrieError>`: `Missing` maps to "object missing", `EmptyValue` to a
@@ -319,32 +352,46 @@ value the proof establishes; it never takes a claimed value. It enforces:
    the walk reached along the key's nibbles; inline children are decoded in
    place;
 4. the terminal is a leaf whose path equals the remaining key (inclusion), a
-   leaf or extension diverging from it, or an empty branch slot (absence);
-   nothing may follow it (`TrailingNodes`);
+   leaf or extension diverging from it (including a path the key ends
+   inside, or a leaf path the key extends), an empty branch slot, or a
+   branch the key ends at (`KeyEndsAtBranch`) (absence); nothing may follow
+   it (`TrailingNodes`);
 5. a hash reference reached with key nibbles left and no next node is
    `Incomplete`, never absence;
 6. every node decodes strictly; an extension's child must be a branch; a
-   leaf's path must be exactly as long as the remaining key (fixed-length
-   keys); a branch needs a nibble left.
+   leaf's key must end on a byte boundary.
 
 Missing, extra, duplicated, reordered and separately supplied inline nodes
 therefore all fail. The walk is iterative, allocates in proportion to its
 input and never panics.
 
-`key` must be the encoding of a key of the map, exactly its `LEN` bytes. A
-proof does not carry the key length, so `walk` cannot check it, and a
-verifier composing proofs (node step N3d) must encode the key itself, with
-the map's `TrieKey`, before calling `walk`. A key of another length is
-never proven included under the root of a fixed-length map, because a
-leaf's path matches only a key of the map's length; depending on the
-trie's shape, `walk` reports it as absent (it meets an empty branch slot or
-a diverging extension) or as `InvalidNode` (it meets a leaf at the wrong
-depth for it, or runs out of nibbles), and neither result then says
-anything about the proof. Evidence:
-`keys_of_the_wrong_length_are_never_proven_included` in `tests/proofs.rs`
-pins both outcomes on a hand-derived trie and checks, on random maps, that
-present keys cut short or extended give `InvalidNode` and absent ones give
-absence or `InvalidNode`.
+Any byte string can be queried. Branches hold no values, so a key that is
+prefix-related to a stored key (it ends inside a path or at a branch, or
+extends a leaf's key) is proven absent, which is the truth; it can never be
+proven included. A verifier composing proofs encodes the key itself, with
+the map's `TrieKey`, before calling `walk`. Evidence:
+`prefix_related_keys_are_proven_absent_never_included` in `tests/proofs.rs`
+and `tests/variable_keys.rs`.
+
+### Complete intervals
+
+`MerkleMap::interval_proof(&KeyRange)` emits a complete witness for an
+interval of raw encoded byte strings, each end `Included`, `Excluded` or
+`Unbounded` (`KeyRange::prefix(p)` is `[p, prefix_successor(p))`).
+`walk_interval(root, &range, nodes, IntervalLimits { max_entries,
+max_key_len })` verifies it and returns every entry in the interval. Both
+open exactly the children for which `KeyRange::may_hold(prefix)` holds: a
+subtree whose keys all extend the nibble path `prefix` is skipped only when
+`prefix` differs from the lower endpoint at a nibble where it is smaller, or
+its smallest completion (`prefix`, plus a zero nibble when it ends inside a
+byte) is above the upper endpoint (or equal to an excluded one). No
+fixed-width zero/`ff` completion is used. An empty interval (`lower >
+upper`, or equal endpoints with either excluded) has an empty witness. A
+missing intersecting child, an extra node, more than `max_entries` entries,
+or a key/path beyond `max_key_len` fails the whole walk; a limit never
+yields a truncated successful result. For the fixed-width closed intervals
+the engine used before, this rule opens exactly the children the old
+prefix comparison opened, so those witnesses are byte-identical.
 
 ### Why `alloy_trie::proof::verify_proof` is not the verifier
 
@@ -380,7 +427,8 @@ hand-derived literals from the crafted key sets.
 | `src/node.rs` (unit) | Byte equality with alloy's leaf, extension and branch encoders; long paths; strict decoding round trips; hash check on load; `from_store` inline children; rejection of noncanonical forms; 20,000 mutated inputs never panic and only canonical bytes decode; alloy's decoder panics on a 35-byte path |
 | `src/nibbles.rs`, `src/order.rs` (unit) | Hex-prefix vectors and rejections; padded-field vectors; writer/reader round trip |
 | `tests/map.rs` | Random histories against `BTreeMap` and the root oracles for key lengths 1–88; history independence; retained versions unchanged; depth bound reached exactly (`2L + 1`, removal `2L + 2`); empty and single-entry maps; handle validation; empty values rejected by `insert` before any visit or read |
-| `tests/proofs.rs` | Proofs equal `ProofRetainer` (≤ 32 bytes) and the reference (33, 88 bytes); `walk` gives the model's answer; alloy cross-check where valid; the three alloy forgeries; randomized mutations (bit flips, truncations, reordering, duplication, extra and inline nodes, wrong roots, other keys and versions) are rejected or give the honest answer; self-consistent adversarial tries and garbage never panic; old proofs verify against old roots; lazy, counted generation; keys of the wrong length never proven included |
+| `tests/proofs.rs` | Proofs equal `ProofRetainer` (≤ 32 bytes) and the reference (33, 88 bytes); `walk` gives the model's answer; alloy cross-check where valid; the three alloy forgeries; randomized mutations (bit flips, truncations, reordering, duplication, extra and inline nodes, wrong roots, other keys and versions) are rejected or give the honest answer; self-consistent adversarial tries and garbage never panic; old proofs verify against old roots; lazy, counted generation; prefix-related keys proven absent, never included |
+| `tests/variable_keys.rs` | Variable-length prefix-free `ByteKey`s (`00`/`01`/`ff`-heavy, the empty key, maximum length) against a byte-ordered `BTreeMap`: insert/overwrite/remove histories, lookups, typed and raw seeks, retained handles, roots equal to `HashBuilder` and the reference, insertion-order independence, collapse back to the original root, point proofs equal to the reference, complete interval proofs over random inclusive/exclusive/unbounded raw endpoints and prefix runs (omissions, extras, entry and key-length limits rejected), stored reopen/walk/prove; a non-prefix-free codec rejected by `insert` without change |
 | `tests/store.rs` | Staging equals the reference object set; reopened maps read lazily with residency-independent visit counts; lazy updates load only touched paths; restaging is complete, minimal and bounded; the per-update creation bounds (`2L + 2` for an insert, `2L` for a removal) reached exactly; history readable; missing and corrupt objects and host loader errors surface as errors; caching loader; nested maps through the hook and `stage_with`, also when another value type staged a byte-identical leaf into the same sink first; hash-valid noncanonical tries rejected by the map and by `walk` |
 | `tests/encoding.rs` | Order preservation and uniqueness of the padded and composite encodings |
 

@@ -78,6 +78,7 @@ fn common(
             PathTerminal::DivergentLeaf => ("absence","divergent-leaf"),
             PathTerminal::DivergentExtension => ("absence","divergent-extension"),
             PathTerminal::EmptyBranchSlot => ("absence","empty-branch-slot"),
+            PathTerminal::KeyEndsAtBranch => ("absence","key-ends-at-branch"),
         };
         let nodes = path.trace.nodes.iter().enumerate().map(|(index,node)| {
             let kind = match node.kind { NodeKind::Branch => "branch", NodeKind::Extension => "extension", NodeKind::Leaf => "leaf" };

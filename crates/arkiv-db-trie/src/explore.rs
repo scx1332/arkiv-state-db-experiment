@@ -33,7 +33,7 @@ impl<K: TrieKey, V: TrieValue> MerkleMap<K, V> {
         path: &[u8],
         loader: &L,
     ) -> Result<Option<ExploreNode>, L::Error> {
-        if path.len() > K::LEN * 2 || path.iter().any(|s| *s > 16) {
+        if path.len() > K::MAX_LEN * 2 || path.iter().any(|s| *s > 16) {
             return Ok(None);
         }
         let mut link = self.root.clone();
@@ -75,7 +75,7 @@ impl<K: TrieKey, V: TrieValue> MerkleMap<K, V> {
                 let key = if value.is_some() {
                     let mut n = prefix.clone();
                     n.extend(&compressed_path);
-                    if n.len() != K::LEN * 2 {
+                    if !n.len().is_multiple_of(2) || n.len() > K::MAX_LEN * 2 {
                         return Err(crate::TrieError::inconsistent(
                             "explored leaf has wrong key length",
                         )
@@ -109,7 +109,7 @@ impl<K: TrieKey, V: TrieValue> MerkleMap<K, V> {
                 }
                 _ => return Ok(None),
             }
-            if prefix.len() > K::LEN * 2 {
+            if prefix.len() > K::MAX_LEN * 2 {
                 return Err(
                     crate::TrieError::inconsistent("explored path exceeds key length").into(),
                 );

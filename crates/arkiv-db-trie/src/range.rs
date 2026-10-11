@@ -4,7 +4,7 @@ use std::{cmp::Ordering, fmt, marker::PhantomData, sync::Arc};
 
 use crate::{
     Link, NodeBox, NodeLoader, TrieError, TrieKey, TrieValue,
-    map::{Probe, Role, check_extension, check_leaf, resolve},
+    map::{Probe, Role, check_inner_end, check_leaf_end, max_nibbles, resolve},
     nibbles,
     node::Node,
 };
@@ -28,8 +28,8 @@ pub struct Range<'l, K, V, L: ?Sized> {
     path: Vec<u8>,
     /// The next node to visit and its depth in nibbles.
     pending: Option<(Pending<V>, usize)>,
-    /// The key length in nibbles.
-    key_nibbles: usize,
+    /// The key length bound in nibbles.
+    max_nibbles: usize,
     probe: Probe,
     done: bool,
     key: PhantomData<fn() -> K>,
@@ -66,7 +66,7 @@ impl<'l, K: TrieKey, V: TrieValue, L: NodeLoader<V> + ?Sized> Range<'l, K, V, L>
             frames: Vec::new(),
             path: Vec::new(),
             pending: None,
-            key_nibbles: 2 * K::LEN,
+            max_nibbles: max_nibbles::<K>(),
             probe: Probe::new(),
             done: false,
             key: PhantomData,
@@ -95,15 +95,18 @@ impl<'l, K: TrieKey, V: TrieValue, L: NodeLoader<V> + ?Sized> Range<'l, K, V, L>
             let rest = &lower[depth..];
             match &node.node {
                 Node::Leaf { path, .. } => {
-                    check_leaf(path, rest)?;
+                    check_leaf_end(depth + path.len(), self.max_nibbles)?;
+                    // Slice order is the order of whole keys sharing the
+                    // visited prefix, a proper prefix first.
                     if **path >= *rest {
                         self.pending = Some((Pending::Node(Arc::clone(&node)), depth));
                     }
                     return Ok(());
                 }
                 Node::Extension { path, child } => {
-                    check_extension(path, rest)?;
-                    match (**path).cmp(&rest[..path.len()]) {
+                    check_inner_end(depth + path.len(), self.max_nibbles)?;
+                    let shared = path.len().min(rest.len());
+                    match path[..shared].cmp(&rest[..shared]) {
                         // Every key below is above the bound.
                         Ordering::Greater => {
                             self.pending = Some((Pending::Node(Arc::clone(&node)), depth));
@@ -111,6 +114,12 @@ impl<'l, K: TrieKey, V: TrieValue, L: NodeLoader<V> + ?Sized> Range<'l, K, V, L>
                         }
                         // Every key below is under the bound.
                         Ordering::Less => return Ok(()),
+                        // The bound ends within the path: every key below
+                        // extends the bound, so none is under it.
+                        Ordering::Equal if rest.len() <= path.len() => {
+                            self.pending = Some((Pending::Node(Arc::clone(&node)), depth));
+                            return Ok(());
+                        }
                         Ordering::Equal => {
                             self.path.extend_from_slice(path);
                             depth += path.len();
@@ -120,9 +129,12 @@ impl<'l, K: TrieKey, V: TrieValue, L: NodeLoader<V> + ?Sized> Range<'l, K, V, L>
                     }
                 }
                 Node::Branch { children } => {
-                    let nibble = *rest
-                        .first()
-                        .ok_or(TrieError::inconsistent("branch below the key length"))?;
+                    check_inner_end(depth, self.max_nibbles)?;
+                    // The bound ends at the branch: every key below extends it.
+                    let Some(&nibble) = rest.first() else {
+                        self.pending = Some((Pending::Node(Arc::clone(&node)), depth));
+                        return Ok(());
+                    };
                     let slot = usize::from(nibble);
                     self.frames.push(Frame {
                         branch: Arc::clone(&node),
@@ -157,33 +169,19 @@ impl<'l, K: TrieKey, V: TrieValue, L: NodeLoader<V> + ?Sized> Range<'l, K, V, L>
                 match &node.node {
                     Node::Leaf { path, value } => {
                         self.path.extend_from_slice(path);
-                        if self.path.len() != self.key_nibbles {
-                            return Err(TrieError::inconsistent(
-                                "leaf at the wrong depth for the key length",
-                            )
-                            .into());
-                        }
+                        check_leaf_end(self.path.len(), self.max_nibbles)?;
                         let key = K::decode(&nibbles::pack(&self.path))
                             .map_err(|error| TrieError::Key { error })?;
                         return Ok(Some((key, value.clone())));
                     }
                     Node::Extension { path, child } => {
-                        if depth + path.len() >= self.key_nibbles {
-                            return Err(TrieError::inconsistent(
-                                "extension reaches the end of the key",
-                            )
-                            .into());
-                        }
+                        check_inner_end(depth + path.len(), self.max_nibbles)?;
                         self.path.extend_from_slice(path);
                         let child = Pending::Link(child.clone(), Role::ExtensionChild);
                         self.pending = Some((child, depth + path.len()));
                     }
                     Node::Branch { .. } => {
-                        if depth >= self.key_nibbles {
-                            return Err(
-                                TrieError::inconsistent("branch below the key length").into()
-                            );
-                        }
+                        check_inner_end(depth, self.max_nibbles)?;
                         self.frames.push(Frame {
                             branch: node,
                             depth,

@@ -4,7 +4,7 @@ use crate::layout::{Posting, TermKey};
 use arkiv_db_trie::{ExploreNode, MerkleMap, TrieKey, TrieValue};
 
 /// Maximum traversal steps, derived from the selected state layout.
-pub const MAX_TREE_PATH: usize = <TermKey as TrieKey>::LEN * 2;
+pub const MAX_TREE_PATH: usize = <TermKey as TrieKey>::MAX_LEN * 2;
 
 #[derive(Clone, Debug)]
 pub enum ExploredLeaf {

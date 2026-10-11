@@ -12,7 +12,7 @@
 //! the honest proof: a missing, extra, duplicated or reordered node, a
 //! proof that stops at a hash reference (which a lenient verifier would
 //! read as absence), bytes after the terminal node, a node that is not in
-//! canonical form or that contradicts a trie of fixed-length keys. It
+//! canonical form or whose key ends inside a byte. It
 //! decodes adversarial bytes without panicking, and works iteratively, so
 //! input size bounds its work and memory.
 //!
@@ -28,8 +28,8 @@ use alloy_primitives::keccak256;
 use alloy_trie::EMPTY_ROOT_HASH;
 
 use crate::{
-    Link, NodeLoader, ObjectId, TrieError, TrieValue,
-    map::{Probe, Role, check_extension, check_leaf, resolve},
+    Link, NodeLoader, ObjectId, TrieValue,
+    map::{Probe, Role, check_inner_end, check_leaf_end, resolve},
     nibbles,
     node::{Node, RawChild, RawNode, decode_raw},
 };
@@ -44,6 +44,7 @@ pub struct ProofIter<'l, V, L: ?Sized> {
     next: Option<(Link<V>, Role)>,
     key: Vec<u8>,
     position: usize,
+    max_nibbles: usize,
     probe: Probe,
 }
 
@@ -58,12 +59,13 @@ impl<V, L: ?Sized> fmt::Debug for ProofIter<'_, V, L> {
 }
 
 impl<'l, V: TrieValue, L: NodeLoader<V> + ?Sized> ProofIter<'l, V, L> {
-    pub(crate) fn new(root: Link<V>, key: Vec<u8>, loader: &'l L) -> Self {
+    pub(crate) fn new(root: Link<V>, key: Vec<u8>, max_nibbles: usize, loader: &'l L) -> Self {
         Self {
             loader,
             next: Some((root, Role::Root)),
             key,
             position: 0,
+            max_nibbles,
             probe: Probe::new(),
         }
     }
@@ -80,22 +82,25 @@ impl<'l, V: TrieValue, L: NodeLoader<V> + ?Sized> ProofIter<'l, V, L> {
             };
             let rest = &self.key[self.position..];
             match &node.node {
-                Node::Leaf { path, .. } => check_leaf(path, rest)?,
+                Node::Leaf { path, .. } => {
+                    check_leaf_end(self.position + path.len(), self.max_nibbles)?;
+                }
                 Node::Extension { path, child } => {
-                    check_extension(path, rest)?;
+                    check_inner_end(self.position + path.len(), self.max_nibbles)?;
                     if rest.starts_with(path) {
                         self.position += path.len();
                         self.next = Some((child.clone(), Role::ExtensionChild));
                     }
                 }
                 Node::Branch { children } => {
-                    let nibble = *rest
-                        .first()
-                        .ok_or(TrieError::inconsistent("branch below the key length"))?;
-                    let child = &children[usize::from(nibble)];
-                    if !child.is_empty() {
-                        self.position += 1;
-                        self.next = Some((child.clone(), Role::Child));
+                    check_inner_end(self.position, self.max_nibbles)?;
+                    // A key ending at the branch ends the proof (absence).
+                    if let Some(&nibble) = rest.first() {
+                        let child = &children[usize::from(nibble)];
+                        if !child.is_empty() {
+                            self.position += 1;
+                            self.next = Some((child.clone(), Role::Child));
+                        }
                     }
                 }
             }
@@ -242,6 +247,9 @@ pub enum PathTerminal {
     DivergentLeaf,
     DivergentExtension,
     EmptyBranchSlot,
+    /// The key ends at a branch: it is a strict prefix of stored keys, and
+    /// branches hold no values.
+    KeyEndsAtBranch,
 }
 
 /// A successful point proof. No trace is returned on any verification failure.
@@ -280,26 +288,23 @@ pub fn inspect_path<N: AsRef<[u8]>>(
 ///   reference the walk reached along `key`'s nibbles; inline children are
 ///   decoded in place and never supplied separately;
 /// - the terminal node is a leaf whose path equals the remaining key
-///   (inclusion), a leaf or extension that diverges from it, or a branch
-///   whose slot for the next nibble is empty (absence); nothing may follow
-///   it;
+///   (inclusion), a leaf or extension that diverges from it (including a
+///   path the key ends inside, or a leaf path the key extends), a branch
+///   whose slot for the next nibble is empty, or a branch the key ends at
+///   (absence); nothing may follow it;
 /// - a hash reference reached with key nibbles left and no next node is
 ///   [`ProofError::Incomplete`], never absence;
 /// - every node decodes strictly (canonical RLP and hex-prefix, no branch
-///   value, at least two branch children, extension child a branch, leaf
-///   paths exactly as long as the remaining key).
+///   value, at least two branch children, extension child a branch, every
+///   leaf key ending on a byte boundary).
 ///
-/// It never panics, whatever the input.
+/// It never panics, whatever the input. Its work is bounded by the key and
+/// the proof bytes; the caller bounds both.
 ///
-/// **Precondition:** `key` is the encoding of a key of the map, exactly
-/// its [`TrieKey::LEN`](crate::TrieKey::LEN) bytes as
-/// [`TrieKey::encode`](crate::TrieKey::encode) produces them; a verifier
-/// composing proofs encodes the key itself before calling `walk`. The
-/// proof does not carry the length, so `walk` cannot check it. A key of
-/// another length is never proven included under the root of a map of
-/// fixed-length keys, but depending on the trie's shape it is reported as
-/// absent or as [`ProofError::InvalidNode`] (a leaf at the wrong depth
-/// for the key), and neither result then says anything about the proof.
+/// Since branches hold no values, any byte string can be queried: a key
+/// that ends inside the trie's paths, or extends a stored key, is proven
+/// absent. A verifier composing proofs encodes the key itself (with
+/// [`TrieKey::encode`](crate::TrieKey::encode)) before calling `walk`.
 pub fn walk<N: AsRef<[u8]>>(
     root: ObjectId,
     key: &[u8],
@@ -387,8 +392,8 @@ fn walk_inner<N: AsRef<[u8]>>(
                 if below_extension {
                     return Err(invalid("extension child is not a branch"));
                 }
-                if path.len() != rest.len() {
-                    return Err(invalid("leaf at the wrong depth for the key length"));
+                if !(position + path.len()).is_multiple_of(2) {
+                    return Err(invalid("leaf key ends inside a byte"));
                 }
                 if let Some(trace) = trace.as_deref_mut() {
                     trace.terminal = if path == rest {
@@ -403,9 +408,6 @@ fn walk_inner<N: AsRef<[u8]>>(
                 if below_extension {
                     return Err(invalid("extension child is not a branch"));
                 }
-                if path.len() >= rest.len() {
-                    return Err(invalid("extension reaches the end of the key"));
-                }
                 if !rest.starts_with(&path) {
                     if let Some(trace) = trace.as_deref_mut() {
                         trace.terminal = PathTerminal::DivergentExtension;
@@ -418,9 +420,12 @@ fn walk_inner<N: AsRef<[u8]>>(
             }
             RawNode::Branch { children } => {
                 below_extension = false;
-                let nibble = *rest
-                    .first()
-                    .ok_or_else(|| invalid("branch below the key length"))?;
+                let Some(&nibble) = rest.first() else {
+                    if let Some(trace) = trace.as_deref_mut() {
+                        trace.terminal = PathTerminal::KeyEndsAtBranch;
+                    }
+                    return finish(index, None);
+                };
                 let child = children[usize::from(nibble)];
                 if child == RawChild::Empty {
                     if let Some(trace) = trace.as_deref_mut() {

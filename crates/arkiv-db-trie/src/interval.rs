@@ -1,21 +1,164 @@
-//! Complete closed intervals over encoded fixed-length keys. Only subtrees
-//! whose key prefix intersects the interval are opened. Witness nodes are in
-//! depth-first key order; inline children remain in their parent's encoding.
+//! Complete intervals over encoded variable-length keys. Only subtrees
+//! whose key prefix can intersect the interval are opened. Witness nodes are
+//! in depth-first key order; inline children remain in their parent's
+//! encoding.
+//!
+//! Bounds are raw byte strings compared by unsigned bytewise lexicographic
+//! order (a proper prefix first), each inclusive, exclusive or unbounded.
+//! The producer ([`IntervalProofIter`]) and the verifier
+//! ([`walk_interval`]) share one pruning rule, [`KeyRange::may_hold`] over
+//! nibble prefixes, so they open exactly the same children.
+
+use std::ops::Bound;
 
 use alloy_primitives::keccak256;
 
 use crate::{
     EMPTY_ROOT_HASH, Link, NodeLoader, ObjectId, PathChild, PathNode, PathSource, Probe,
-    ProofError, TrieError, TrieValue,
-    map::{Role, resolve},
+    ProofError, TrieValue,
+    map::{Role, check_inner_end, check_leaf_end, resolve},
     nibbles,
     node::{Node, RawChild, RawNode, decode_raw},
 };
 
-// Every completion of a prefix lies between prefix||00… and prefix||ff….
-// Comparing against the bound prefixes avoids allocating these completions.
-fn intersects(prefix: &[u8], lower: &[u8], upper: &[u8]) -> bool {
-    lower <= upper && prefix >= &lower[..prefix.len()] && prefix <= &upper[..prefix.len()]
+/// An interval of encoded keys: each end inclusive, exclusive or unbounded.
+///
+/// Endpoints are raw byte strings and need not be encodings of stored keys.
+/// Order is unsigned bytewise lexicographic, a proper prefix first, so an
+/// exclusive lower bound `a` still admits `aa`. A prefix run is
+/// [`KeyRange::prefix`]: `[p, prefix_successor(p))`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyRange {
+    /// The lower endpoint.
+    pub lower: Bound<Vec<u8>>,
+    /// The upper endpoint.
+    pub upper: Bound<Vec<u8>>,
+}
+
+impl KeyRange {
+    /// The interval between two endpoints.
+    pub const fn new(lower: Bound<Vec<u8>>, upper: Bound<Vec<u8>>) -> Self {
+        Self { lower, upper }
+    }
+
+    /// The closed interval `[lower, upper]`.
+    pub fn closed(lower: &[u8], upper: &[u8]) -> Self {
+        Self::new(
+            Bound::Included(lower.to_vec()),
+            Bound::Included(upper.to_vec()),
+        )
+    }
+
+    /// Every key.
+    pub const fn all() -> Self {
+        Self::new(Bound::Unbounded, Bound::Unbounded)
+    }
+
+    /// Every key starting with `prefix`: `[prefix, prefix_successor(prefix))`,
+    /// unbounded above when the prefix is empty or all `0xff`.
+    pub fn prefix(prefix: &[u8]) -> Self {
+        Self::new(
+            Bound::Included(prefix.to_vec()),
+            crate::order::prefix_successor(prefix).map_or(Bound::Unbounded, Bound::Excluded),
+        )
+    }
+
+    /// Whether no byte string can satisfy both ends by endpoint comparison:
+    /// a lower endpoint above the upper one, or equal endpoints with either
+    /// excluded. An empty interval has an empty witness.
+    pub fn is_empty(&self) -> bool {
+        match (&self.lower, &self.upper) {
+            (Bound::Included(lower), Bound::Included(upper)) => lower > upper,
+            (
+                Bound::Included(lower) | Bound::Excluded(lower),
+                Bound::Included(upper) | Bound::Excluded(upper),
+            ) => lower >= upper,
+            _ => false,
+        }
+    }
+
+    /// Whether the encoded key `key` lies in the interval.
+    pub fn contains(&self, key: &[u8]) -> bool {
+        (match &self.lower {
+            Bound::Unbounded => true,
+            Bound::Included(lower) => key >= lower.as_slice(),
+            Bound::Excluded(lower) => key > lower.as_slice(),
+        }) && (match &self.upper {
+            Bound::Unbounded => true,
+            Bound::Included(upper) => key <= upper.as_slice(),
+            Bound::Excluded(upper) => key < upper.as_slice(),
+        })
+    }
+
+    fn unpacked(&self) -> Nibbled {
+        let unpack = |bound: &Bound<Vec<u8>>| match bound {
+            Bound::Unbounded => Bound::Unbounded,
+            Bound::Included(bytes) => Bound::Included(nibbles::unpack(bytes)),
+            Bound::Excluded(bytes) => Bound::Excluded(nibbles::unpack(bytes)),
+        };
+        Nibbled {
+            lower: unpack(&self.lower),
+            upper: unpack(&self.upper),
+        }
+    }
+
+    /// Whether a subtree whose keys all start with the nibble path `prefix`
+    /// can hold a key in the interval. Conservative (it may open a subtree
+    /// that turns out to hold nothing in range) and shared by the producer
+    /// and the verifier. A key below `prefix` extends it or equals it, so:
+    /// the subtree is entirely below the lower endpoint only when `prefix`
+    /// differs from it at a nibble where `prefix` is smaller; and it is
+    /// entirely above the upper endpoint when its smallest possible key
+    /// (`prefix`, completed with a zero nibble to a whole byte) is above it
+    /// (or equal to an excluded upper endpoint).
+    pub fn may_hold(&self, prefix_nibbles: &[u8]) -> bool {
+        self.unpacked().may_hold(prefix_nibbles)
+    }
+}
+
+/// A [`KeyRange`] with nibble endpoints.
+struct Nibbled {
+    lower: Bound<Vec<u8>>,
+    upper: Bound<Vec<u8>>,
+}
+
+impl Nibbled {
+    fn may_hold(&self, prefix: &[u8]) -> bool {
+        let above_lower = match &self.lower {
+            Bound::Unbounded => true,
+            Bound::Included(lower) | Bound::Excluded(lower) => {
+                let shared = prefix.len().min(lower.len());
+                prefix[..shared] >= lower[..shared]
+            }
+        };
+        above_lower
+            && match &self.upper {
+                Bound::Unbounded => true,
+                Bound::Included(upper) => smallest_completion(prefix).cmp(upper.iter()).is_le(),
+                Bound::Excluded(upper) => smallest_completion(prefix).cmp(upper.iter()).is_lt(),
+            }
+    }
+
+    /// Whether the whole key (as nibbles, an even count) is in the interval.
+    fn contains(&self, key: &[u8]) -> bool {
+        (match &self.lower {
+            Bound::Unbounded => true,
+            Bound::Included(lower) => key >= lower.as_slice(),
+            Bound::Excluded(lower) => key > lower.as_slice(),
+        }) && (match &self.upper {
+            Bound::Unbounded => true,
+            Bound::Included(upper) => key <= upper.as_slice(),
+            Bound::Excluded(upper) => key < upper.as_slice(),
+        })
+    }
+}
+
+/// The smallest whole-byte key starting with the nibble path `prefix`:
+/// `prefix`, plus a zero nibble when it ends inside a byte.
+fn smallest_completion(prefix: &[u8]) -> impl Iterator<Item = &u8> {
+    prefix
+        .iter()
+        .chain((!prefix.len().is_multiple_of(2)).then_some(&0))
 }
 
 /// Lazy interval witness. Each `next` may also visit inline descendants;
@@ -23,25 +166,25 @@ fn intersects(prefix: &[u8], lower: &[u8], upper: &[u8]) -> bool {
 /// inhabited keys (which permits typed-index sentinels).
 pub struct IntervalProofIter<'a, V, L: ?Sized> {
     loader: &'a L,
-    lower: Vec<u8>,
-    upper: Vec<u8>,
+    range: Nibbled,
+    max_nibbles: usize,
     pending: Vec<(Link<V>, Role, usize, Option<u8>)>,
     prefix: Vec<u8>,
     probe: Probe,
 }
 
 impl<'a, V: TrieValue, L: NodeLoader<V> + ?Sized> IntervalProofIter<'a, V, L> {
-    pub(crate) fn new(root: Link<V>, lower: &[u8], upper: &[u8], loader: &'a L) -> Self {
+    pub(crate) fn new(root: Link<V>, range: &KeyRange, max_key_len: usize, loader: &'a L) -> Self {
         Self {
             loader,
-            lower: nibbles::unpack(lower),
-            upper: nibbles::unpack(upper),
-            pending: if lower <= upper {
-                vec![(root, Role::Root, 0, None)]
-            } else {
+            range: range.unpacked(),
+            max_nibbles: max_key_len.saturating_mul(2),
+            pending: if range.is_empty() {
                 vec![]
+            } else {
+                vec![(root, Role::Root, 0, None)]
             },
-            prefix: Vec::with_capacity(2 * lower.len()),
+            prefix: Vec::new(),
             probe: Probe::new(),
         }
     }
@@ -62,22 +205,12 @@ impl<'a, V: TrieValue, L: NodeLoader<V> + ?Sized> IntervalProofIter<'a, V, L> {
             };
             match &node.node {
                 Node::Leaf { path, .. } => {
-                    if prefix.len() + path.len() != self.lower.len() {
-                        return Err(TrieError::inconsistent(
-                            "leaf at the wrong depth for the key length",
-                        )
-                        .into());
-                    }
+                    check_leaf_end(prefix.len() + path.len(), self.max_nibbles)?;
                 }
                 Node::Extension { path, child } => {
-                    if prefix.len() + path.len() >= self.lower.len() {
-                        return Err(TrieError::inconsistent(
-                            "extension reaches the end of the key",
-                        )
-                        .into());
-                    }
+                    check_inner_end(prefix.len() + path.len(), self.max_nibbles)?;
                     prefix.extend_from_slice(path);
-                    if intersects(prefix, &self.lower, &self.upper) {
+                    if self.range.may_hold(prefix) {
                         self.pending.push((
                             child.clone(),
                             Role::ExtensionChild,
@@ -87,15 +220,13 @@ impl<'a, V: TrieValue, L: NodeLoader<V> + ?Sized> IntervalProofIter<'a, V, L> {
                     }
                 }
                 Node::Branch { children } => {
-                    if prefix.len() >= self.lower.len() {
-                        return Err(TrieError::inconsistent("branch below the key length").into());
-                    }
+                    check_inner_end(prefix.len(), self.max_nibbles)?;
                     for (slot, child) in children.iter().enumerate().rev() {
                         if child.is_empty() {
                             continue;
                         }
                         prefix.push(slot as u8);
-                        if intersects(prefix, &self.lower, &self.upper) {
+                        if self.range.may_hold(prefix) {
                             self.pending.push((
                                 child.clone(),
                                 Role::Child,
@@ -180,34 +311,45 @@ pub const MAX_INTERVAL_TRACE_NODES: usize = 16_384;
 pub type IntervalEntries = Vec<(Vec<u8>, Vec<u8>)>;
 
 /// Strictly verify and describe the exact branching witness, using the same
-/// walker as [`walk_interval`]. Callers must bound key lengths, witness size,
-/// and trace allocation: each visited node copies its bytes, references and
-/// prefix, including inline nodes and leaves excluded by the final key check.
+/// walker as [`walk_interval`]. Callers must bound witness size and trace
+/// allocation: each visited node copies its bytes, references and prefix,
+/// including inline nodes and leaves excluded by the final key check.
 pub fn inspect_interval<N: AsRef<[u8]>>(
     root: ObjectId,
-    lower: &[u8],
-    upper: &[u8],
+    range: &KeyRange,
     nodes: &[N],
-    max_entries: usize,
+    limits: IntervalLimits,
 ) -> Result<(IntervalEntries, VerifiedInterval), ProofError> {
     let mut trace = VerifiedInterval { nodes: Vec::new() };
-    let entries = walk_interval_inner(root, lower, upper, nodes, max_entries, Some(&mut trace))?;
+    let entries = walk_interval_inner(root, range, nodes, limits, Some(&mut trace))?;
     Ok((entries, trace))
 }
 
-/// Verify and return *every* entry in the closed encoded-key interval, in key
+/// Bounds of one interval verification. Exceeding `max_entries` is
+/// [`ProofError::EntryLimitExceeded`]; a path or key longer than
+/// `max_key_len` bytes is [`ProofError::InvalidNode`]. Neither ever yields a
+/// truncated successful result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IntervalLimits {
+    /// Most entries the interval may hold.
+    pub max_entries: usize,
+    /// The map's key bound, [`TrieKey::MAX_LEN`](crate::TrieKey::MAX_LEN).
+    pub max_key_len: usize,
+}
+
+/// Verify and return *every* entry in the encoded-key interval, in key
 /// order. A missing intersecting child is an error, never an empty subtree.
-/// Empty intervals require an empty witness. `max_entries` is checked before
-/// copying a leaf; the caller must additionally bound key size and witness
-/// bytes/nodes before invoking this function (as with the point walker).
+/// Empty intervals ([`KeyRange::is_empty`]) require an empty witness.
+/// `max_entries` is checked before copying a leaf and `max_key_len` before
+/// descending; the caller must additionally bound witness bytes/nodes before
+/// invoking this function (as with the point walker).
 pub fn walk_interval<N: AsRef<[u8]>>(
     root: ObjectId,
-    lower: &[u8],
-    upper: &[u8],
+    range: &KeyRange,
     nodes: &[N],
-    max_entries: usize,
+    limits: IntervalLimits,
 ) -> Result<IntervalEntries, ProofError> {
-    walk_interval_inner(root, lower, upper, nodes, max_entries, None)
+    walk_interval_inner(root, range, nodes, limits, None)
 }
 
 struct PendingNode<'a> {
@@ -221,27 +363,24 @@ struct PendingNode<'a> {
 
 fn walk_interval_inner<N: AsRef<[u8]>>(
     root: ObjectId,
-    lower: &[u8],
-    upper: &[u8],
+    range: &KeyRange,
     nodes: &[N],
-    max_entries: usize,
+    limits: IntervalLimits,
     mut trace: Option<&mut VerifiedInterval>,
 ) -> Result<IntervalEntries, ProofError> {
-    if lower.is_empty() || lower.len() != upper.len() {
-        return Err(ProofError::InvalidNode {
-            index: 0,
-            reason: "interval key lengths disagree",
-        });
-    }
-    if lower > upper || root == EMPTY_ROOT_HASH {
+    let IntervalLimits {
+        max_entries,
+        max_key_len,
+    } = limits;
+    if range.is_empty() || root == EMPTY_ROOT_HASH {
         return if nodes.is_empty() {
             Ok(vec![])
         } else {
             Err(ProofError::TrailingNodes { index: 0 })
         };
     }
-    let lower = nibbles::unpack(lower);
-    let upper = nibbles::unpack(upper);
+    let max_nibbles = max_key_len.saturating_mul(2);
+    let range = range.unpacked();
     let mut pending = vec![PendingNode {
         child: RawChild::Hash(root),
         role: Role::Root,
@@ -250,7 +389,7 @@ fn walk_interval_inner<N: AsRef<[u8]>>(
         parent_index: None,
         supplied_ancestor: 0,
     }];
-    let mut prefix = Vec::with_capacity(lower.len());
+    let mut prefix = Vec::new();
     let mut consumed = 0;
     let mut entries = Vec::new();
     while let Some(PendingNode {
@@ -348,11 +487,15 @@ fn walk_interval_inner<N: AsRef<[u8]>>(
         }
         match raw {
             RawNode::Leaf { path, value } => {
-                if prefix.len() + path.len() != lower.len() {
-                    return Err(invalid("leaf at the wrong depth for the key length"));
+                let end = prefix.len() + path.len();
+                if !end.is_multiple_of(2) {
+                    return Err(invalid("leaf key ends inside a byte"));
+                }
+                if end > max_nibbles {
+                    return Err(invalid("leaf key exceeds the key length bound"));
                 }
                 prefix.extend_from_slice(&path);
-                let included = intersects(&prefix, &lower, &upper);
+                let included = range.contains(&prefix);
                 if included {
                     if entries.len() == max_entries {
                         return Err(ProofError::EntryLimitExceeded);
@@ -369,11 +512,11 @@ fn walk_interval_inner<N: AsRef<[u8]>>(
                 }
             }
             RawNode::Extension { path, child } => {
-                if prefix.len() + path.len() >= lower.len() {
-                    return Err(invalid("extension reaches the end of the key"));
+                if prefix.len() + path.len() >= max_nibbles {
+                    return Err(invalid("extension reaches the key length bound"));
                 }
                 prefix.extend_from_slice(&path);
-                let open = intersects(&prefix, &lower, &upper);
+                let open = range.may_hold(&prefix);
                 if let Some(node) = trace
                     .as_deref_mut()
                     .and_then(|trace| trace.nodes.last_mut())
@@ -396,15 +539,15 @@ fn walk_interval_inner<N: AsRef<[u8]>>(
                 }
             }
             RawNode::Branch { children } => {
-                if prefix.len() >= lower.len() {
-                    return Err(invalid("branch below the key length"));
+                if prefix.len() >= max_nibbles {
+                    return Err(invalid("branch reaches the key length bound"));
                 }
                 for (slot, child) in children.into_iter().enumerate().rev() {
                     if child == RawChild::Empty {
                         continue;
                     }
                     prefix.push(slot as u8);
-                    let open = intersects(&prefix, &lower, &upper);
+                    let open = range.may_hold(&prefix);
                     if let Some(node) = trace
                         .as_deref_mut()
                         .and_then(|trace| trace.nodes.last_mut())

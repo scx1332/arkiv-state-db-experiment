@@ -295,7 +295,7 @@ fn interval_reservation(bytes: usize, meter: &mut VerifyMeter) -> Result<(), Pro
     // One shared prefix; at most fifteen pending siblings at each key nibble.
     // Include Vec growth, borrowed/raw child stacks, inline decoding, returned
     // key/value copies and node-path allocations before invoking the walker.
-    let depth = 2 * TermKey::LEN + 1;
+    let depth = 2 * TermKey::MAX_LEN + 1;
     meter.allocate(depth * 16 * 256)?;
     meter.allocate(
         bytes
@@ -307,6 +307,13 @@ fn interval_reservation(bytes: usize, meter: &mut VerifyMeter) -> Result<(), Pro
             .checked_mul(depth + 64)
             .ok_or(ProofError::BudgetExceeded)?,
     )
+}
+
+fn interval_limits(caps: RangeProofLimits) -> arkiv_db_trie::IntervalLimits {
+    arkiv_db_trie::IntervalLimits {
+        max_entries: caps.max_terms,
+        max_key_len: TermKey::MAX_LEN,
+    }
 }
 
 fn terms<N: AsRef<[u8]>>(
@@ -348,13 +355,17 @@ fn terms_inner<N: AsRef<[u8]>>(
         let visits = (wire_bytes / 3 + witness.len()).min(arkiv_db_trie::MAX_INTERVAL_TRACE_NODES);
         let reserve = wire_bytes
             .checked_mul(16)
-            .and_then(|n| n.checked_add(visits * (2 * TermKey::LEN + 2048)))
+            .and_then(|n| n.checked_add(visits * (2 * TermKey::MAX_LEN + 2048)))
             .ok_or(ProofError::ProofLimitExceeded)?;
         meter.allocate(reserve)?;
         meter.work(reserve)?;
-        let (entries, trace) =
-            arkiv_db_trie::inspect_interval(root, &lower, &upper, witness, caps.max_terms)
-                .map_err(map_error)?;
+        let (entries, trace) = arkiv_db_trie::inspect_interval(
+            root,
+            &arkiv_db_trie::KeyRange::closed(&lower, &upper),
+            witness,
+            interval_limits(caps),
+        )
+        .map_err(map_error)?;
         let leaves = trace
             .nodes
             .iter()
@@ -386,10 +397,15 @@ fn terms_inner<N: AsRef<[u8]>>(
         });
         entries
     } else {
-        arkiv_db_trie::walk_interval(root, &lower, &upper, witness, caps.max_terms)
-            .map_err(map_error)?
+        arkiv_db_trie::walk_interval(
+            root,
+            &arkiv_db_trie::KeyRange::closed(&lower, &upper),
+            witness,
+            interval_limits(caps),
+        )
+        .map_err(map_error)?
     };
-    meter.allocate(entries.len() * (size_of::<(Value, Posting)>() + TermKey::LEN + 64))?;
+    meter.allocate(entries.len() * (size_of::<(Value, Posting)>() + TermKey::MAX_LEN + 64))?;
     entries
         .into_iter()
         .map(|(key, bytes)| {
@@ -685,17 +701,16 @@ pub(crate) fn generate_range(
             .charge_group(&[(Op::QueryGroup, 1), (Op::TermSeek, 1)])?;
         interval_reservation(0, &mut guard)?;
         serving.append(4)?;
-        let mut iter = namespace
-            .typed
-            .terms
-            .interval_proof(&lower, &upper, &loaders.terms)
-            .map_err(|_| ProofError::InvalidRequest)?;
+        let mut iter = namespace.typed.terms.interval_proof(
+            &arkiv_db_trie::KeyRange::closed(&lower, &upper),
+            &loaders.terms,
+        );
         let mut witness = Vec::new();
         loop {
             serving.append_capacity(META_NODE_BYTES + 4)?;
             // A supplied node contains at most its byte length in inline nodes.
             // Between two yields at most a key-depth stack of such nodes ends.
-            let visit_bound = (2 * TermKey::LEN + 1) * META_NODE_BYTES;
+            let visit_bound = (2 * TermKey::MAX_LEN + 1) * META_NODE_BYTES;
             serving
                 .meter
                 .check_capacity(&[(Op::ProofNode, visit_bound as u64)])?;

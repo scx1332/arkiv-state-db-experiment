@@ -32,28 +32,59 @@ impl fmt::Display for CodecError {
 
 impl std::error::Error for CodecError {}
 
-/// A fixed-length, order-preserving key encoding.
+/// A bounded, canonical, order-preserving and prefix-free key encoding.
 ///
-/// Every key of a type encodes to exactly [`LEN`](Self::LEN) bytes, and the
-/// map orders its entries by unsigned bytewise comparison of those bytes, so
-/// an implementation whose encoding preserves the intended order gets
-/// iteration in that order. Encoding must be injective and `decode` its
-/// inverse on every encoding `encode` produces. The map panics if `encode`
-/// returns a different length: that is a bug in the implementation, not a
-/// data error.
+/// The map orders its entries by unsigned bytewise lexicographic comparison
+/// of the encodings (a proper prefix sorts first), so an implementation whose
+/// encoding preserves the intended order gets iteration in that order.
+/// Encodings may have different lengths. The contract:
+///
+/// - **Bounded.** Every encoding has at most [`MAX_LEN`](Self::MAX_LEN)
+///   bytes. The map panics if `encode` returns more: that is a bug in the
+///   implementation, not a data error. The bound is a safety limit used to
+///   reject corrupt stored nodes and oversized proofs; it is never used to
+///   preallocate.
+/// - **Injective and canonical.** `decode(encode(k)) == k`, and `decode`
+///   rejects every byte string `encode` does not produce (bad escapes, a
+///   missing terminator, trailing bytes, a wrong fixed width).
+/// - **Order-preserving.** Bytewise order of encodings is the key order.
+/// - **Prefix-free.** No encoding is a strict prefix of another encoding
+///   of the same type. Trie branches carry no values, so a key that is a
+///   strict prefix of another stored key cannot be represented;
+///   [`MerkleMap::insert`](crate::MerkleMap::insert) rejects such a key with
+///   [`TrieError::KeyNotPrefixFree`](crate::TrieError::KeyNotPrefixFree)
+///   and leaves the map unchanged. Fixed-width encodings are trivially
+///   prefix-free; variable-length parts use a self-delimiting encoding such
+///   as [`order::encode_bytes`](crate::order::encode_bytes).
+///
+/// Lookups, removals and proofs accept any byte string: a key that is
+/// prefix-related to a stored key is simply absent, since only leaves hold
+/// values. Seek positions and interval bounds are raw byte strings and need
+/// not be encodings of a key.
 pub trait TrieKey: Sized {
-    /// The encoded length in bytes; at least one.
-    const LEN: usize;
+    /// The largest encoded length in bytes; at least one.
+    const MAX_LEN: usize;
 
-    /// Returns the `LEN`-byte encoding.
+    /// Returns the encoding, at most `MAX_LEN` bytes.
     fn encode(&self) -> Vec<u8>;
 
-    /// Decodes a `LEN`-byte encoding produced by [`encode`](Self::encode).
+    /// Decodes an encoding produced by [`encode`](Self::encode), rejecting
+    /// every other byte string.
     fn decode(bytes: &[u8]) -> Result<Self, CodecError>;
 }
 
+/// Whether no encoding in `keys` is a strict prefix of another and no
+/// encoding repeats: the prefix-free contract of [`TrieKey`], for tests and
+/// debug assertions over a key set. Sorts a copy; `O(n log n)`.
+pub fn is_prefix_free<B: AsRef<[u8]>>(keys: &[B]) -> bool {
+    let mut sorted: Vec<&[u8]> = keys.iter().map(AsRef::as_ref).collect();
+    sorted.sort_unstable();
+    // In sorted order a key's extensions follow it directly.
+    sorted.windows(2).all(|pair| !pair[1].starts_with(pair[0]))
+}
+
 impl<const N: usize> TrieKey for [u8; N] {
-    const LEN: usize = N;
+    const MAX_LEN: usize = N;
 
     fn encode(&self) -> Vec<u8> {
         self.to_vec()
@@ -67,7 +98,7 @@ impl<const N: usize> TrieKey for [u8; N] {
 }
 
 impl TrieKey for u64 {
-    const LEN: usize = 8;
+    const MAX_LEN: usize = 8;
 
     /// Big-endian, so numeric order is byte order.
     fn encode(&self) -> Vec<u8> {

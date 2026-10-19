@@ -378,6 +378,77 @@ fn read(node: &Node, path: &str, q: &ReadQuery) -> Result<Json> {
     }
     Err(Error("InvalidRequest"))
 }
+/// Bounded binary transport for a file-backed canonical genesis stream.
+/// The follower verifies the complete stream against its pinned genesis.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrefillChunkQuery {
+    offset: u64,
+    length: u32,
+}
+async fn prefill_chunk(State(rt): State<Shared>, Query(q): Query<PrefillChunkQuery>) -> Response {
+    const CHUNK_CAP: u32 = 1024 * 1024;
+    if q.length == 0 || q.length > CHUNK_CAP {
+        return response(Err(Error("InvalidRequest")));
+    }
+    let permit = match rt.slots.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => return response(Err(Error("ServerBusy"))),
+    };
+    let result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let _permit = permit;
+        let (path, bytes) = {
+            let node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
+            let Node::Full(host) = &*node else {
+                return Err(Error("FullNodeRequired"));
+            };
+            let launch = host
+                .genesis
+                .prefill
+                .as_ref()
+                .ok_or(Error("PrefillBundleRequired"))?;
+            (
+                host.prefill_file
+                    .clone()
+                    .ok_or(Error("PrefillBundleRequired"))?,
+                launch.canonical_bytes,
+            )
+        };
+        let end = q
+            .offset
+            .checked_add(u64::from(q.length))
+            .ok_or(Error("InvalidRequest"))?;
+        if end > bytes {
+            return Err(Error("InvalidRequest"));
+        }
+        let mut file = std::fs::File::open(path).map_err(|_| Error("StorageUnavailable"))?;
+        if file
+            .metadata()
+            .map_err(|_| Error("StorageUnavailable"))?
+            .len()
+            != bytes
+        {
+            return Err(Error("InvalidPrefillBundle"));
+        }
+        file.seek(SeekFrom::Start(q.offset))
+            .map_err(|_| Error("StorageUnavailable"))?;
+        let mut buffer = vec![0; q.length as usize];
+        file.read_exact(&mut buffer)
+            .map_err(|_| Error("StorageUnavailable"))?;
+        Ok(buffer)
+    })
+    .await
+    .unwrap_or(Err(Error("StorageUnavailable")));
+    match result {
+        Ok(bytes) => (
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        )
+            .into_response(),
+        Err(error) => response(Err(error)),
+    }
+}
 async fn http_read(
     State(rt): State<Shared>,
     Path(path): Path<String>,
@@ -663,6 +734,7 @@ pub fn public_router(rt: Shared) -> Router {
             "/",
             axum::routing::post(super::rpc::http).get(super::rpc_ws::upgrade),
         )
+        .route("/signed/v1/prefill/chunk", get(prefill_chunk))
         .route("/signed/v1/{*path}", get(http_read).post(http_post))
         .with_state(rt)
 }

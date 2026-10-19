@@ -14,6 +14,7 @@ mod prepare;
 pub mod reachability;
 pub mod retention;
 pub mod simulator;
+mod streaming;
 
 use crate::{B256, Branch, Cost, EngineError, SealedCandidate, Snapshot, SnapshotId, nodes::Nodes};
 use arkiv_db_storage::versioned::{
@@ -761,7 +762,7 @@ impl DurableEngine {
         candidate: SealedCandidate,
         packet: Option<simulator::SimulatorPacket>,
     ) -> Result<CommitInfo, PrepareFailure> {
-        match self.prepare_inner(&candidate, packet.as_ref()) {
+        match self.prepare_inner(&candidate, packet.as_ref(), None) {
             Ok(prepared) => {
                 let info = prepared.info;
                 self.pending = Some(prepared);
@@ -779,6 +780,7 @@ impl DurableEngine {
         &mut self,
         candidate: &SealedCandidate,
         packet: Option<&simulator::SimulatorPacket>,
+        checkpoint: Option<&[u8]>,
     ) -> Result<Prepared, DurableError> {
         if self.simulator.is_some() != packet.is_some() {
             return Err(incompatible(
@@ -847,6 +849,13 @@ impl DurableEngine {
         }
         if let Some(packet) = packet {
             packet.append(&mut batch, &manifest)?;
+        }
+        if let Some(checkpoint) = checkpoint {
+            batch.put_record(
+                Table::Meta,
+                streaming::checkpoint_key(sequence).into_bytes(),
+                checkpoint.to_vec(),
+            );
         }
         let staging = prepare::Staging::collect(
             &candidate.state,

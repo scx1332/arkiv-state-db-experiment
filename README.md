@@ -405,6 +405,9 @@ from `--allocations-file allocations.json` or from a genesis `--bundle`.
 The signed proposer accepts the existing Arkiv SDK over JSON-RPC at `/`; see
 [compatibility, limits and validation](docs/sdk-compatibility.md). New chains can
 use a [TOML genesis bundle with prefills](docs/examples/genesis-bundle/README.md).
+For larger datasets, the [streaming genesis v2 path](docs/streaming-genesis-v2.md)
+uses bounded durable batches and resumable private staging; a
+[Sourcify converter](docs/sourcify-prefill-converter.md) preserves dataset references.
 
 Browse the signed node’s [API reference](docs/node-api-reference.md)
 at `/docs` (Scalar), with an OpenAPI specification at `/openapi.json`.

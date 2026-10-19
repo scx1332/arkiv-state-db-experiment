@@ -1305,3 +1305,79 @@ async fn state_api_documentation_is_public_and_independent_of_storage_lock() {
             ["value"]
     );
 }
+
+#[tokio::test]
+async fn prefill_binary_chunks_are_bounded_and_reject_truncated_files() {
+    use arkiv_node::genesis_bundle::{self, PrefillLimits};
+    let signer = signer(1);
+    let g = genesis_bundle::build_genesis(
+        genesis(),
+        PrefillLimits {
+            max_entities: 256,
+            max_canonical_bytes: 1024 * 1024,
+            max_storage_units: 8 * 1024 * 1024,
+        },
+        *signer.address().as_bytes(),
+        &[],
+    )
+    .unwrap();
+    let bytes = genesis_bundle::encode_stream(&[]).unwrap();
+    let mut random = [0u8; 16];
+    getrandom::fill(&mut random).unwrap();
+    let path = std::env::temp_dir().join(format!("prefill-chunk-{}", hex(&random)));
+    std::fs::write(&path, &bytes).unwrap();
+    let mut h = Host::create_with_prefill(
+        Arc::new(MemoryVersionedStore::new()),
+        History::create(Arc::new(MemoryVersionedStore::new()), g.hash()).unwrap(),
+        g.clone(),
+        [1; 16],
+        SignedHeader::sign(&g, g.header(), &signer).unwrap(),
+        Some(signer),
+        Options::default(),
+        Some(bytes.clone()),
+    )
+    .unwrap();
+    h.prefill_file = Some(path.clone());
+    let rt = Runtime::new(Node::Full(Box::new(h)), None, None, None).unwrap();
+    let server = serve(runtime::public_router(rt)).await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/signed/v1/prefill/chunk", server.url);
+    let response = client
+        .get(format!("{url}?offset=3&length=7"))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/octet-stream"
+    );
+    assert_eq!(response.bytes().await.unwrap().as_ref(), &bytes[3..10]);
+    for query in [
+        "offset=0&length=0",
+        "offset=0&length=1048577",
+        "offset=19&length=2",
+        "offset=18446744073709551615&length=1",
+    ] {
+        assert!(
+            !client
+                .get(format!("{url}?{query}"))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+    }
+    std::fs::write(&path, &bytes[..10]).unwrap();
+    assert!(
+        !client
+            .get(format!("{url}?offset=0&length=5"))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    std::fs::remove_file(path).unwrap();
+}

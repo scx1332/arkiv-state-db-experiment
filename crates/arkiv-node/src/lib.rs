@@ -32,6 +32,8 @@ pub mod exec;
 pub mod gas;
 pub mod genesis_authoring;
 pub mod genesis_bundle;
+pub mod genesis_streaming;
+mod genesis_streaming_compaction;
 pub mod identity;
 pub mod params;
 pub mod replay;

@@ -176,49 +176,301 @@ fn authoring_error(error: String) -> Error {
     eprintln!("{error}");
     Error("InvalidGenesisBundle")
 }
-fn load_bundle(path: &Path) -> Result<(SignedGenesis, Vec<u8>)> {
-    arkiv_node::genesis_authoring::verify(path).map_err(authoring_error)?;
-    let genesis = decode_exact(&read_file(
+#[derive(Clone)]
+enum PrefillSource {
+    Small(Vec<u8>),
+    Streaming(PathBuf),
+}
+fn streaming(genesis: &SignedGenesis) -> bool {
+    genesis.prefill.as_ref().is_some_and(|p| p.version == 2)
+}
+fn load_bundle(path: &Path) -> Result<(SignedGenesis, PathBuf)> {
+    let genesis: SignedGenesis = decode_exact(&read_file(
         path.join("genesis.bin")
             .to_str()
             .ok_or(Error("InvalidRequest"))?,
         65536,
     )?)
     .map_err(|_| Error("InvalidGenesisBundle"))?;
-    let stream = read_file(
-        path.join("prefill.bin")
-            .to_str()
-            .ok_or(Error("InvalidRequest"))?,
-        arkiv_node::genesis_bundle::MAX_CANONICAL_BYTES as usize,
-    )?;
-    arkiv_node::genesis_bundle::verify_genesis(&genesis, &stream).map_err(authoring_error)?;
-    Ok((genesis, stream))
+    genesis.validate()?;
+    let input = path.join("prefill.bin");
+    if streaming(&genesis) {
+        arkiv_node::genesis_streaming::verify_stream_file(&genesis, &input)
+            .map_err(authoring_error)?;
+    } else {
+        arkiv_node::genesis_authoring::verify(path).map_err(authoring_error)?;
+    }
+    Ok((genesis, input))
 }
 fn local_prefill(
     path: &Path,
     genesis: &SignedGenesis,
-    supplied: Option<&[u8]>,
-) -> Result<Option<Vec<u8>>> {
+    supplied: Option<&Path>,
+) -> Result<Option<PrefillSource>> {
     if genesis.prefill.is_none() {
         return Ok(None);
     }
     let target = path.join("prefill.bin");
-    let stream = match supplied {
-        Some(bytes) => bytes.to_vec(),
-        None => read_file(
-            target.to_str().ok_or(Error("InvalidRequest"))?,
-            arkiv_node::genesis_bundle::MAX_CANONICAL_BYTES as usize,
-        )?,
-    };
+    if streaming(genesis) {
+        if !target.exists() {
+            let source = supplied.ok_or(Error("PrefillBundleRequired"))?;
+            arkiv_node::genesis_streaming::check_disk(
+                path,
+                genesis
+                    .prefill
+                    .as_ref()
+                    .ok_or(Error("InvalidPrefillBundle"))?
+                    .canonical_bytes,
+            )
+            .map_err(authoring_error)?;
+            let temporary = path.join("prefill.copy.pending");
+            // A partial copy is disposable; publication is atomic and no-clobber.
+            std::fs::copy(source, &temporary).map_err(|_| Error("StorageUnavailable"))?;
+            arkiv_node::genesis_streaming::verify_stream_file(genesis, &temporary)
+                .map_err(authoring_error)?;
+            std::fs::File::open(&temporary)
+                .and_then(|f| f.sync_all())
+                .map_err(|_| Error("StorageUnavailable"))?;
+            std::fs::hard_link(&temporary, &target).map_err(|_| Error("StorageUnavailable"))?;
+            std::fs::remove_file(&temporary).map_err(|_| Error("StorageUnavailable"))?;
+            std::fs::File::open(path)
+                .and_then(|f| f.sync_all())
+                .map_err(|_| Error("StorageUnavailable"))?;
+        }
+        arkiv_node::genesis_streaming::verify_stream_file(genesis, &target)
+            .map_err(authoring_error)?;
+        return Ok(Some(PrefillSource::Streaming(target)));
+    }
+    let stream = read_file(
+        supplied
+            .unwrap_or(&target)
+            .to_str()
+            .ok_or(Error("InvalidRequest"))?,
+        arkiv_node::genesis_bundle::MAX_CANONICAL_BYTES as usize,
+    )?;
     arkiv_node::genesis_bundle::verify_genesis(genesis, &stream).map_err(authoring_error)?;
     retain_public(&target, &stream)?;
-    Ok(Some(stream))
+    Ok(Some(PrefillSource::Small(stream)))
+}
+#[allow(clippy::too_many_arguments)]
+fn create_host(
+    state: Arc<RedbStore>,
+    history: History,
+    genesis: SignedGenesis,
+    source: [u8; 16],
+    certificate: SignedHeader,
+    signer: Option<Signer>,
+    options: Options,
+    prefill: Option<PrefillSource>,
+    path: &Path,
+) -> Result<Host> {
+    match prefill {
+        Some(PrefillSource::Streaming(input)) => {
+            let staged = arkiv_node::genesis_streaming::prepare_streaming(
+                &genesis,
+                &input,
+                &path.join("prefill-work"),
+                options.clone(),
+            )
+            .map_err(authoring_error)?;
+            let mut staging_bytes = 0u64;
+            for entry in std::fs::read_dir(path.join("prefill-work"))
+                .map_err(|_| Error("StorageUnavailable"))?
+            {
+                let entry = entry.map_err(|_| Error("StorageUnavailable"))?;
+                if entry.path().extension().is_some_and(|e| e == "redb") {
+                    staging_bytes = staging_bytes
+                        .checked_add(
+                            entry
+                                .metadata()
+                                .map_err(|_| Error("StorageUnavailable"))?
+                                .len(),
+                        )
+                        .ok_or(Error("CapacityReached"))?;
+                }
+            }
+            arkiv_node::genesis_streaming::check_disk(path, staging_bytes)
+                .map_err(authoring_error)?;
+            let host = Host::create_from_staged(
+                state,
+                history,
+                genesis,
+                source,
+                certificate,
+                signer,
+                options,
+                &staged,
+                input,
+            )?;
+            drop(staged);
+            if let Err(error) = std::fs::remove_dir_all(path.join("prefill-work")) {
+                eprintln!("genesis installed; could not remove import scratch: {error}");
+            }
+            Ok(host)
+        }
+        other => Host::create_with_prefill(
+            state,
+            history,
+            genesis,
+            source,
+            certificate,
+            signer,
+            options,
+            match other {
+                Some(PrefillSource::Small(bytes)) => Some(bytes),
+                _ => None,
+            },
+        ),
+    }
+}
+fn attach_prefill(host: &mut Host, prefill: Option<PrefillSource>) {
+    match prefill {
+        Some(PrefillSource::Small(bytes)) => host.prefill_stream = Some(bytes),
+        Some(PrefillSource::Streaming(path)) => host.prefill_file = Some(path),
+        None => {}
+    }
+}
+async fn download_prefill(
+    client: &reqwest::Client,
+    peer: &str,
+    path: &Path,
+    genesis: &SignedGenesis,
+) -> Result<()> {
+    use std::io::Write;
+    let launch = genesis
+        .prefill
+        .as_ref()
+        .ok_or(Error("InvalidPrefillBundle"))?;
+    let target = path.join("prefill.bin");
+    if target.exists() {
+        return Ok(());
+    }
+    let partial = path.join("prefill.download.pending");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&partial)
+        .map_err(|_| Error("StorageUnavailable"))?;
+    let mut offset = file
+        .metadata()
+        .map_err(|_| Error("StorageUnavailable"))?
+        .len();
+    if offset > launch.canonical_bytes {
+        return Err(Error("InvalidPrefillBundle"));
+    }
+    arkiv_node::genesis_streaming::check_disk(path, launch.canonical_bytes - offset)
+        .map_err(authoring_error)?;
+    while offset < launch.canonical_bytes {
+        arkiv_node::genesis_streaming::check_disk(path, 1024 * 1024).map_err(authoring_error)?;
+        let length = (launch.canonical_bytes - offset).min(1024 * 1024);
+        let url = format!(
+            "{}/signed/v1/prefill/chunk?offset={offset}&length={length}",
+            peer.trim_end_matches('/')
+        );
+        let mut response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| Error("PeerUnavailable"))?;
+        if !response.status().is_success() {
+            return Err(Error("PeerUnavailable"));
+        }
+        let mut buffer = Vec::with_capacity(length as usize);
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| Error("PeerUnavailable"))?
+        {
+            if buffer.len() + chunk.len() > length as usize {
+                return Err(Error("InvalidPrefillBundle"));
+            }
+            buffer.extend_from_slice(&chunk);
+        }
+        if buffer.len() != length as usize {
+            return Err(Error("InvalidPrefillBundle"));
+        }
+        file.write_all(&buffer)
+            .and_then(|_| file.sync_data())
+            .map_err(|_| Error("StorageUnavailable"))?;
+        offset += length;
+    }
+    file.sync_all().map_err(|_| Error("StorageUnavailable"))?;
+    drop(file);
+    if let Err(error) = arkiv_node::genesis_streaming::verify_stream_file(genesis, &partial) {
+        // Never retry an already complete, corrupt download forever. Its pinned
+        // identity remains in trust.json; the next start downloads fresh bytes.
+        std::fs::remove_file(&partial).map_err(|_| Error("StorageUnavailable"))?;
+        return Err(authoring_error(error));
+    }
+    std::fs::hard_link(&partial, &target).map_err(|_| Error("StorageUnavailable"))?;
+    std::fs::remove_file(&partial).map_err(|_| Error("StorageUnavailable"))?;
+    std::fs::File::open(path)
+        .and_then(|f| f.sync_all())
+        .map_err(|_| Error("StorageUnavailable"))?;
+    Ok(())
 }
 fn genesis_command() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(2).collect();
     let [command, source, rest @ ..] = args.as_slice() else {
         return Err(Error("InvalidRequest"));
     };
+    if command == "stream-build" {
+        let mut out = None;
+        let mut prefill = None;
+        let mut sponsor = None;
+        let mut batch_bytes = arkiv_node::genesis_streaming::DEFAULT_BATCH_BYTES;
+        let mut flags = rest.iter();
+        while let Some(flag) = flags.next() {
+            let value = flags.next().ok_or(Error("InvalidRequest"))?;
+            match flag.as_str() {
+                "--out" if out.is_none() => out = Some(value),
+                "--prefill" if prefill.is_none() => prefill = Some(value),
+                "--sponsor" if sponsor.is_none() => sponsor = Some(value),
+                "--batch-bytes" => {
+                    batch_bytes = value.parse().map_err(|_| Error("InvalidRequest"))?
+                }
+                _ => return Err(Error("InvalidRequest")),
+            }
+        }
+        let address = unhex(sponsor.ok_or(Error("InvalidRequest"))?, 20)?;
+        let result = arkiv_node::genesis_streaming::build_bundle(
+            Path::new(source),
+            Path::new(prefill.ok_or(Error("InvalidRequest"))?),
+            Path::new(out.ok_or(Error("InvalidRequest"))?),
+            address.try_into().map_err(|_| Error("InvalidRequest"))?,
+            batch_bytes,
+        )
+        .map_err(authoring_error)?;
+        println!("{result}");
+        return Ok(());
+    }
+    if command == "stream-verify" {
+        if !rest.is_empty() {
+            return Err(Error("InvalidRequest"));
+        }
+        let dir = Path::new(source);
+        let genesis: SignedGenesis = decode_exact(&read_file(
+            dir.join("genesis.bin")
+                .to_str()
+                .ok_or(Error("InvalidRequest"))?,
+            65536,
+        )?)
+        .map_err(|_| Error("InvalidGenesis"))?;
+        let work = dir.with_extension("verify-work");
+        arkiv_node::genesis_streaming::prepare_streaming(
+            &genesis,
+            &dir.join("prefill.bin"),
+            &work,
+            Options::default(),
+        )
+        .map_err(authoring_error)?;
+        std::fs::remove_dir_all(&work).map_err(|_| Error("InvalidRequest"))?;
+        println!(
+            "{}",
+            arkiv_node::genesis_streaming::summary_report(&genesis).map_err(authoring_error)?
+        );
+        return Ok(());
+    }
     let mut out = None;
     let mut locked = false;
     let mut refresh = false;
@@ -235,7 +487,7 @@ fn genesis_command() -> Result<()> {
         "lock" if out.is_none() && !locked => arkiv_node::genesis_authoring::lock(Path::new(source), refresh),
         "build" if out.is_some() && !refresh => arkiv_node::genesis_authoring::build(Path::new(source), Path::new(out.unwrap()), locked),
         "verify" if out.is_none() && !locked && !refresh => arkiv_node::genesis_authoring::verify(Path::new(source)),
-        _ => { eprintln!("genesis lock CHAIN [--refresh] | genesis build CHAIN --out BUNDLE --locked | genesis verify BUNDLE"); return Err(Error("InvalidRequest")); }
+        _ => { eprintln!("genesis lock CHAIN [--refresh] | genesis build CHAIN --out BUNDLE --locked | genesis verify BUNDLE | genesis stream-build BASE_GENESIS --prefill FILE --out BUNDLE --sponsor 0xADDRESS [--batch-bytes N] | genesis stream-verify BUNDLE"); return Err(Error("InvalidRequest")); }
     }.map_err(authoring_error)?;
     println!("{result}");
     Ok(())
@@ -258,7 +510,7 @@ async fn run() -> Result<()> {
     }
     if command == "--help" {
         println!(
-            "arkiv-proposer genesis lock CHAIN [--refresh]\narkiv-proposer genesis build CHAIN --out BUNDLE --locked\narkiv-proposer genesis verify BUNDLE\narkiv-proposer keygen --out FILE\narkiv-proposer producer --run-dir DIR --key-file FILE [--listen 127.0.0.1:9500] [--private-listen 127.0.0.1:9501] [--start paused|running] [--source-id UUID] [--chain-id 9001] [--block-period-ms 1000] [--state-retention archive|N] (--allocations-file FILE | --bundle BUNDLE)\narkiv-proposer full|light --run-dir DIR --peer URL --genesis-hash 0xHEX --proposer 0xADDRESS --chain-id N --source-id UUID --run-id HEX32 [--replication-peer URL] [--bundle BUNDLE] [--state-retention archive|N (full only)]\narkiv-proposer sign --key-file FILE --genesis-file FILE --tx-file FILE --nonce N --out FILE\narkiv-proposer create --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --payload-file FILE --out FILE [--salt 0] [--gas-limit 1000000] [--lifetime-blocks 17280]\narkiv-proposer transfer --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --to 0xADDRESS --amount-wei DECIMAL --out FILE [--gas-limit 21000]\narkiv-proposer submit --peer URL --transaction-file FILE\nOptional private Prometheus exporter: --metrics-listen 127.0.0.1:9600 [--metrics-interval-secs 300] (minimum 10). Metrics use rogue_one_ prefix.\nPrivate listener/full replication use ARKIV_PROPOSER_TOKEN (at least 32 bytes). Producer starts paused. Every chain runs the glm-v2 gas profile with funded accounts. A bundle chain creates the entities namespace (and its prefill) at height 0; a chain created from --allocations-file creates it with the proposer's bootstrap transaction in block 1. Each run exports public genesis.bin/certificate.bin. Sign/create files use native canonical bytes; submit polls pending/included status. Single-proposer authentication supplies no consensus or finality. Bodies are retained in history.redb separately from node.redb. --state-retention N serves state (balances, proofs, queries, receipts/logs) only for the head and the N snapshots before it and refuses older heights with HistoryPruned; archive (default) serves every height. Nothing is deleted yet, and a pruned floor never moves back."
+            "arkiv-proposer genesis lock CHAIN [--refresh]\narkiv-proposer genesis build CHAIN --out BUNDLE --locked\narkiv-proposer genesis verify BUNDLE\narkiv-proposer genesis stream-build BASE_GENESIS --prefill FILE --out BUNDLE --sponsor 0xADDRESS [--batch-bytes N]\narkiv-proposer genesis stream-verify BUNDLE\narkiv-proposer keygen --out FILE\narkiv-proposer producer --run-dir DIR --key-file FILE [--listen 127.0.0.1:9500] [--private-listen 127.0.0.1:9501] [--start paused|running] [--source-id UUID] [--chain-id 9001] [--block-period-ms 1000] [--state-retention archive|N] (--allocations-file FILE | --bundle BUNDLE)\narkiv-proposer full|light --run-dir DIR --peer URL --genesis-hash 0xHEX --proposer 0xADDRESS --chain-id N --source-id UUID --run-id HEX32 [--replication-peer URL] [--bundle BUNDLE] [--state-retention archive|N (full only)]\narkiv-proposer sign --key-file FILE --genesis-file FILE --tx-file FILE --nonce N --out FILE\narkiv-proposer create --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --payload-file FILE --out FILE [--salt 0] [--gas-limit 1000000] [--lifetime-blocks 17280]\narkiv-proposer transfer --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --to 0xADDRESS --amount-wei DECIMAL --out FILE [--gas-limit 21000]\narkiv-proposer submit --peer URL --transaction-file FILE\nOptional private Prometheus exporter: --metrics-listen 127.0.0.1:9600 [--metrics-interval-secs 300] (minimum 10). Metrics use rogue_one_ prefix.\nPrivate listener/full replication use ARKIV_PROPOSER_TOKEN (at least 32 bytes). Producer starts paused. Every chain runs the glm-v2 gas profile with funded accounts. A bundle chain creates the entities namespace (and its prefill) at height 0; a chain created from --allocations-file creates it with the proposer's bootstrap transaction in block 1. Each run exports public genesis.bin/certificate.bin. Sign/create files use native canonical bytes; submit polls pending/included status. Single-proposer authentication supplies no consensus or finality. Bodies are retained in history.redb separately from node.redb. --state-retention N serves state (balances, proofs, queries, receipts/logs) only for the head and the N snapshots before it and refuses older heights with HistoryPruned; archive (default) serves every height. Nothing is deleted yet, and a pruned floor never moves back."
         );
         return Ok(());
     }
@@ -565,7 +817,7 @@ async fn run() -> Result<()> {
                 return Err(Error("IdentityMismatch"));
             }
             let prefill =
-                local_prefill(&path, &genesis, bundle.as_ref().map(|(_, b)| b.as_slice()))?;
+                local_prefill(&path, &genesis, bundle.as_ref().map(|(_, b)| b.as_path()))?;
             let certificate = SignedHeader::sign(&genesis, genesis.header(), &s)?;
             // Retain the chain identity before either database initialization;
             // a cut during genesis publication can retry the same chain.
@@ -576,7 +828,7 @@ async fn run() -> Result<()> {
             } else {
                 History::create(history_store, genesis.hash())?
             };
-            Host::create_with_prefill(
+            create_host(
                 state,
                 history,
                 genesis,
@@ -585,14 +837,16 @@ async fn run() -> Result<()> {
                 Some(s),
                 options.clone(),
                 prefill,
+                &path,
             )?
         };
         if host.genesis.prefill.is_some() {
-            host.prefill_stream = local_prefill(
+            let prefill = local_prefill(
                 &path,
                 &host.genesis,
-                bundle.as_ref().map(|(_, b)| b.as_slice()),
+                bundle.as_ref().map(|(_, b)| b.as_path()),
             )?;
+            attach_prefill(&mut host, prefill);
         }
         match get("--start", "paused").as_str() {
             "paused" => {}
@@ -671,38 +925,32 @@ async fn run() -> Result<()> {
                 return Err(Error("InvalidRequest"));
             }
             let prefill = if genesis.prefill.is_some() {
-                let bytes = if let Some((_, bytes)) = &bundle {
-                    bytes.clone()
-                } else if path.join("prefill.bin").exists() {
-                    read_file(
-                        path.join("prefill.bin")
-                            .to_str()
-                            .ok_or(Error("InvalidRequest"))?,
-                        arkiv_node::genesis_bundle::MAX_CANONICAL_BYTES as usize,
-                    )?
-                } else {
-                    let data: serde_json::Value = runtime::fetch(
-                        &client,
-                        peer,
-                        "/signed/v1/prefill",
-                        None,
-                        None,
-                        2 * arkiv_node::genesis_bundle::MAX_CANONICAL_BYTES as usize + 128,
-                    )
-                    .await?;
-                    let encoded = data["prefillBytes"]
-                        .as_str()
-                        .ok_or(Error("InvalidPrefillBundle"))?;
-                    unhex(
-                        encoded,
-                        genesis
-                            .prefill
-                            .as_ref()
-                            .ok_or(Error("InvalidPrefillBundle"))?
-                            .canonical_bytes as usize,
-                    )?
-                };
-                local_prefill(&path, &genesis, Some(&bytes))?
+                if bundle.is_none() && !path.join("prefill.bin").exists() {
+                    if streaming(&genesis) {
+                        download_prefill(&client, peer, &path, &genesis).await?;
+                    } else {
+                        let data: serde_json::Value = runtime::fetch(
+                            &client,
+                            peer,
+                            "/signed/v1/prefill",
+                            None,
+                            None,
+                            2 * arkiv_node::genesis_bundle::MAX_CANONICAL_BYTES as usize + 128,
+                        )
+                        .await?;
+                        let encoded = data["prefillBytes"]
+                            .as_str()
+                            .ok_or(Error("InvalidPrefillBundle"))?;
+                        let bytes = unhex(
+                            encoded,
+                            arkiv_node::genesis_bundle::MAX_CANONICAL_BYTES as usize,
+                        )?;
+                        arkiv_node::genesis_bundle::verify_genesis(&genesis, &bytes)
+                            .map_err(authoring_error)?;
+                        retain_public(&path.join("prefill.bin"), &bytes)?;
+                    }
+                }
+                local_prefill(&path, &genesis, bundle.as_ref().map(|(_, p)| p.as_path()))?
             } else {
                 None
             };
@@ -716,7 +964,7 @@ async fn run() -> Result<()> {
             let mut host = if state.head()?.is_some() {
                 Host::open(state, history, &genesis, None, options.clone())?
             } else {
-                Host::create_with_prefill(
+                create_host(
                     state,
                     history,
                     genesis,
@@ -725,9 +973,10 @@ async fn run() -> Result<()> {
                     None,
                     options.clone(),
                     prefill.clone(),
+                    &path,
                 )?
             };
-            host.prefill_stream = prefill;
+            attach_prefill(&mut host, prefill);
             if host.identity != identity {
                 return Err(Error("IdentityMismatch"));
             }

@@ -133,6 +133,8 @@ pub struct Host {
     pub health: &'static str,
     pub pool: Pool,
     pub prefill_stream: Option<Vec<u8>>,
+    /// Immutable, verified canonical v2 stream; never loaded wholesale.
+    pub prefill_file: Option<std::path::PathBuf>,
     history: History,
     signer: Option<Signer>,
     pending: Option<Pending>,
@@ -246,8 +248,93 @@ impl Host {
             health: "paused",
             pool,
             prefill_stream,
+            prefill_file: None,
             history,
             signer,
+            pending: None,
+            refusal: Default::default(),
+        })
+    }
+    /// Install a verified, privately staged genesis without materializing its trie.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_from_staged(
+        store: Arc<dyn VersionedStore>,
+        mut history: History,
+        genesis: SignedGenesis,
+        source: [u8; 16],
+        certificate: SignedHeader,
+        signer: Option<Signer>,
+        options: Options,
+        staged: &DurableEngine,
+        prefill_file: std::path::PathBuf,
+    ) -> Result<Self> {
+        genesis.validate()?;
+        if genesis.prefill.as_ref().is_none_or(|p| p.version != 2)
+            || staged.head_snapshot().state_header()
+                != genesis
+                    .prefill
+                    .as_ref()
+                    .ok_or(Error("InvalidPrefillBundle"))?
+                    .state
+        {
+            return Err(Error("InvalidPrefillBundle"));
+        }
+        certificate.authenticate(&genesis)?;
+        if certificate.header != genesis.header()
+            || signer
+                .as_ref()
+                .is_some_and(|s| s.address().as_bytes() != &genesis.proposer)
+        {
+            return Err(Error("IdentityMismatch"));
+        }
+        let durable = SimulatorIdentity {
+            source_id: source,
+            run_id: genesis.run_id,
+            node_genesis_hash: genesis.hash(),
+            metadata: encode(&genesis),
+        };
+        let identity = identity(&durable, &genesis);
+        let block = SignedBlock {
+            header: certificate.clone(),
+            inputs: SignedInputs { txs: vec![] },
+            outcomes: BlockOutcomes::default(),
+        };
+        let body = history.persist(&encode(&block))?;
+        let record = HeaderRecord {
+            certificate,
+            body,
+            feed: FeedBlock::new(&identity, &genesis.header(), Default::default())?,
+        };
+        let packet = SimulatorPacket {
+            height: 0,
+            state_root: genesis.header().state_root,
+            bytes: record.bytes()?,
+            inclusions: vec![],
+        };
+        let initialization = staged.initialize_simulator_from_staged(
+            store,
+            engine_genesis(&durable, &genesis),
+            options,
+            durable,
+            packet,
+        )?;
+        let engine = match initialization {
+            Initialization::Committed(engine) => engine,
+            Initialization::NotCommitted { .. } => return Err(Error("StorageUnavailable")),
+            Initialization::Indeterminate { .. } => return Err(Error("CommitUncertain")),
+        };
+        Ok(Self {
+            head: genesis.header(),
+            pool: Pool::new(&genesis)?,
+            engine,
+            genesis,
+            identity,
+            history,
+            signer,
+            paused: true,
+            health: "paused",
+            prefill_stream: None,
+            prefill_file: Some(prefill_file),
             pending: None,
             refusal: Default::default(),
         })
@@ -290,6 +377,7 @@ impl Host {
             head: record.certificate.header,
             pool: Pool::new(&genesis)?,
             prefill_stream: None,
+            prefill_file: None,
             engine,
             genesis,
             identity,

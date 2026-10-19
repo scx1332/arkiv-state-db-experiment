@@ -483,7 +483,11 @@ impl RedbStore {
         })
     }
 
-    fn commit_batch(&self, batch: &CommitBatch) -> (CommitOutcome, Vec<(SpaceId, usize)>, u64) {
+    fn commit_batch(
+        &self,
+        batch: &CommitBatch,
+        headless: bool,
+    ) -> (CommitOutcome, Vec<(SpaceId, usize)>, u64) {
         let _writer = lock(&self.writer);
         // A latched failure answers every call, even a malformed batch.
         if let Some(error) = self.failure() {
@@ -501,7 +505,7 @@ impl RedbStore {
             let mut txn = db.begin_write()?;
             txn.set_durability(Durability::Immediate)?;
             txn.set_quick_repair(self.config.quick_repair);
-            let (objects, records) = stage(&txn, batch)?;
+            let (objects, records) = stage(&txn, batch, headless)?;
             Ok((txn, objects, records))
         })();
         let (txn, objects, records) = match staged {
@@ -538,6 +542,7 @@ impl RedbStore {
 fn stage(
     txn: &WriteTransaction,
     batch: &CommitBatch,
+    headless: bool,
 ) -> Result<(Vec<(SpaceId, usize)>, u64), Fault> {
     let mut meta = txn.open_table(META)?;
     let current = match meta.get(HEAD_KEY)? {
@@ -627,7 +632,9 @@ fn stage(
         }
     }
 
-    meta.insert(HEAD_KEY, batch.new_head.encode().as_slice())?;
+    if !headless {
+        meta.insert(HEAD_KEY, batch.new_head.encode().as_slice())?;
+    }
     Ok((new_objects, new_records))
 }
 
@@ -1028,11 +1035,19 @@ impl VersionedStore for RedbStore {
 
     fn commit(&self, batch: &CommitBatch) -> CommitOutcome {
         let mut timing = self.timings[3].start();
-        let (outcome, objects, records) = self.commit_batch(batch);
+        let (outcome, objects, records) = self.commit_batch(batch, false);
         self.stats.commit(&outcome, &objects, records);
         if matches!(outcome, CommitOutcome::Committed) {
             timing.success();
         }
+        outcome
+    }
+
+    fn stage_objects(&self, objects: &[(SpaceId, ObjectId, Vec<u8>)]) -> CommitOutcome {
+        let mut batch = CommitBatch::new(None, Head::default());
+        batch.objects = objects.to_vec();
+        let (outcome, objects, records) = self.commit_batch(&batch, true);
+        self.stats.commit(&outcome, &objects, records);
         outcome
     }
 

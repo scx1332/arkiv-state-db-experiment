@@ -121,7 +121,7 @@ impl VersionedStore for MemoryVersionedStore {
     }
 
     fn commit(&self, batch: &CommitBatch) -> CommitOutcome {
-        let outcome = self.apply(batch);
+        let outcome = self.apply(batch, false);
         match outcome {
             Ok((new_objects, new_records)) => {
                 let outcome = CommitOutcome::Committed;
@@ -133,6 +133,19 @@ impl VersionedStore for MemoryVersionedStore {
                 self.stats.commit(&outcome, &[], 0);
                 outcome
             }
+        }
+    }
+
+    fn stage_objects(&self, objects: &[(SpaceId, ObjectId, Vec<u8>)]) -> CommitOutcome {
+        let mut batch = CommitBatch::new(None, Head::default());
+        batch.objects = objects.to_vec();
+        match self.apply(&batch, true) {
+            Ok((objects, records)) => {
+                self.stats
+                    .commit(&CommitOutcome::Committed, &objects, records);
+                CommitOutcome::Committed
+            }
+            Err(error) => CommitOutcome::NotCommitted(error),
         }
     }
 
@@ -168,7 +181,11 @@ fn copy_bounded(bytes: &[u8], max_bytes: usize) -> Result<Vec<u8>, StorageError>
 impl MemoryVersionedStore {
     /// Checks the whole batch against the current state, then applies it.
     /// Returns the objects and the number of records newly stored.
-    fn apply(&self, batch: &CommitBatch) -> Result<(Vec<(SpaceId, usize)>, u64), StorageError> {
+    fn apply(
+        &self,
+        batch: &CommitBatch,
+        headless: bool,
+    ) -> Result<(Vec<(SpaceId, usize)>, u64), StorageError> {
         batch.validate()?;
         let mut state = self.write();
         if state.head != batch.expected_head {
@@ -206,7 +223,9 @@ impl MemoryVersionedStore {
                 slot.insert(value.clone());
             }
         }
-        state.head = Some(batch.new_head);
+        if !headless {
+            state.head = Some(batch.new_head);
+        }
         Ok((new_objects, new_records))
     }
 }

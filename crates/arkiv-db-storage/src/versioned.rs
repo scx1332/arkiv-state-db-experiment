@@ -672,6 +672,16 @@ pub trait VersionedStore: ObjectReader {
     /// Applies a batch atomically against the expected head.
     fn commit(&self, batch: &CommitBatch) -> CommitOutcome;
 
+    /// Durably stages immutable objects in an unpublished, headless store.
+    /// Rejects a published store. Idempotent retries are allowed; no records
+    /// or head are published. Callers must bound the supplied batch.
+    fn stage_objects(&self, _objects: &[(SpaceId, ObjectId, Vec<u8>)]) -> CommitOutcome {
+        CommitOutcome::NotCommitted(StorageError::new(
+            StorageErrorKind::Incompatible,
+            "headless object staging unsupported",
+        ))
+    }
+
     /// Whether calls are served or a failure has latched.
     fn health(&self) -> Health;
 
@@ -724,6 +734,9 @@ impl<T: VersionedStore + ?Sized> VersionedStore for Arc<T> {
     fn commit(&self, batch: &CommitBatch) -> CommitOutcome {
         (**self).commit(batch)
     }
+    fn stage_objects(&self, objects: &[(SpaceId, ObjectId, Vec<u8>)]) -> CommitOutcome {
+        (**self).stage_objects(objects)
+    }
     fn health(&self) -> Health {
         (**self).health()
     }
@@ -769,6 +782,9 @@ impl<T: VersionedStore + ?Sized> VersionedStore for Box<T> {
     }
     fn commit(&self, batch: &CommitBatch) -> CommitOutcome {
         (**self).commit(batch)
+    }
+    fn stage_objects(&self, objects: &[(SpaceId, ObjectId, Vec<u8>)]) -> CommitOutcome {
+        (**self).stage_objects(objects)
     }
     fn health(&self) -> Health {
         (**self).health()

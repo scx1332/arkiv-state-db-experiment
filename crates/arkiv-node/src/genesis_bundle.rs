@@ -89,6 +89,14 @@ impl Encode for PrefillEntity {
 impl Decode for PrefillEntity {
     const MIN_ENCODED_LEN: usize = 65;
     fn decode_from(d: &mut Decoder<'_>) -> std::result::Result<Self, DecodeError> {
+        Self::decode_with_attribute_limit(d, 23)
+    }
+}
+impl PrefillEntity {
+    pub(crate) fn decode_with_attribute_limit(
+        d: &mut Decoder<'_>,
+        max_attributes: u32,
+    ) -> std::result::Result<Self, DecodeError> {
         let creator = d.array()?;
         let create_nonce = d.u64()?;
         let salt = u128::from_be_bytes(d.array()?);
@@ -105,7 +113,7 @@ impl Decode for PrefillEntity {
         }
         let payload = payload.to_vec();
         let count = d.u32()?;
-        if count > 23 || count as usize > d.remaining() / 7 {
+        if count > max_attributes || count as usize > d.remaining() / 7 {
             return Err(invalid("attribute count"));
         }
         let mut attributes = Vec::with_capacity(count as usize);
@@ -245,6 +253,7 @@ pub fn decode_stream(bytes: &[u8]) -> Result<Vec<PrefillEntity>> {
 /// namespace=entities/ordinal1, builder=1 and sponsored finite rent policy=1.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrefillLaunch {
+    pub version: u32,
     pub limits: PrefillLimits,
     pub sponsor: [u8; 20],
     pub stream_hash: B256,
@@ -257,7 +266,11 @@ pub struct PrefillLaunch {
 }
 impl PrefillLaunch {
     pub fn validate(&self, g: &SignedGenesis) -> Result<()> {
-        self.limits.validate()?;
+        match self.version {
+            1 => self.limits.validate()?,
+            2 => crate::genesis_streaming::validate_limits(self.limits)?,
+            _ => return Err("unsupported prefill version".into()),
+        }
         if self.row_count > self.limits.max_entities
             || self.canonical_bytes > self.limits.max_canonical_bytes
             || self.canonical_bytes < 20
@@ -276,7 +289,7 @@ impl PrefillLaunch {
 }
 impl Encode for PrefillLaunch {
     fn encode_to(&self, e: &mut Encoder) {
-        e.u32(1);
+        e.u32(self.version);
         e.put(&self.limits);
         e.fixed(&self.sponsor);
         e.put(&self.stream_hash);
@@ -292,11 +305,23 @@ impl Decode for PrefillLaunch {
     const MIN_ENCODED_LEN: usize =
         4 + 24 + 20 + 32 + 8 + 8 + 32 + StateHeader::MIN_ENCODED_LEN + 32 + 8;
     fn decode_from(d: &mut Decoder<'_>) -> std::result::Result<Self, DecodeError> {
-        if d.u32()? != 1 {
+        let version = d.u32()?;
+        if version != 1 && version != 2 {
             return Err(invalid("launch version"));
         }
+        let limits = PrefillLimits {
+            max_entities: d.u64()?,
+            max_canonical_bytes: d.u64()?,
+            max_storage_units: d.u64()?,
+        };
+        if version == 1 {
+            limits.validate().map_err(|_| invalid("limits"))?;
+        } else {
+            crate::genesis_streaming::validate_limits(limits).map_err(|_| invalid("limits"))?;
+        }
         Ok(Self {
-            limits: d.get()?,
+            version,
+            limits,
             sponsor: d.array()?,
             stream_hash: d.get()?,
             row_count: d.u64()?,
@@ -310,20 +335,27 @@ impl Decode for PrefillLaunch {
 }
 pub fn recipe_hash(g: &SignedGenesis, p: &PrefillLaunch) -> B256 {
     let mut e = Encoder::new();
-    e.u32(1);
+    e.u32(p.version);
     e.put(&g.genesis);
     e.fixed(&g.run_id);
     e.fixed(&g.proposer);
     e.u64(g.block_period_ms);
     e.put(&g.limits);
     e.put(&g.accounts);
-    e.u32(1);
+    e.u32(p.version);
     e.put(&p.limits);
     e.fixed(&p.sponsor);
     e.put(&p.stream_hash);
     e.u64(p.row_count);
     e.u64(p.canonical_bytes);
-    digest(RECIPE_DOMAIN, &e.into_bytes())
+    digest(
+        if p.version == 1 {
+            RECIPE_DOMAIN
+        } else {
+            "arkiv/genesis-recipe/v2"
+        },
+        &e.into_bytes(),
+    )
 }
 struct Constructed {
     candidate: SealedCandidate,
@@ -467,6 +499,7 @@ pub fn build_genesis(
     let stream = encode_stream(entities)?;
     let built = construct(&base, limits, sponsor, &stream)?;
     let mut p = PrefillLaunch {
+        version: 1,
         limits,
         sponsor,
         stream_hash: digest(STREAM_DOMAIN, &stream),
@@ -485,6 +518,9 @@ pub fn build_genesis(
 pub fn verified_candidate(g: &SignedGenesis, stream: &[u8]) -> Result<SealedCandidate> {
     g.validate().map_err(err)?;
     let p = g.prefill.as_ref().ok_or("genesis has no prefill profile")?;
+    if p.version != 1 {
+        return Err("streaming prefill requires file-backed verification".into());
+    }
     if stream.len() as u64 != p.canonical_bytes || digest(STREAM_DOMAIN, stream) != p.stream_hash {
         return Err("prefill stream hash/length mismatch".into());
     }

@@ -29,7 +29,8 @@ pub fn import_options(mut options: Options) -> Options {
     options.cache_entries = IMPORT_CACHE_ENTRIES;
     options
 }
-fn import_redb_config() -> RedbConfig {
+/// Bounded redb page cache for private import copies, including final installation.
+pub fn import_redb_config() -> RedbConfig {
     RedbConfig::with_cache_size(IMPORT_CACHE_BYTES)
 }
 fn compaction_progress(

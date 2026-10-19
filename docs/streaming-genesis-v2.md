@@ -55,10 +55,23 @@ A replay batch defaults to 1 MiB of canonical row bytes, plus at most one
 bounded row. A durable preparation limit triggers a retry from the last
 committed cursor with a smaller batch. Failure at one-row granularity is explicit.
 Import-only decoded-node caching is capped at 256 MiB and 262,144 entries; each
-import redb handle has a 256 MiB page cache. Copying uses two redb handles, so
-their caches plus the decoded cache have a combined configured ceiling of
-768 MiB, excluding batch buffers, traversal stacks and allocator overhead.
-Live node cache defaults are unchanged. No
+import redb handle has a 256 MiB page cache, including a headless streaming
+import's final destination. During object traversal, the two handles used by a
+copy plus the source engine's decoded cache have a combined configured ceiling
+of 768 MiB. Staging compaction also keeps the final destination open, bringing
+this to 1 GiB. At generation publication, the replacement engine's 256 MiB
+decoded-cache allowance briefly coexists with the source engine's allowance
+until the source is dropped. The conservative simultaneous configured ceiling
+is therefore 1.25 GiB: three redb caches and two decoded caches, excluding
+ordinary history/runtime caches, batch buffers, traversal stacks and allocator
+overhead. The replacement decoded cache starts cold; its configured allowance
+does not imply immediate allocation of 256 MiB. A copy also uses a fixed
+16,384-slot, 768 KiB cache of
+successfully traversed posting roots, namespace ordinals and validated lengths.
+Collisions only repeat work; they cannot omit objects or bypass count checks.
+Existing node opens and history/header stores keep the default 8 MiB redb cache.
+The process that installs a streaming genesis retains its 256 MiB destination
+cache until it exits; subsequent opens use the normal default. No
 whole-dataset entity array, key set, report array or reachable-object visited set
 is retained in RAM. The importer reuses ordinary height-zero entity operations,
 including typed indexes, expiry accounting, record allocators and creator nonces.
@@ -91,6 +104,19 @@ node metadata. A failed copy can restart idempotently; it currently traverses
 again from the beginning. Normal node open refuses an unfinished headless store.
 Successful installation removes importer scratch. Bundle publication uses synced
 files and an atomic no-replace directory rename.
+
+A fresh producer supplied with `--bundle` performs three standalone stream
+audits: the supplied bundle, the actual local copy, and the retained serving
+file after final database installation. The local audit retains an open file
+descriptor and a private summary bound to the signed genesis. An inode check
+ensures the published hard link names that descriptor, and replay consumes that
+same descriptor instead of reopening its pathname. Replay still checks every
+frame, the full stream hash/count/length, recovered checkpoint prefixes, and
+derived state, rent and storage units. The final audit catches pathname or
+content changes during the final copy. Public standalone verification continues
+to audit its input on every call. These checks replace the former immediate
+duplicate local-file audit and the audit at replay entry; no filename or
+timestamp is accepted as proof of file contents.
 
 ## Resource policy
 
@@ -150,6 +176,51 @@ exit. It passed on the real 16-contract / 263-entity Sourcify fixture:
 - Live signed write at block one, persisted receipt, and restart of all roles.
 - No prefill file in the light-node directory.
 
+After bounded posting reuse, the 256 MiB final-destination cache, and the
+five-to-three producer audit reduction, the same release-build fixture passed
+again with the unchanged genesis/state commitments. The isolated acceptance
+run took 1.762 seconds and peaked at 52.9 MiB cgroup memory with no swap; this
+small fixture does not measure large-import speedup. Focused validation also
+passed 46 database library tests, three database streaming-import tests, two
+redb streaming-import tests, twelve streaming/recovery tests and three proposer
+tests. New cases cover cache collisions and namespace separation, malformed
+posting counts, missing/corrupt objects, copy-flush failures and retry, retained
+inode replacement, same-inode mutation/truncation, genesis binding and finalized
+checkpoint recovery. Clippy with warnings denied, formatting and diff checks
+passed. Logs and the smoke acceptance result are retained under
+`operations/runs/producer-optimization` in the parent workspace.
+
+A fresh producer then imported the original 100,000-contract / 445,583-entity
+bundle (1,858,260,091 canonical bytes) and reached the expected height-zero
+genesis hash and state root in **1,270.554 seconds (21m 10.6s)**. This producer
+measurement used a fresh destination and the unchanged canonical bundle under
+the 32 GiB memory cap, no swap and 80 GiB disk reserve. The process was stopped
+after readiness; it did not rerun the full three-role acceptance at this scale.
+
+| Measurement | Historical baseline | Optimized run |
+| --- | ---: | ---: |
+| Producer readiness | approximately 1,300–1,310 s | 1,270.554 s |
+| Standalone audits | 5 passes, 89.944 s | 3 passes, 53.036 s |
+| Replay including compaction | 958.354 s | 975.555 s |
+| Compaction | 133.363 s | 132.430 s |
+| Replay excluding compaction | 824.990 s | 843.125 s |
+| Process physical bytes written | 169,436,819,456 | 168,471,179,264 |
+
+The interval from replay completion to the final audit was 238.226 seconds.
+It includes final installation and surrounding overhead; the inner object copy
+was not separately timed. Peak process RSS was 965,676 KiB (943.0 MiB), while
+peak cgroup memory was 15,356,203,008 bytes (14.30 GiB), including file cache.
+All memory-event counters remained zero and no swap was used.
+
+The observed readiness improvement is only about 2–3%, and physical writes fell
+about 0.6%. These are historical comparisons, not a controlled repeated A/B
+benchmark. The audit reduction is clear, but replay excluding compaction took
+longer in this run and compaction was nearly unchanged. These changes do not
+solve the main import bottleneck. Raw measurements are in the parent workspace's
+`operations/runs/producer-optimization/producer-100k/result.json` and
+`events.jsonl`; the input and original acceptance are documented in
+[the 100,000-contract validation report](streaming-prefill-100k-validation.md).
+
 Debug-build streaming construction of synthetic 29-attribute entities with
 1 KiB payloads, on the local host, produced these preliminary measurements
 using the original 64 KiB batches and 8 MiB caches (before the import tuning):
@@ -168,7 +239,7 @@ published at interruption. Resumption produced the exact same genesis hash as
 the uninterrupted run and removed completed scratch. This does not exhaust
 all power-loss or disk-full timing windows.
 
-Larger representative inputs, disk amplification and long-running import
+Inputs beyond this 445,583-entity sample, disk amplification and sustained import
 throughput remain the next scale gate.
 
 The complete Rust workspace test run passed 1,174 tests with four intentionally

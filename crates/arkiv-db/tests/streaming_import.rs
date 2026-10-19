@@ -1,5 +1,6 @@
 use arkiv_db::{
-    PriceSchedule,
+    Budget, Cell, CellName, Literal, NamespaceId, NamespaceName, OwnerId, PriceSchedule,
+    Projection, Query, RecordKey, Term, Value, WriteOp,
     durable::{DurableEngine, EngineGenesis, Initialization, Options, Publication},
 };
 use arkiv_db_memory::MemoryVersionedStore;
@@ -118,7 +119,8 @@ fn incomplete_copy_is_headless_and_restarts_idempotently() {
             .initialize_from_staged(
                 Arc::new(InterruptCopy {
                     store: target.clone(),
-                    calls: std::sync::atomic::AtomicUsize::new(0)
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                    fail_on: 2,
                 }),
                 genesis.clone(),
                 small
@@ -148,9 +150,143 @@ fn incomplete_copy_is_headless_and_restarts_idempotently() {
     );
 }
 
+#[test]
+fn shared_postings_survive_copy_interruptions_and_reopen() {
+    let source = Arc::new(MemoryVersionedStore::new());
+    let original = EngineGenesis::new([12; 32], PriceSchedule::FIXTURE);
+    let mut stage =
+        committed(DurableEngine::initialize(source, original, Options::default()).unwrap());
+    let owner = OwnerId::new([1; 20]);
+    let mut branch = stage.begin(stage.head(), None).unwrap();
+    for ordinal in 1..=2 {
+        let namespace = NamespaceId::from_ordinal(ordinal).unwrap();
+        branch
+            .execute(
+                owner,
+                WriteOp::CreateNamespace {
+                    name: NamespaceName::new(&format!("copy{ordinal}")).unwrap(),
+                },
+                Budget::unlimited(),
+            )
+            .unwrap();
+        for i in 0..32u8 {
+            branch
+                .execute(
+                    owner,
+                    WriteOp::CreateRecord {
+                        namespace,
+                        key: RecordKey::new(&[i]).unwrap(),
+                        // Both existence and value terms share the same tree,
+                        // and the second namespace has identical posting roots.
+                        cells: ["first", "second"]
+                            .into_iter()
+                            .map(|name| {
+                                (CellName::new(name).unwrap(), Cell::attribute(Value::U64(7)))
+                            })
+                            .collect(),
+                    },
+                    Budget::unlimited(),
+                )
+                .unwrap();
+        }
+    }
+    stage.prepare_import(branch.seal(), b"shared").unwrap();
+    assert!(matches!(stage.commit().unwrap(), Publication::Committed(_)));
+    let mut genesis = EngineGenesis::new([13; 32], PriceSchedule::FIXTURE);
+    genesis.initial_state = Some(stage.head_snapshot().state_header());
+    let options = Options {
+        prepare_bytes: 4096,
+        prepare_objects: 2,
+        ..Options::default()
+    };
+    let complete = Arc::new(InterruptCopy {
+        store: Arc::new(MemoryVersionedStore::new()),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        fail_on: usize::MAX,
+    });
+    committed(
+        stage
+            .initialize_from_staged(complete.clone(), genesis.clone(), options.clone())
+            .unwrap(),
+    );
+    let calls = complete.calls.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(calls > 2);
+    // Include the final flush, after the repeated posting references were seen.
+    for fail_on in [0, calls / 2, calls - 1] {
+        let target = Arc::new(MemoryVersionedStore::new());
+        assert!(
+            stage
+                .initialize_from_staged(
+                    Arc::new(InterruptCopy {
+                        store: target.clone(),
+                        calls: std::sync::atomic::AtomicUsize::new(0),
+                        fail_on,
+                    }),
+                    genesis.clone(),
+                    options.clone(),
+                )
+                .is_err()
+        );
+        assert_eq!(target.head().unwrap(), None);
+        assert!(
+            target
+                .read_record(Table::Meta, b"engine/genesis")
+                .unwrap()
+                .is_none()
+        );
+        committed(
+            stage
+                .initialize_from_staged(target.clone(), genesis.clone(), options.clone())
+                .unwrap(),
+        );
+        let copied = DurableEngine::open(target, genesis.clone(), options.clone()).unwrap();
+        assert_eq!(
+            copied.head_snapshot().state_header(),
+            stage.head_snapshot().state_header()
+        );
+        assert_eq!(
+            copied.import_checkpoint(6).unwrap(),
+            Some(b"shared".to_vec())
+        );
+        for ordinal in 1..=2 {
+            let namespace = NamespaceId::from_ordinal(ordinal).unwrap();
+            for name in ["first", "second"] {
+                let query = Query::all(vec![Literal::of(Term::eq(
+                    CellName::new(name).unwrap(),
+                    Value::U64(7),
+                ))]);
+                assert_eq!(
+                    copied
+                        .head_snapshot()
+                        .try_count(namespace, &query, Budget::unlimited())
+                        .unwrap()
+                        .unwrap()
+                        .value,
+                    32
+                );
+            }
+            let key = RecordKey::new(&[31]).unwrap();
+            let original = stage
+                .head_snapshot()
+                .try_get_record(namespace, &key, &Projection::ALL, Budget::unlimited())
+                .unwrap()
+                .unwrap()
+                .value;
+            let actual = copied
+                .head_snapshot()
+                .try_get_record(namespace, &key, &Projection::ALL, Budget::unlimited())
+                .unwrap()
+                .unwrap()
+                .value;
+            assert_eq!(actual, original);
+        }
+    }
+}
+
 struct InterruptCopy {
     store: Arc<MemoryVersionedStore>,
     calls: std::sync::atomic::AtomicUsize,
+    fail_on: usize,
 }
 use arkiv_db_storage::versioned::{
     CommitBatch, CommitOutcome, DatabaseId, Head, Health, ObjectId, ObjectReader, SpaceId,
@@ -200,7 +336,7 @@ impl VersionedStore for InterruptCopy {
         self.store.stats()
     }
     fn stage_objects(&self, objects: &[(SpaceId, ObjectId, Vec<u8>)]) -> CommitOutcome {
-        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 2 {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == self.fail_on {
             return CommitOutcome::NotCommitted(StorageError::new(
                 StorageErrorKind::Io,
                 "interrupted copy",

@@ -60,12 +60,22 @@ fn signer(path: &str) -> Result<Signer> {
     let raw = unhex(text.trim(), 32)?;
     Signer::from_bytes(raw.try_into().map_err(|_| Error("InvalidKey"))?)
 }
-fn store(path: &Path) -> Result<Arc<RedbStore>> {
-    Ok(Arc::new(if path.exists() {
+fn store(path: &Path, streaming_import: bool) -> Result<Arc<RedbStore>> {
+    let opened = if path.exists() {
         RedbStore::open(path, RedbConfig::default())?
     } else {
         RedbStore::create(path, RedbConfig::default())?
-    }))
+    };
+    if streaming_import && opened.head()?.is_none() {
+        // Only a headless streaming-import destination gets the larger bounded
+        // cache. Existing nodes and non-state stores retain the normal default.
+        drop(opened);
+        return Ok(Arc::new(RedbStore::open(
+            path,
+            arkiv_node::genesis_streaming::import_redb_config(),
+        )?));
+    }
+    Ok(Arc::new(opened))
 }
 fn write_new(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
     use std::io::Write;
@@ -176,10 +186,12 @@ fn authoring_error(error: String) -> Error {
     eprintln!("{error}");
     Error("InvalidGenesisBundle")
 }
-#[derive(Clone)]
 enum PrefillSource {
     Small(Vec<u8>),
-    Streaming(PathBuf),
+    Streaming {
+        path: PathBuf,
+        verified: arkiv_node::genesis_streaming::VerifiedStream,
+    },
 }
 fn streaming(genesis: &SignedGenesis) -> bool {
     genesis.prefill.as_ref().is_some_and(|p| p.version == 2)
@@ -212,7 +224,7 @@ fn local_prefill(
     }
     let target = path.join("prefill.bin");
     if streaming(genesis) {
-        if !target.exists() {
+        let verified = if !target.exists() {
             let source = supplied.ok_or(Error("PrefillBundleRequired"))?;
             arkiv_node::genesis_streaming::check_disk(
                 path,
@@ -226,20 +238,27 @@ fn local_prefill(
             let temporary = path.join("prefill.copy.pending");
             // A partial copy is disposable; publication is atomic and no-clobber.
             std::fs::copy(source, &temporary).map_err(|_| Error("StorageUnavailable"))?;
-            arkiv_node::genesis_streaming::verify_stream_file(genesis, &temporary)
+            let file = std::fs::File::open(&temporary).map_err(|_| Error("StorageUnavailable"))?;
+            file.sync_all().map_err(|_| Error("StorageUnavailable"))?;
+            let verified = arkiv_node::genesis_streaming::VerifiedStream::from_file(genesis, file)
                 .map_err(authoring_error)?;
-            std::fs::File::open(&temporary)
-                .and_then(|f| f.sync_all())
-                .map_err(|_| Error("StorageUnavailable"))?;
             std::fs::hard_link(&temporary, &target).map_err(|_| Error("StorageUnavailable"))?;
+            verified
+                .check_path_identity(&target)
+                .map_err(authoring_error)?;
             std::fs::remove_file(&temporary).map_err(|_| Error("StorageUnavailable"))?;
             std::fs::File::open(path)
                 .and_then(|f| f.sync_all())
                 .map_err(|_| Error("StorageUnavailable"))?;
-        }
-        arkiv_node::genesis_streaming::verify_stream_file(genesis, &target)
-            .map_err(authoring_error)?;
-        return Ok(Some(PrefillSource::Streaming(target)));
+            verified
+        } else {
+            arkiv_node::genesis_streaming::VerifiedStream::open(genesis, &target)
+                .map_err(authoring_error)?
+        };
+        return Ok(Some(PrefillSource::Streaming {
+            path: target,
+            verified,
+        }));
     }
     let stream = read_file(
         supplied
@@ -265,10 +284,13 @@ fn create_host(
     path: &Path,
 ) -> Result<Host> {
     match prefill {
-        Some(PrefillSource::Streaming(input)) => {
-            let staged = arkiv_node::genesis_streaming::prepare_streaming(
+        Some(PrefillSource::Streaming {
+            path: input,
+            verified,
+        }) => {
+            let staged = arkiv_node::genesis_streaming::prepare_verified_streaming(
                 &genesis,
-                &input,
+                verified,
                 &path.join("prefill-work"),
                 options.clone(),
             )
@@ -300,8 +322,12 @@ fn create_host(
                 signer,
                 options,
                 &staged,
-                input,
+                input.clone(),
             )?;
+            // Host serves the retained pathname. Re-audit after the final copy
+            // to catch path replacement or inode mutation since replay ended.
+            arkiv_node::genesis_streaming::verify_stream_file(&host.genesis, &input)
+                .map_err(authoring_error)?;
             drop(staged);
             if let Err(error) = std::fs::remove_dir_all(path.join("prefill-work")) {
                 eprintln!("genesis installed; could not remove import scratch: {error}");
@@ -326,7 +352,7 @@ fn create_host(
 fn attach_prefill(host: &mut Host, prefill: Option<PrefillSource>) {
     match prefill {
         Some(PrefillSource::Small(bytes)) => host.prefill_stream = Some(bytes),
-        Some(PrefillSource::Streaming(path)) => host.prefill_file = Some(path),
+        Some(PrefillSource::Streaming { path, .. }) => host.prefill_file = Some(path),
         None => {}
     }
 }
@@ -719,8 +745,8 @@ async fn run() -> Result<()> {
         ..Options::default()
     };
     let databases = std::cell::RefCell::new(Vec::new());
-    let store = |path: &Path| -> Result<Arc<RedbStore>> {
-        let opened = store(path)?;
+    let store = |path: &Path, streaming_import: bool| -> Result<Arc<RedbStore>> {
+        let opened = store(path, streaming_import)?;
         let name = match path.file_name().and_then(|s| s.to_str()) {
             Some("node.redb") => "state",
             Some("history.redb") => "history",
@@ -741,8 +767,22 @@ async fn run() -> Result<()> {
             return Err(Error("InvalidRequest"));
         }
         let s = signer(required("--key-file")?)?;
-        let state = store(&path.join("node.redb"))?;
-        let history_store = store(&path.join("history.redb"))?;
+        let retained_genesis = path.join("genesis.bin");
+        let streaming_import = if let Some((genesis, _)) = &bundle {
+            streaming(genesis)
+        } else if retained_genesis.exists() {
+            streaming(
+                &decode_exact(&read_file(
+                    retained_genesis.to_str().ok_or(Error("InvalidRequest"))?,
+                    65536,
+                )?)
+                .map_err(|_| Error("IdentityMismatch"))?,
+            )
+        } else {
+            false
+        };
+        let state = store(&path.join("node.redb"), streaming_import)?;
+        let history_store = store(&path.join("history.redb"), false)?;
         let mut host = if state.head()?.is_some() {
             let id = DurableEngine::read_simulator_identity(state.as_ref())?;
             let genesis: SignedGenesis =
@@ -768,7 +808,11 @@ async fn run() -> Result<()> {
                 return Err(Error("IdentityMismatch"));
             }
             let history = History::open(history_store, genesis.hash())?;
-            Host::open(state, history, &genesis, Some(s), options.clone())?
+            let mut host = Host::open(state, history, &genesis, Some(s), options.clone())?;
+            let prefill =
+                local_prefill(&path, &genesis, bundle.as_ref().map(|(_, b)| b.as_path()))?;
+            attach_prefill(&mut host, prefill);
+            host
         } else {
             let proposed = if let Some((genesis, _)) = &bundle {
                 genesis.clone()
@@ -840,14 +884,6 @@ async fn run() -> Result<()> {
                 &path,
             )?
         };
-        if host.genesis.prefill.is_some() {
-            let prefill = local_prefill(
-                &path,
-                &host.genesis,
-                bundle.as_ref().map(|(_, b)| b.as_path()),
-            )?;
-            attach_prefill(&mut host, prefill);
-        }
         match get("--start", "paused").as_str() {
             "paused" => {}
             "running" => {
@@ -910,7 +946,7 @@ async fn run() -> Result<()> {
         retain_public(&path.join("genesis.bin"), &encode(&genesis))?;
         retain_public(&path.join("certificate.bin"), &encode(&certificate))?;
         if command == "light" {
-            let state = store(&path.join("headers.redb"))?;
+            let state = store(&path.join("headers.redb"), false)?;
             let light = if state.head()?.is_some() {
                 Light::open(state, &genesis)?
             } else {
@@ -954,15 +990,17 @@ async fn run() -> Result<()> {
             } else {
                 None
             };
-            let state = store(&path.join("node.redb"))?;
-            let hs = store(&path.join("history.redb"))?;
+            let state = store(&path.join("node.redb"), streaming(&genesis))?;
+            let hs = store(&path.join("history.redb"), false)?;
             let history = if hs.head()?.is_some() {
                 History::open(hs, genesis.hash())?
             } else {
                 History::create(hs, genesis.hash())?
             };
             let mut host = if state.head()?.is_some() {
-                Host::open(state, history, &genesis, None, options.clone())?
+                let mut host = Host::open(state, history, &genesis, None, options.clone())?;
+                attach_prefill(&mut host, prefill);
+                host
             } else {
                 create_host(
                     state,
@@ -972,11 +1010,10 @@ async fn run() -> Result<()> {
                     certificate,
                     None,
                     options.clone(),
-                    prefill.clone(),
+                    prefill,
                     &path,
                 )?
             };
-            attach_prefill(&mut host, prefill);
             if host.identity != identity {
                 return Err(Error("IdentityMismatch"));
             }

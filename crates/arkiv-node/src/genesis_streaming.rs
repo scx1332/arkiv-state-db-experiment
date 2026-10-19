@@ -15,12 +15,12 @@ use arkiv_db::{
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{BufReader, Read, Write},
+    io::{BufReader, Read, Seek, Write},
     path::Path,
     time::{Duration, Instant},
 };
 
-pub use crate::genesis_streaming_compaction::check_disk;
+pub use crate::genesis_streaming_compaction::{check_disk, import_redb_config};
 
 type Result<T> = std::result::Result<T, String>;
 fn err(e: impl std::fmt::Debug) -> String {
@@ -210,7 +210,10 @@ fn validate_row(row: &PrefillEntity) -> Result<()> {
     Ok(())
 }
 pub fn audit_stream(path: &Path, limits: PrefillLimits) -> Result<StreamSummary> {
-    let file = File::open(path).map_err(err)?;
+    audit_file(&mut File::open(path).map_err(err)?, limits)
+}
+fn audit_file(file: &mut File, limits: PrefillLimits) -> Result<StreamSummary> {
+    file.rewind().map_err(err)?;
     let bytes = file.metadata().map_err(err)?.len();
     let mut reader = StreamReader::new(BufReader::new(file), limits)?;
     let mut progress = Progress::new("audit", reader.rows, bytes);
@@ -221,6 +224,51 @@ pub fn audit_stream(path: &Path, limits: PrefillLimits) -> Result<StreamSummary>
     let summary = reader.finish()?;
     progress.report(summary.rows, summary.bytes, None, true);
     Ok(summary)
+}
+
+/// An audited local inode, bound to one signed genesis. The descriptor is kept
+/// open through replay so replacing a pathname cannot substitute its input.
+/// Replay still checks the complete stream hash to detect changes to the inode.
+pub struct VerifiedStream {
+    file: File,
+    summary: StreamSummary,
+    genesis_hash: B256,
+}
+impl VerifiedStream {
+    pub fn open(g: &SignedGenesis, path: &Path) -> Result<Self> {
+        Self::from_file(g, File::open(path).map_err(err)?)
+    }
+    /// Audit the actual descriptor the caller retained or copied.
+    pub fn from_file(g: &SignedGenesis, mut file: File) -> Result<Self> {
+        g.validate().map_err(err)?;
+        let p = g
+            .prefill
+            .as_ref()
+            .filter(|p| p.version == 2)
+            .ok_or("expected streaming prefill v2")?;
+        let summary = audit_file(&mut file, p.limits)?;
+        if summary.rows != p.row_count
+            || summary.bytes != p.canonical_bytes
+            || summary.hash != p.stream_hash
+        {
+            return Err("prefill commitment mismatch".into());
+        }
+        Ok(Self {
+            file,
+            summary,
+            genesis_hash: g.hash(),
+        })
+    }
+    /// Check that a newly retained hard link names the inode we audited. This is
+    /// an association check, not a substitute for hashing mutable file contents.
+    pub fn check_path_identity(&self, path: &Path) -> Result<()> {
+        let opened = rustix::fs::fstat(&self.file).map_err(err)?;
+        let retained = rustix::fs::stat(path).map_err(err)?;
+        if opened.st_dev != retained.st_dev || opened.st_ino != retained.st_ino {
+            return Err("prefill pathname changed after verification".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -284,6 +332,28 @@ fn replay(
     path: &Path,
     work_dir: &Path,
     options: Options,
+    batch_bytes: usize,
+    summary: &StreamSummary,
+) -> Result<(DurableEngine, U256, u64)> {
+    replay_file(
+        base,
+        limits,
+        sponsor,
+        &mut File::open(path).map_err(err)?,
+        work_dir,
+        options,
+        batch_bytes,
+        summary,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn replay_file(
+    base: &SignedGenesis,
+    limits: PrefillLimits,
+    sponsor: [u8; 20],
+    file: &mut File,
+    work_dir: &Path,
+    options: Options,
     mut batch_bytes: usize,
     summary: &StreamSummary,
 ) -> Result<(DurableEngine, U256, u64)> {
@@ -292,7 +362,7 @@ fn replay(
             base,
             limits,
             sponsor,
-            path,
+            file,
             work_dir,
             options.clone(),
             batch_bytes,
@@ -312,7 +382,7 @@ fn replay_once(
     base: &SignedGenesis,
     limits: PrefillLimits,
     sponsor: [u8; 20],
-    path: &Path,
+    file: &mut File,
     work_dir: &Path,
     options: Options,
     batch_bytes: usize,
@@ -335,7 +405,8 @@ fn replay_once(
         genesis.clone(),
         options.clone(),
     )?;
-    let mut reader = StreamReader::new(BufReader::new(File::open(path).map_err(err)?), limits)?;
+    file.rewind().map_err(err)?;
+    let mut reader = StreamReader::new(BufReader::new(file), limits)?;
     let checkpoint = engine.import_checkpoint(4096).map_err(err)?;
     let mut initialized = checkpoint.is_some();
     let mut cp = match checkpoint {
@@ -523,20 +594,7 @@ fn replay_once(
 
 /// Verify bounded canonical frames and the signed stream commitment without state replay.
 pub fn verify_stream_file(g: &SignedGenesis, stream: &Path) -> Result<()> {
-    g.validate().map_err(err)?;
-    let p = g
-        .prefill
-        .as_ref()
-        .filter(|p| p.version == 2)
-        .ok_or("expected streaming prefill v2")?;
-    let summary = audit_stream(stream, p.limits)?;
-    if summary.rows != p.row_count
-        || summary.bytes != p.canonical_bytes
-        || summary.hash != p.stream_hash
-    {
-        return Err("prefill commitment mismatch".into());
-    }
-    Ok(())
+    VerifiedStream::open(g, stream).map(|_| ())
 }
 /// Independently reconstruct an authenticated launch into a private resumable store.
 pub fn prepare_streaming(
@@ -545,28 +603,33 @@ pub fn prepare_streaming(
     work_dir: &Path,
     options: Options,
 ) -> Result<DurableEngine> {
+    prepare_verified_streaming(g, VerifiedStream::open(g, stream)?, work_dir, options)
+}
+/// Reuse an audit of the exact local inode, retaining end-to-end replay checks.
+pub fn prepare_verified_streaming(
+    g: &SignedGenesis,
+    mut stream: VerifiedStream,
+    work_dir: &Path,
+    options: Options,
+) -> Result<DurableEngine> {
     g.validate().map_err(err)?;
+    if stream.genesis_hash != g.hash() {
+        return Err("verified prefill genesis mismatch".into());
+    }
     let p = g
         .prefill
         .as_ref()
         .filter(|p| p.version == 2)
         .ok_or("expected streaming prefill v2")?;
-    let summary = audit_stream(stream, p.limits)?;
-    if summary.rows != p.row_count
-        || summary.bytes != p.canonical_bytes
-        || summary.hash != p.stream_hash
-    {
-        return Err("prefill commitment mismatch".into());
-    }
-    let (engine, burn, units) = replay(
+    let (engine, burn, units) = replay_file(
         g,
         p.limits,
         p.sponsor,
-        stream,
+        &mut stream.file,
         work_dir,
         crate::genesis_streaming_compaction::import_options(options),
         DEFAULT_BATCH_BYTES,
-        &summary,
+        &stream.summary,
     )?;
     if engine.head_snapshot().state_header() != p.state
         || burn != p.burned_wei
@@ -777,6 +840,150 @@ mod tests {
             b.extend(f);
         }
         b
+    }
+    fn signed_stream(rows: &[PrefillEntity]) -> SignedGenesis {
+        let mut g = crate::genesis_bundle::build_genesis(
+            base(),
+            PrefillLimits {
+                max_entities: 256,
+                max_canonical_bytes: crate::genesis_bundle::MAX_CANONICAL_BYTES,
+                max_storage_units: crate::genesis_bundle::MAX_STORAGE_UNITS,
+            },
+            [2; 20],
+            rows,
+        )
+        .unwrap();
+        let mut launch = g.prefill.take().unwrap();
+        let bytes = stream(rows);
+        launch.version = 2;
+        launch.limits = limits();
+        launch.stream_hash = digest(STREAM_DOMAIN, &bytes);
+        launch.canonical_bytes = bytes.len() as u64;
+        launch.recipe_hash = recipe_hash(&g, &launch);
+        g.prefill = Some(launch);
+        g.validate().unwrap();
+        g
+    }
+    #[test]
+    fn verified_descriptor_survives_path_replacement_and_standalone_verify_reaudits() {
+        let tmp = Temp::new();
+        let rows = [row(0), row(1)];
+        let g = signed_stream(&rows);
+        let path = tmp.0.join("prefill.bin");
+        fs::write(&path, stream(&rows)).unwrap();
+        let verified = VerifiedStream::open(&g, &path).unwrap();
+        verified.check_path_identity(&path).unwrap();
+        // The old inode stays open, while this pathname now names bad input.
+        fs::rename(&path, tmp.0.join("original.bin")).unwrap();
+        fs::write(&path, b"replacement").unwrap();
+        assert!(verified.check_path_identity(&path).is_err());
+        let engine =
+            prepare_verified_streaming(&g, verified, &tmp.0.join("work"), Options::default())
+                .unwrap();
+        assert_eq!(
+            engine.head_snapshot().state_header(),
+            g.prefill.as_ref().unwrap().state
+        );
+        assert!(verify_stream_file(&g, &path).is_err());
+        assert!(prepare_streaming(&g, &path, &tmp.0.join("bad"), Options::default()).is_err());
+    }
+    #[test]
+    fn verified_replay_rejects_inode_mutation_truncation_and_changed_genesis() {
+        let tmp = Temp::new();
+        let rows = [row(0), row(1)];
+        let g = signed_stream(&rows);
+        let path = tmp.0.join("prefill.bin");
+        let valid = stream(&rows);
+        for mutation in [false, true] {
+            fs::write(&path, &valid).unwrap();
+            let verified = VerifiedStream::open(&g, &path).unwrap();
+            let changed = if mutation {
+                let mut rows = rows.clone();
+                rows[1].payload[0] ^= 1;
+                stream(&rows)
+            } else {
+                valid[..valid.len() - 1].to_vec()
+            };
+            fs::write(&path, changed).unwrap();
+            let error = prepare_verified_streaming(
+                &g,
+                verified,
+                &tmp.0.join(format!("bad-{mutation}")),
+                Options::default(),
+            )
+            .err()
+            .unwrap();
+            if mutation {
+                assert_eq!(error, "prefill stream changed during import");
+            }
+        }
+        fs::write(&path, valid).unwrap();
+        let verified = VerifiedStream::open(&g, &path).unwrap();
+        let mut changed = g.clone();
+        changed.run_id[0] ^= 1;
+        let mut launch = changed.prefill.take().unwrap();
+        launch.recipe_hash = recipe_hash(&changed, &launch);
+        changed.prefill = Some(launch);
+        let error = prepare_verified_streaming(
+            &changed,
+            verified,
+            &tmp.0.join("identity"),
+            Options::default(),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error, "verified prefill genesis mismatch");
+    }
+    #[test]
+    fn retained_link_must_name_the_audited_inode() {
+        let tmp = Temp::new();
+        let rows = [row(0)];
+        let g = signed_stream(&rows);
+        let temporary = tmp.0.join("pending");
+        let target = tmp.0.join("prefill.bin");
+        let original = tmp.0.join("original");
+        fs::write(&temporary, stream(&rows)).unwrap();
+        let verified = VerifiedStream::open(&g, &temporary).unwrap();
+        fs::rename(&temporary, &original).unwrap();
+        fs::write(&temporary, b"replacement").unwrap();
+        fs::hard_link(&temporary, &target).unwrap();
+        assert!(verified.check_path_identity(&target).is_err());
+        fs::remove_file(&target).unwrap();
+        fs::hard_link(&original, &target).unwrap();
+        verified.check_path_identity(&target).unwrap();
+    }
+    #[test]
+    fn verified_finalized_restart_still_checks_prefix_and_derived_state() {
+        let tmp = Temp::new();
+        let rows = [row(0), row(1)];
+        let g = signed_stream(&rows);
+        let path = tmp.0.join("prefill.bin");
+        let work = tmp.0.join("work");
+        fs::write(&path, stream(&rows)).unwrap();
+        let engine = prepare_streaming(&g, &path, &work, Options::default()).unwrap();
+        let state = engine.head_snapshot().state_header();
+        drop(engine);
+        let verified = VerifiedStream::open(&g, &path).unwrap();
+        let mut changed_rows = rows.clone();
+        changed_rows[0].payload[0] ^= 1;
+        fs::write(&path, stream(&changed_rows)).unwrap();
+        // The post-install audit must also reject an in-place same-size change
+        // after replay, while a retained path is used by the serving layer.
+        assert!(verify_stream_file(&g, &path).is_err());
+        let error = prepare_verified_streaming(&g, verified, &work, Options::default())
+            .err()
+            .unwrap();
+        assert_eq!(error, "import checkpoint prefix mismatch");
+        fs::write(&path, stream(&rows)).unwrap();
+        let resumed = prepare_streaming(&g, &path, &work, Options::default()).unwrap();
+        assert_eq!(resumed.head_snapshot().state_header(), state);
+        drop(resumed);
+        let mut changed = g.clone();
+        changed.prefill.as_mut().unwrap().burned_wei += U256::from(1);
+        let error = prepare_streaming(&changed, &path, &work, Options::default())
+            .err()
+            .unwrap();
+        assert_eq!(error, "prefill derived state/rent mismatch");
     }
     #[test]
     fn bounded_reader_rejects_bad_order_frames_truncation_and_trailing() {

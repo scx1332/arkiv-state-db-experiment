@@ -13,7 +13,8 @@ full conversion, bundle build or producer readiness is claimed here.
 - Archive SHA-256: `b792e563a3048a4e5d60a2ab0c3a3fc1ff777df8d60b35c8adfee5db2429b9e9`
 - Runtime image: `sha256:c13a2545a1a3b6169cdfff41abf14336db78e9f1ddc7d1d44ca87ea608217951`
 - Producer SHA-256: `dbfb2e720683f2f07affadd17ad1e84ba7c3d7825fd803feec4919d81096142e`
-- Docker memory: 32 GiB; memory plus swap: 32 GiB (swap disabled).
+- Docker memory: 48 GiB; memory plus swap: 48 GiB (swap disabled).
+  Raised from 32 GiB on October 20 without restarting the container.
 - Free disk reserve: 80 GiB; archive expansion ceiling: 256 GiB.
 - Up to eight transport download attempts with byte-range resume; no automatic
   container or prefill retries/restarts, no overall time limit, no published ports.

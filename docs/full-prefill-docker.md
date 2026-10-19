@@ -15,7 +15,8 @@ full conversion, bundle build or producer readiness is claimed here.
 - Producer SHA-256: `dbfb2e720683f2f07affadd17ad1e84ba7c3d7825fd803feec4919d81096142e`
 - Docker memory: 32 GiB; memory plus swap: 32 GiB (swap disabled).
 - Free disk reserve: 80 GiB; archive expansion ceiling: 256 GiB.
-- No automatic retries/restarts or overall time limit; no published ports.
+- Up to eight transport download attempts with byte-range resume; no automatic
+  container or prefill retries/restarts, no overall time limit, no published ports.
 
 The job runs as uid/gid 1000, with read-only root filesystem, dropped capabilities,
 a bounded temporary filesystem, and a persistent bind-mounted job directory.
@@ -40,9 +41,30 @@ A successful producer stays alive with automatic block production paused.
 
 The source adapter, schema, payload bounds, funding and full-data capacity remain
 subject to validation during the actual run. Failure preserves evidence for
-follow-up; it does not trigger tuning, retries or cleanup of the original input.
+follow-up; it does not trigger tuning, prefill retries or cleanup of the original
+input. Transient download failures retry within the bounded acquisition step.
 
-## Inspect tomorrow
+## Download recovery
+
+The first attempt stopped October 19 at 23:57 Warsaw time after a broken R2
+response stream. It preserved 29,372,186,624 of 39,842,366,403 bytes; conversion
+had not started and Docker reported no OOM. Original status, plan, logs and
+container state are retained in `attempt-1/` under the job directory.
+
+The same container was explicitly restarted October 20 after replacing its
+bootstrap with `scripts/full-prefill-bootstrap.py`. It hashes the existing
+partial in bounded blocks, sends conditional `Range`/`IfMatch` requests for the
+remaining bytes, validates response size/range/ETag, and requires the pinned
+whole-archive SHA-256 before extraction. Transport/service failures get at most
+eight application attempts with exponential backoff capped at 30 seconds;
+identity, checksum and local I/O failures stop immediately. A completed valid
+archive can be reused. Extraction and the later prefill stages remain fresh-only.
+
+Bootstrap paths default to `/run/job`, `/snapshot`, and `/credentials/r2.env`;
+`PREFILL_JOB_ROOT`, `PREFILL_SNAPSHOT_ROOT` and `PREFILL_CREDENTIALS` override
+them for other deployments. The job snapshot is copied from the tracked script.
+
+## Inspect the run
 
 ```sh
 sudo docker ps -a --filter name=arkiv-experiment-full-7m-20261019
@@ -73,4 +95,8 @@ step before inspecting its failure evidence.
 later phases, a verified producer staying alive until SIGTERM, and rejection of
 an existing output directory. The image was also checked for Ethereum Keccak,
 converter dependencies and compatibility with the pinned producer binary.
-These lifecycle checks are not evidence that the full dataset has imported.
+`python3 scripts/test-full-prefill-bootstrap.py` covers interrupted range
+resumption, early EOF, completed archive reuse, completed partial promotion,
+invalid range/status/length/ETag responses, checksum failures, source identity
+pins and exhausted retry budgets. These checks are not evidence that the full
+dataset has imported.

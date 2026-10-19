@@ -2,8 +2,9 @@
 
 The signed node now supports a file-backed, bounded-memory genesis prefill in
 addition to the original small v1 builder. Both paths initialize the same entity
-engine. Import checkpoints are private storage metadata, never chain blocks or
-part of a state root. The final node starts at height zero.
+engine. Version two uses dedicated bulk construction, not incremental entity
+replay. Private scratch is never chain history. The final node starts at height
+zero. See [the bulk construction design](bulk-prefill.md).
 
 ## Build, verify and start
 
@@ -18,7 +19,7 @@ prefill, selects 64 total cells and recalculates the expiry reservation.
 export ARKIV_PREFILL_RESERVE_GIB=80
 arkiv-proposer genesis stream-build /data/base/genesis.bin \
   --prefill /data/converted/prefill.bin --out /data/bundle \
-  --sponsor 0xYOUR_FUNDED_SPONSOR --batch-bytes 1048576
+  --sponsor 0xYOUR_FUNDED_SPONSOR
 arkiv-proposer genesis stream-verify /data/bundle
 arkiv-proposer producer --bundle /data/bundle --run-dir /data/producer \
   --key-file /private/proposer.key --listen 127.0.0.1:9500
@@ -31,7 +32,7 @@ public deployment. No existing explorer or indexer needs to be redeployed to
 bootstrap the node.
 
 The full follower can use `--bundle` or download the pinned canonical stream
-from its peer, independently replay it, and compare the result with genesis.
+from its peer, independently build its state, and compare the result with genesis.
 `GET /signed/v1/prefill/chunk?offset=N&length=M` serves at most 1 MiB binary
 bytes per request under the existing four-worker limit. Downloads retain a
 partial file for resumption; the complete hash and canonical framing are checked
@@ -51,52 +52,47 @@ creator addresses and consecutive per-creator creation nonces. Attribute order,
 value encoding, row counts, total length, trailing bytes and the incremental
 Keccak commitment are checked.
 
-A replay batch defaults to 1 MiB of canonical row bytes, plus at most one
-bounded row. A durable preparation limit triggers a retry from the last
-committed cursor with a smaller batch. Failure at one-row granularity is explicit.
-Import-only decoded-node caching is capped at 256 MiB and 262,144 entries; each
-import redb handle has a 256 MiB page cache, including a headless streaming
-import's final destination. During object traversal, the two handles used by a
-copy plus the source engine's decoded cache have a combined configured ceiling
-of 768 MiB. Staging compaction also keeps the final destination open, bringing
-this to 1 GiB. At generation publication, the replacement engine's 256 MiB
-decoded-cache allowance briefly coexists with the source engine's allowance
-until the source is dropped. The conservative simultaneous configured ceiling
-is therefore 1.25 GiB: three redb caches and two decoded caches, excluding
-ordinary history/runtime caches, batch buffers, traversal stacks and allocator
-overhead. The replacement decoded cache starts cold; its configured allowance
-does not imply immediate allocation of 256 MiB. A copy also uses a fixed
-16,384-slot, 768 KiB cache of
-successfully traversed posting roots, namespace ordinals and validated lengths.
-Collisions only repeat work; they cannot omit objects or bypass count checks.
-Existing node opens and history/header stores keep the default 8 MiB redb cache.
-The process that installs a streaming genesis retains its 256 MiB destination
-cache until it exits; subsequent opens use the normal default. No
-whole-dataset entity array, key set, report array or reachable-object visited set
-is retained in RAM. The importer reuses ordinary height-zero entity operations,
-including typed indexes, expiry accounting, record allocators and creator nonces.
+The bulk builder assigns record IDs in canonical input order, validates entity
+cells and expiry, and calculates rent and storage units. It spills key bindings,
+rows, term/record memberships and host entries into sorted runs. The sorting
+budget is 64 MiB total across four sorters, plus bounded individual entries and
+merge buffers. Each merge opens at most sixteen runs. Run lengths and streaming
+Keccak digests are verified before completion. A common posting list is streamed;
+it is never accumulated as a whole in memory.
 
-Batch/cache settings do not enter genesis identity. Roots and rent are tested
-against the existing v1 builder on compatible fixtures and across batch sizes.
-The v2 64-cell profile admits up to 55 user attributes, preserving the 29 user
-attributes in the real Sourcify fixture. Lifetime remains finite; a new permanent
-storage policy is not introduced.
+A sorted Merkle Patricia builder retains only its current key/value and a bounded
+frontier of child references. Completed nodes are emitted to bounded object
+batches (normally 32 MiB and 100,000 objects). This avoids incremental per-entity
+index updates and intermediate committed roots. Existing codecs determine the
+same final node encodings and state root.
+
+Import redb handles have 256 MiB page caches. Decoded-node caching for the opened
+staged engine is capped at 256 MiB and 262,144 entries. Final copying uses two
+redb handles and one source decoded cache: a combined configured ceiling of
+768 MiB, excluding object buffers, traversal stacks, ordinary history/runtime
+caches and allocator overhead. A copy also uses a fixed 16,384-slot, 768 KiB
+cache of successfully traversed posting roots, namespaces and validated lengths.
+Collisions repeat work without omitting validation. Existing node opens and
+history/header stores keep the default 8 MiB redb cache. The installing process
+retains its larger destination cache until exit.
+
+Buffer/cache settings do not enter genesis identity. Roots and accounting are
+compared with the existing v1 builder on compatible fixtures. The v2 frame
+format allows up to 55 user attributes, but current entity-operation validation
+admits at most 32 supplied attributes including payload and content type, hence
+at most 30 user attributes. The real fixture's 29 attributes remain supported.
+Lifetime remains finite; this change does not introduce permanent storage.
 
 ## Recovery and publication
 
-Each commit atomically stores its roots and bounded cursor metadata: input
-identity, consumed rows/bytes, prefix hash, logical units, cumulative rent and
-final sponsor-debit status. On restart the canonical prefix is streamed and
-rehashed without re-executing its entities. This is bounded memory but takes time
-proportional to the consumed input; it is not an O(1) seek-only recovery promise.
-
-Staging generations compact after at least 1,024 batches and geometric physical
-file growth. Each compaction emits one begin and one completion event with
-generation, source/output file sizes and elapsed time. The replacement contains
-only current reachable objects and its
-checkpoint. Its database and genesis description are synced before switching
-`CURRENT`; old generations are removed after the switch. A crash leaves the
-selected generation authoritative and any unselected successor disposable.
+Bulk construction uses separate `bulk-v1` scratch with an input/genesis identity
+and an exclusive lock. Incomplete scratch is rebuilt from the beginning after an
+interruption. This is safe restart behavior, not committed-prefix resumption.
+Completed state has a durable engine head and a checksummed receipt binding the
+genesis, entity count, storage units and rent. It is selected by a directory
+rename only after metadata is synced. Restart reaudits the canonical stream and
+validates the receipt and engine association before reusing completed state.
+Old incremental checkpoints are never interpreted as bulk output.
 
 Final installation copies reachable objects in bounded durable batches into a
 separate headless store, then atomically writes the sole height-zero manifest and
@@ -109,10 +105,10 @@ A fresh producer supplied with `--bundle` performs three standalone stream
 audits: the supplied bundle, the actual local copy, and the retained serving
 file after final database installation. The local audit retains an open file
 descriptor and a private summary bound to the signed genesis. An inode check
-ensures the published hard link names that descriptor, and replay consumes that
-same descriptor instead of reopening its pathname. Replay still checks every
-frame, the full stream hash/count/length, recovered checkpoint prefixes, and
-derived state, rent and storage units. The final audit catches pathname or
+ensures the published hard link names that descriptor, and construction consumes that
+same descriptor instead of reopening its pathname. Construction checks every
+frame, the full stream hash/count/length, and derived state, rent and storage
+units. The final audit catches pathname or
 content changes during the final copy. Public standalone verification continues
 to audit its input on every call. These checks replace the former immediate
 duplicate local-file audit and the audit at replay entry; no filename or
@@ -127,11 +123,11 @@ disabled. For example, on a systemd host use `systemd-run` with `MemoryMax=32G`,
 memory bounds; the cgroup is an additional backstop.
 
 The Rust library's portable default disk reserve is 1 GiB. **Set the environment
-variable to 80 or higher for the real dataset.** It checks before replay batches,
-stream copies/downloads and generation compaction, and projects another staging
-file's size before final installation. These projections are conservative
+variable to 80 or higher for the real dataset.** Checks cover ingestion, sort
+flushes, merges, object batches and stream copies/downloads. Long merges recheck
+the reserve periodically; final installation projects another database copy. These projections are conservative
 checks, not a disk quota or proof of full-dataset fit. Account for input, converter
-SQLite scratch, canonical output, staging, the next compacted/final database,
+SQLite scratch, canonical output, sorted runs, staged/final databases,
 transport copies and reserve concurrently. Live history still has no physical
 pruning.
 
@@ -141,31 +137,30 @@ this work does not establish bounded memory for that separate executable.
 
 ## Progress and measurement
 
-The importer writes one-line JSON progress records to **stderr**, leaving stdout
-for the final result JSON. Records use `event: "prefill_progress"` and stages
-`audit`, `recover_prefix`, and `replay`. Each phase reports at its start, roughly
-every ten seconds while processing, and on successful completion. Fields include
-`rows`, `totalRows`, `bytes`, `totalBytes`, `elapsedSeconds`,
-`checkpointSequence`, and `complete`. No source paths or credentials are logged.
-Automatic preparation retries emit `prefill_batch_retry` with the smaller
-`batchBytes` value and `reason: "prepare_resource_limit"`.
+The importer writes JSON progress records to **stderr**, leaving stdout for
+result JSON. Stream phases use `event: "prefill_progress"` with `audit`,
+`bulk_normalize` and `bulk_indexes`. Counts describe phase progress, not committed
+chain blocks. A completed phase does not assert bundle publication or full
+acceptance: require successful command completion and the final result.
+`prefill_bulk_phase` records distinguish keys, rows, postings, host construction
+and long sort merges, with phase-local entry counts.
 
-Replay counters advance only after a durable checkpoint commits. Recovery counts
-prefix rows checked, not entities written again. Elapsed time restarts per phase
-and retry; checkpoint sequence is private to a staging generation and resets on
-compaction. A phase's `complete` record does not assert bundle publication or
-full benchmark acceptance: require the command's successful exit and final JSON.
-Compaction and final object copying can delay progress records while they run.
+The deprecated `stream-build --batch-bytes` option is accepted for compatibility
+and controls ingestion progress sampling only. It does not enable incremental
+replay or change the fixed sort-buffer budget.
 
 Capture stderr alongside external measurements of cgroup memory/peak and events,
 process RSS, wall time, free disk, and allocated bytes for the staging and output
 directories. Keep raw samples and the exact command, binary revision, input hash,
-cache/batch settings, and restart history with the result. Measure physical disk
+cache/buffer settings, and restart history with the result. Measure physical disk
 allocation separately from logical storage units. Run one heavy phase at a time;
 progress rates from small or synthetic samples do not establish a full-dataset
 completion estimate.
 
-## Validation evidence, 2026-10-19
+## Historical incremental validation, 2026-10-19
+
+The measurements below describe the previous incremental importer. Bulk results
+are recorded separately in [the bulk report](bulk-prefill.md).
 
 The isolated `scripts/streaming-prefill-smoke.py` accepts `--prefill` and a new
 `--work-dir`, creates disposable fixture credentials, and stops every process on

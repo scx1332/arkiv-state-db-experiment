@@ -1,18 +1,15 @@
-//! Version-two file-backed prefill. Private engine sequences are import batches,
-//! never chain heights. The canonical state is independent of batch boundaries.
+//! Version-two file-backed prefill with bounded external-sort genesis construction.
+//! Live execution is not used to build or update intermediate import states.
 use crate::{
-    accounts, arkiv,
     genesis_bundle::{PrefillEntity, PrefillLaunch, PrefillLimits, recipe_hash},
     signed::protocol::SignedGenesis,
 };
 use alloy_primitives::{Keccak256, U256};
 use arkiv_db::{
-    B256, Budget, CellName, Decoder, NamespaceName, OwnerId, Projection, RecordKey, Value, WriteOp,
-    decode_exact, digest,
-    durable::{DurableEngine, EngineGenesis, Options, Publication},
+    B256, Decoder, decode_exact, digest,
+    durable::{DurableEngine, Options},
     encode,
 };
-use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     io::{BufReader, Read, Seek, Write},
@@ -20,7 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub use crate::genesis_streaming_compaction::{check_disk, import_redb_config};
+pub use crate::genesis_import_resources::{check_disk, import_redb_config};
 
 type Result<T> = std::result::Result<T, String>;
 fn err(e: impl std::fmt::Debug) -> String {
@@ -35,7 +32,7 @@ pub const MAX_STORAGE_UNITS: u64 = 1 << 50;
 pub const DEFAULT_BATCH_BYTES: usize = 1024 * 1024;
 
 /// Operational telemetry only: no paths, identities, or canonical fields change.
-struct Progress {
+pub(crate) struct Progress {
     stage: &'static str,
     started: Instant,
     last: Option<Instant>,
@@ -43,7 +40,7 @@ struct Progress {
     total_bytes: u64,
 }
 impl Progress {
-    fn new(stage: &'static str, total_rows: u64, total_bytes: u64) -> Self {
+    pub(crate) fn new(stage: &'static str, total_rows: u64, total_bytes: u64) -> Self {
         Self {
             stage,
             started: Instant::now(),
@@ -52,7 +49,13 @@ impl Progress {
             total_bytes,
         }
     }
-    fn report(&mut self, rows: u64, bytes: u64, checkpoint: Option<u64>, complete: bool) {
+    pub(crate) fn report(
+        &mut self,
+        rows: u64,
+        bytes: u64,
+        checkpoint: Option<u64>,
+        complete: bool,
+    ) {
         let now = Instant::now();
         if !complete
             && self
@@ -212,7 +215,7 @@ fn validate_row(row: &PrefillEntity) -> Result<()> {
 pub fn audit_stream(path: &Path, limits: PrefillLimits) -> Result<StreamSummary> {
     audit_file(&mut File::open(path).map_err(err)?, limits)
 }
-fn audit_file(file: &mut File, limits: PrefillLimits) -> Result<StreamSummary> {
+pub(crate) fn audit_file(file: &mut File, limits: PrefillLimits) -> Result<StreamSummary> {
     file.rewind().map_err(err)?;
     let bytes = file.metadata().map_err(err)?.len();
     let mut reader = StreamReader::new(BufReader::new(file), limits)?;
@@ -227,8 +230,8 @@ fn audit_file(file: &mut File, limits: PrefillLimits) -> Result<StreamSummary> {
 }
 
 /// An audited local inode, bound to one signed genesis. The descriptor is kept
-/// open through replay so replacing a pathname cannot substitute its input.
-/// Replay still checks the complete stream hash to detect changes to the inode.
+/// open through bulk construction so replacing a pathname cannot substitute its input.
+/// Construction still checks the complete stream hash to detect changes to the inode.
 pub struct VerifiedStream {
     file: File,
     summary: StreamSummary,
@@ -271,42 +274,7 @@ impl VerifiedStream {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(deny_unknown_fields)]
-struct Checkpoint {
-    version: u32,
-    identity: String,
-    rows: u64,
-    bytes: u64,
-    prefix: String,
-    units: u64,
-    burn: String,
-    finalized: bool,
-}
-fn checkpoint_bytes(cp: &Checkpoint) -> Result<Vec<u8>> {
-    serde_json::to_vec(cp).map_err(err)
-}
-fn publish(engine: &mut DurableEngine, branch: arkiv_db::Branch, cp: &Checkpoint) -> Result<()> {
-    engine
-        .prepare_import(branch.seal(), &checkpoint_bytes(cp)?)
-        .map_err(|failure| {
-            if matches!(
-                &failure.error,
-                arkiv_db::durable::DurableError::ResourceLimit(_)
-            ) {
-                format!("batch preparation limit: {}", failure.error)
-            } else {
-                err(failure)
-            }
-        })?;
-    match engine.commit().map_err(err)? {
-        Publication::Committed(_) => Ok(()),
-        other => Err(format!(
-            "import commit not acknowledged; reopen to reconcile checkpoint: {other:?}"
-        )),
-    }
-}
-fn import_identity(
+pub(crate) fn import_identity(
     base: &SignedGenesis,
     limits: PrefillLimits,
     sponsor: [u8; 20],
@@ -322,10 +290,10 @@ fn import_identity(
     bytes.extend_from_slice(&summary.bytes.to_be_bytes());
     digest("arkiv/prefill-import/v2", &bytes)
 }
-// Preparation limits are local resource policy. Retry from the last atomic
-// checkpoint with smaller batches; never change canonical state or stream bytes.
+// Retain the CLI byte option as a bounded ingestion tuning input. It never
+// selects transaction replay or changes canonical state.
 #[allow(clippy::too_many_arguments)]
-fn replay(
+fn bulk_build(
     base: &SignedGenesis,
     limits: PrefillLimits,
     sponsor: [u8; 20],
@@ -335,7 +303,7 @@ fn replay(
     batch_bytes: usize,
     summary: &StreamSummary,
 ) -> Result<(DurableEngine, U256, u64)> {
-    replay_file(
+    crate::genesis_bulk::build_file(
         base,
         limits,
         sponsor,
@@ -346,257 +314,12 @@ fn replay(
         summary,
     )
 }
-#[allow(clippy::too_many_arguments)]
-fn replay_file(
-    base: &SignedGenesis,
-    limits: PrefillLimits,
-    sponsor: [u8; 20],
-    file: &mut File,
-    work_dir: &Path,
-    options: Options,
-    mut batch_bytes: usize,
-    summary: &StreamSummary,
-) -> Result<(DurableEngine, U256, u64)> {
-    loop {
-        match replay_once(
-            base,
-            limits,
-            sponsor,
-            file,
-            work_dir,
-            options.clone(),
-            batch_bytes,
-            summary,
-        ) {
-            Err(error) if batch_bytes > 1 && error.starts_with("batch preparation limit:") => {
-                batch_bytes = (batch_bytes / 2).max(1);
-                let record = serde_json::json!({"event": "prefill_batch_retry", "batchBytes": batch_bytes, "reason": "prepare_resource_limit"});
-                let _ = writeln!(std::io::stderr().lock(), "{record}");
-            }
-            result => return result,
-        }
-    }
-}
-#[allow(clippy::too_many_arguments)]
-fn replay_once(
-    base: &SignedGenesis,
-    limits: PrefillLimits,
-    sponsor: [u8; 20],
-    file: &mut File,
-    work_dir: &Path,
-    options: Options,
-    batch_bytes: usize,
-    summary: &StreamSummary,
-) -> Result<(DurableEngine, U256, u64)> {
-    if batch_bytes == 0 || batch_bytes > 4 * 1024 * 1024 {
-        return Err("batch bytes must be 1..=4194304".into());
-    }
-    validate_limits(limits)?;
-    base.accounts.validate().map_err(err)?;
-    if base.genesis.pricing != crate::gas::schedule() {
-        return Err("streaming prefill requires GLM pricing".into());
-    }
-    check_disk(work_dir, 0)?;
-    let identity = import_identity(base, limits, sponsor, summary);
-    let mut genesis = EngineGenesis::new(identity.0, base.genesis.pricing.clone());
-    genesis.limits = base.genesis.limits;
-    let mut engine = crate::genesis_streaming_compaction::open_stage(
-        work_dir,
-        genesis.clone(),
-        options.clone(),
-    )?;
-    file.rewind().map_err(err)?;
-    let mut reader = StreamReader::new(BufReader::new(file), limits)?;
-    let checkpoint = engine.import_checkpoint(4096).map_err(err)?;
-    let mut initialized = checkpoint.is_some();
-    let mut cp = match checkpoint {
-        Some(bytes) => serde_json::from_slice::<Checkpoint>(&bytes).map_err(err)?,
-        None => Checkpoint {
-            version: 2,
-            identity: identity.to_string(),
-            rows: 0,
-            bytes: 20,
-            prefix: reader.prefix_hash().to_string(),
-            units: 0,
-            burn: "0".into(),
-            finalized: false,
-        },
-    };
-    if cp.version != 2
-        || cp.identity != identity.to_string()
-        || cp.rows > summary.rows
-        || cp.units > limits.max_storage_units
-    {
-        return Err("import checkpoint identity or bounds mismatch".into());
-    }
-    // Replay the prefix through the bounded parser/hash, never through the engine.
-    // This binds every recovered cursor to exactly the input bytes already applied.
-    let mut recovery_progress = Progress::new("recover_prefix", cp.rows, cp.bytes);
-    if cp.rows > 0 {
-        recovery_progress.report(0, reader.bytes, Some(engine.head().sequence()), false);
-    }
-    while reader.consumed < cp.rows {
-        reader.next_row()?.ok_or("checkpoint beyond stream")?;
-        recovery_progress.report(
-            reader.consumed,
-            reader.bytes,
-            Some(engine.head().sequence()),
-            false,
-        );
-    }
-    if reader.bytes != cp.bytes || reader.prefix_hash().to_string() != cp.prefix {
-        return Err("import checkpoint prefix mismatch".into());
-    }
-    if cp.rows > 0 {
-        recovery_progress.report(cp.rows, cp.bytes, Some(engine.head().sequence()), true);
-    }
-    let mut progress = Progress::new("replay", summary.rows, summary.bytes);
-    progress.report(cp.rows, cp.bytes, Some(engine.head().sequence()), false);
-    let mut burn = U256::from_str_radix(&cp.burn, 10).map_err(err)?;
-    while reader.consumed < reader.rows || !initialized {
-        check_disk(work_dir, options.prepare_bytes as u64)?;
-        let mut branch = engine.begin(engine.head(), None).map_err(err)?;
-        if !initialized {
-            branch
-                .try_execute(
-                    OwnerId::new(base.proposer),
-                    WriteOp::CreateNamespace {
-                        name: NamespaceName::new("entities").map_err(err)?,
-                    },
-                    Budget::unlimited(),
-                )
-                .map_err(err)?
-                .map_err(err)?;
-        }
-        let start = reader.bytes;
-        while reader.bytes - start < batch_bytes as u64 {
-            let Some(row) = reader.next_row()? else { break };
-            let key = arkiv::derive_entity_key(
-                base.genesis.chain_id,
-                &row.creator,
-                row.create_nonce,
-                row.salt,
-            );
-            let expires = row.expires_at_height;
-            let mut attrs = row.attributes;
-            attrs.push((
-                CellName::new("$payload").map_err(err)?,
-                Value::bytes(&row.payload),
-            ));
-            attrs.push((
-                CellName::new("$contentType").map_err(err)?,
-                Value::str(&row.content_type),
-            ));
-            let context = arkiv::ArkivExecutionContext {
-                caller: row.creator,
-                block_height: 0,
-                chain_id: base.genesis.chain_id,
-                max_lifetime: base.genesis.params.max_lifetime,
-                expiry_per_block: base.genesis.params.expiry_per_block,
-            };
-            let op = arkiv::ArkivOperation::Create {
-                salt: row.salt,
-                flags: row.flags,
-                attributes: attrs,
-                expiry: crate::Expiry {
-                    expires_at: expires,
-                    min_lifetime: 0,
-                },
-            };
-            if !matches!(
-                arkiv::execute_operation(
-                    &mut branch,
-                    arkiv::entity_namespace(),
-                    &context,
-                    &op,
-                    Budget::unlimited()
-                )
-                .map_err(err)?,
-                crate::OpOutcome::Applied { .. }
-            ) {
-                return Err(format!(
-                    "prefill entity {} rejected by entity/expiry validation",
-                    reader.consumed
-                ));
-            }
-            let stored = branch
-                .try_get_record(
-                    arkiv::entity_namespace(),
-                    &RecordKey::new(&key).ok_or("invalid entity key")?,
-                    &Projection::ALL,
-                    Budget::unlimited(),
-                )
-                .map_err(err)?
-                .map_err(err)?
-                .value
-                .ok_or("created prefill entity missing")?;
-            let units = crate::gas::storage_units(&stored.cells).map_err(err)?.total;
-            cp.units = cp
-                .units
-                .checked_add(units)
-                .ok_or("storage units overflow")?;
-            if cp.units > limits.max_storage_units {
-                return Err("prefill storage limit".into());
-            }
-            let rent = crate::gas::rent(0, units, None, Some(expires), 0)
-                .map_err(err)?
-                .gas;
-            burn = burn
-                .checked_add(accounts::fee(rent))
-                .ok_or("prefill rent overflow")?;
-            if burn > base.accounts.initial_balance(OwnerId::new(sponsor)) {
-                return Err("prefill sponsor underfunded".into());
-            }
-        }
-        cp.rows = reader.consumed;
-        cp.bytes = reader.bytes;
-        cp.prefix = reader.prefix_hash().to_string();
-        cp.burn = burn.to_string();
-        publish(&mut engine, branch, &cp)?;
-        progress.report(cp.rows, cp.bytes, Some(engine.head().sequence()), false);
-        initialized = true;
-        engine = crate::genesis_streaming_compaction::maybe_compact(
-            work_dir,
-            engine,
-            &genesis,
-            options.clone(),
-            false,
-        )?;
-    }
-    if reader.finish()? != *summary {
-        return Err("prefill stream changed during import".into());
-    }
-    if !cp.finalized {
-        let mut branch = engine.begin(engine.head(), None).map_err(err)?;
-        if burn != U256::ZERO {
-            let balance = base
-                .accounts
-                .initial_balance(OwnerId::new(sponsor))
-                .checked_sub(burn)
-                .ok_or("prefill sponsor underfunded")?;
-            accounts::put(
-                &mut branch,
-                OwnerId::new(sponsor),
-                accounts::Account { nonce: 0, balance },
-            )
-            .map_err(err)?;
-            branch
-                .try_host_put(accounts::BURN_KEY, &burn.to_be_bytes::<32>())
-                .map_err(err)?
-                .map_err(err)?;
-        }
-        cp.finalized = true;
-        publish(&mut engine, branch, &cp)?;
-    }
-    progress.report(cp.rows, cp.bytes, Some(engine.head().sequence()), true);
-    Ok((engine, burn, cp.units))
-}
 
 /// Verify bounded canonical frames and the signed stream commitment without state replay.
 pub fn verify_stream_file(g: &SignedGenesis, stream: &Path) -> Result<()> {
     VerifiedStream::open(g, stream).map(|_| ())
 }
-/// Independently reconstruct an authenticated launch into a private resumable store.
+/// Independently reconstruct an authenticated launch into a private bulk store.
 pub fn prepare_streaming(
     g: &SignedGenesis,
     stream: &Path,
@@ -605,7 +328,7 @@ pub fn prepare_streaming(
 ) -> Result<DurableEngine> {
     prepare_verified_streaming(g, VerifiedStream::open(g, stream)?, work_dir, options)
 }
-/// Reuse an audit of the exact local inode, retaining end-to-end replay checks.
+/// Reuse an audit of the exact local inode, retaining end-to-end stream checks.
 pub fn prepare_verified_streaming(
     g: &SignedGenesis,
     mut stream: VerifiedStream,
@@ -621,13 +344,13 @@ pub fn prepare_verified_streaming(
         .as_ref()
         .filter(|p| p.version == 2)
         .ok_or("expected streaming prefill v2")?;
-    let (engine, burn, units) = replay_file(
+    let (engine, burn, units) = crate::genesis_bulk::build_file(
         g,
         p.limits,
         p.sponsor,
         &mut stream.file,
         work_dir,
-        crate::genesis_streaming_compaction::import_options(options),
+        crate::genesis_import_resources::import_options(options),
         DEFAULT_BATCH_BYTES,
         &stream.summary,
     )?;
@@ -641,7 +364,7 @@ pub fn prepare_verified_streaming(
 }
 
 /// Build a new portable bundle. A deterministic sibling work directory holds
-/// resumable import state; only a completely validated output is renamed into place.
+/// private bulk work; only a completely validated output is renamed into place.
 pub fn build_bundle(
     base_path: &Path,
     stream: &Path,
@@ -685,13 +408,13 @@ pub fn build_bundle(
         .and_then(|n| n.to_str())
         .ok_or("invalid bundle output name")?;
     let work = parent.join(format!(".{name}.stream-work"));
-    let (engine, burn, units) = replay(
+    let (engine, burn, units) = bulk_build(
         &base,
         limits,
         sponsor,
         stream,
         &work,
-        crate::genesis_streaming_compaction::import_options(Options::default()),
+        crate::genesis_import_resources::import_options(Options::default()),
         batch_bytes,
         &summary,
     )?;
@@ -776,7 +499,9 @@ pub fn summary_report(g: &SignedGenesis) -> Result<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounts;
     use crate::signed::protocol::{SignedLimits, default_native_genesis};
+    use arkiv_db::{CellName, OwnerId, Value};
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     struct Temp(std::path::PathBuf);
@@ -888,7 +613,7 @@ mod tests {
         assert!(prepare_streaming(&g, &path, &tmp.0.join("bad"), Options::default()).is_err());
     }
     #[test]
-    fn verified_replay_rejects_inode_mutation_truncation_and_changed_genesis() {
+    fn verified_bulk_rejects_inode_mutation_truncation_and_changed_genesis() {
         let tmp = Temp::new();
         let rows = [row(0), row(1)];
         let g = signed_stream(&rows);
@@ -968,12 +693,12 @@ mod tests {
         changed_rows[0].payload[0] ^= 1;
         fs::write(&path, stream(&changed_rows)).unwrap();
         // The post-install audit must also reject an in-place same-size change
-        // after replay, while a retained path is used by the serving layer.
+        // after bulk construction, while a retained path is used by the serving layer.
         assert!(verify_stream_file(&g, &path).is_err());
         let error = prepare_verified_streaming(&g, verified, &work, Options::default())
             .err()
             .unwrap();
-        assert_eq!(error, "import checkpoint prefix mismatch");
+        assert_eq!(error, "prefill stream changed during import");
         fs::write(&path, stream(&rows)).unwrap();
         let resumed = prepare_streaming(&g, &path, &work, Options::default()).unwrap();
         assert_eq!(resumed.head_snapshot().state_header(), state);
@@ -1033,7 +758,7 @@ mod tests {
         r.finish().unwrap();
     }
     #[test]
-    fn replay_matches_v1_oracle_across_batches_and_reopen() {
+    fn bulk_matches_v1_oracle_across_progress_settings_and_reopen() {
         let tmp = Temp::new();
         let rows: Vec<_> = (0..20).map(row).collect();
         let path = tmp.0.join("prefill.bin");
@@ -1054,7 +779,7 @@ mod tests {
         for batch in [1, 512, 65536] {
             let work = tmp.0.join(format!("batch{batch}"));
             for _ in 0..2 {
-                let (engine, burn, units) = replay(
+                let (engine, burn, units) = bulk_build(
                     &base(),
                     limits(),
                     [2; 20],
@@ -1072,7 +797,7 @@ mod tests {
         }
     }
     #[test]
-    fn preparation_limits_reduce_batches_without_changing_state() {
+    fn bounded_object_flushes_preserve_state() {
         let tmp = Temp::new();
         let rows: Vec<_> = (0..20).map(row).collect();
         let path = tmp.0.join("prefill.bin");
@@ -1082,7 +807,7 @@ mod tests {
             prepare_objects: 100,
             ..Options::default()
         };
-        let (limited, burn, units) = replay(
+        let (limited, burn, units) = bulk_build(
             &base(),
             limits(),
             [2; 20],
@@ -1093,8 +818,8 @@ mod tests {
             &summary,
         )
         .unwrap();
-        assert!(limited.head().sequence() > 2);
-        let (normal, normal_burn, normal_units) = replay(
+        assert_eq!(limited.head().sequence(), 0);
+        let (normal, normal_burn, normal_units) = bulk_build(
             &base(),
             limits(),
             [2; 20],
@@ -1112,18 +837,18 @@ mod tests {
         assert_eq!((burn, units), (normal_burn, normal_units));
     }
     #[test]
-    fn resumes_committed_prefix_after_later_frame_failure() {
+    fn rebuilds_incomplete_scratch_after_later_frame_failure() {
         let tmp = Temp::new();
         let rows: Vec<_> = (0..20).map(row).collect();
         let path = tmp.0.join("prefill.bin");
         let valid = stream(&rows);
         fs::write(&path, &valid).unwrap();
         let summary = audit_stream(&path, limits()).unwrap();
-        // Simulate an input truncation after several durable batches. The pinned
-        // identity stays fixed, and recovery must not repeat applied rent/nonces.
+        // Simulate a truncated input after work has begun. Recovery discards
+        // incomplete private scratch and cannot repeat applied rent or nonces.
         fs::write(&path, &valid[..valid.len() - 10]).unwrap();
         assert!(
-            replay(
+            bulk_build(
                 &base(),
                 limits(),
                 [2; 20],
@@ -1136,7 +861,7 @@ mod tests {
             .is_err()
         );
         fs::write(&path, &valid).unwrap();
-        let (resumed, burn, units) = replay(
+        let (resumed, burn, units) = bulk_build(
             &base(),
             limits(),
             [2; 20],
@@ -1147,7 +872,7 @@ mod tests {
             &summary,
         )
         .unwrap();
-        let (clean, clean_burn, clean_units) = replay(
+        let (clean, clean_burn, clean_units) = bulk_build(
             &base(),
             limits(),
             [2; 20],
@@ -1165,13 +890,13 @@ mod tests {
         assert_eq!((burn, units), (clean_burn, clean_units));
     }
     #[test]
-    fn more_than_v1_rows_and_checkpoint_identity() {
+    fn more_than_v1_rows_and_bulk_identity() {
         let tmp = Temp::new();
         let rows: Vec<_> = (0..300).map(row).collect();
         let path = tmp.0.join("prefill.bin");
         fs::write(&path, stream(&rows)).unwrap();
         let summary = audit_stream(&path, limits()).unwrap();
-        let (engine, _, _) = replay(
+        let (engine, _, _) = bulk_build(
             &base(),
             limits(),
             [2; 20],
@@ -1187,7 +912,7 @@ mod tests {
         let mut changed = base();
         changed.run_id[0] += 1;
         assert!(
-            replay(
+            bulk_build(
                 &changed,
                 limits(),
                 [2; 20],
@@ -1198,6 +923,237 @@ mod tests {
                 &summary
             )
             .is_err()
+        );
+    }
+    #[test]
+    fn bulk_all_types_creators_counters_and_empty_match_oracle() {
+        use arkiv_db::{Budget, Projection, RecordKey};
+        let tmp = Temp::new();
+        let values = [
+            Value::Bool(true),
+            Value::I32(-17),
+            Value::U64(u64::MAX),
+            Value::U256([0xff; 32]),
+            Value::Dec([0x80; 32]),
+            Value::Bytes32([8; 32]),
+            Value::str("héllo"),
+            Value::Addr([0; 20]),
+            Value::Key([3; 32]),
+        ];
+        let mut rows = Vec::new();
+        for creator in [[2; 20], [3; 20]] {
+            for n in 0..6 {
+                let mut r = row(n);
+                r.creator = creator;
+                r.flags = (n % 4) as u8;
+                r.expires_at_height = 100 + n % 2;
+                r.attributes = values
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| (CellName::new(&format!("attr{i}")).unwrap(), v.clone()))
+                    .collect();
+                rows.push(r);
+            }
+        }
+        for (label, rows) in [("rich", rows), ("empty", Vec::new())] {
+            let path = tmp.0.join(format!("{label}.bin"));
+            fs::write(&path, stream(&rows)).unwrap();
+            let g = signed_stream(&rows);
+            let engine =
+                prepare_streaming(&g, &path, &tmp.0.join(label), Options::default()).unwrap();
+            assert_eq!(
+                engine.head_snapshot().state_header(),
+                g.prefill.as_ref().unwrap().state
+            );
+            for (i, r) in rows.iter().enumerate() {
+                let key = crate::arkiv::derive_entity_key(
+                    g.genesis.chain_id,
+                    &r.creator,
+                    r.create_nonce,
+                    r.salt,
+                );
+                let record = engine
+                    .head_snapshot()
+                    .try_get_record(
+                        crate::arkiv::entity_namespace(),
+                        &RecordKey::new(&key).unwrap(),
+                        &Projection::ALL,
+                        Budget::unlimited(),
+                    )
+                    .unwrap()
+                    .unwrap()
+                    .value
+                    .unwrap();
+                assert_eq!(record.id.ordinal(), i as u64 + 1);
+                let projected = crate::arkiv::project(&record).unwrap();
+                assert_eq!(projected.attributes, r.attributes);
+                assert_eq!(projected.payload, r.payload);
+            }
+            for creator in [[2; 20], [3; 20]] {
+                assert_eq!(
+                    engine
+                        .head_snapshot()
+                        .try_host_get(&crate::arkiv::nonce_key(&creator))
+                        .unwrap(),
+                    (!rows.is_empty()).then(|| 6u64.to_be_bytes().to_vec())
+                );
+            }
+            for height in [100, 101] {
+                for key in [
+                    crate::exec::total_key(height),
+                    crate::exec::due_key(height, crate::arkiv::entity_namespace()),
+                ] {
+                    assert_eq!(
+                        engine.head_snapshot().try_host_get(&key).unwrap(),
+                        (!rows.is_empty()).then(|| 6u64.to_be_bytes().to_vec())
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn bulk_rejects_protocol_engine_capacity_and_funding_violations() {
+        let tmp = Temp::new();
+        let mut cases = Vec::new();
+        for (name, value) in [
+            ("bad:name", Value::U64(1)),
+            ("and", Value::U64(1)),
+            ("okay", Value::I64(1)),
+            ("okay", Value::bytes(b"not an attribute")),
+            ("okay", Value::str("control\n")),
+        ] {
+            let mut r = row(0);
+            r.attributes = vec![(CellName::new(name).unwrap(), value)];
+            cases.push((base(), vec![r]));
+        }
+        let mut r = row(0);
+        r.content_type = "a".repeat(129);
+        cases.push((base(), vec![r]));
+        let mut r = row(0);
+        r.attributes = (0..31)
+            .map(|i| {
+                (
+                    CellName::new(&format!("attr{i:02}")).unwrap(),
+                    Value::U64(1),
+                )
+            })
+            .collect();
+        let mut g = base();
+        g.genesis.limits.max_cells = 64;
+        cases.push((g, vec![r]));
+        let mut g = base();
+        g.genesis.limits.max_cells = 8;
+        cases.push((g, vec![row(0)]));
+        let mut g = base();
+        g.genesis.params.max_lifetime = 99;
+        cases.push((g, vec![row(0)]));
+        let mut g = base();
+        g.genesis.params.expiry_per_block = 1;
+        cases.push((g, vec![row(0), row(1)]));
+        let mut g = base();
+        g.accounts = accounts::AccountConfig::new(Vec::new()).unwrap();
+        cases.push((g, vec![row(0)]));
+        let mut g = base();
+        g.genesis.params.max_lifetime = u64::MAX;
+        let mut r = row(0);
+        r.expires_at_height = u64::MAX - 1;
+        r.payload = vec![5; 128 * 1024];
+        cases.push((g, vec![r]));
+        for (i, (g, rows)) in cases.into_iter().enumerate() {
+            let path = tmp.0.join(format!("{i}.bin"));
+            fs::write(&path, stream(&rows)).unwrap();
+            let summary = audit_stream(&path, limits()).unwrap();
+            let work = tmp.0.join(format!("work{i}"));
+            assert!(
+                bulk_build(
+                    &g,
+                    limits(),
+                    [2; 20],
+                    &path,
+                    &work,
+                    Options::default(),
+                    1024,
+                    &summary
+                )
+                .is_err(),
+                "case{i}"
+            );
+            assert!(
+                !work.join("bulk-v1/complete").exists(),
+                "case{i} published complete"
+            );
+        }
+        let path = tmp.0.join("storage.bin");
+        fs::write(&path, stream(&[row(0)])).unwrap();
+        let summary = audit_stream(&path, limits()).unwrap();
+        let mut cap = limits();
+        cap.max_storage_units = 0;
+        assert!(
+            bulk_build(
+                &base(),
+                cap,
+                [2; 20],
+                &path,
+                &tmp.0.join("storage"),
+                Options::default(),
+                1024,
+                &summary
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn bulk_completed_receipt_corruption_is_rejected() {
+        let tmp = Temp::new();
+        let rows = [row(0)];
+        let g = signed_stream(&rows);
+        let path = tmp.0.join("input.bin");
+        fs::write(&path, stream(&rows)).unwrap();
+        let work = tmp.0.join("work");
+        drop(prepare_streaming(&g, &path, &work, Options::default()).unwrap());
+        let receipt = work.join("bulk-v1/complete/complete.json");
+        let original = fs::read(&receipt).unwrap();
+        let mut corrupt: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        corrupt["units"] = serde_json::json!(corrupt["units"].as_u64().unwrap() + 1);
+        fs::write(&receipt, serde_json::to_vec(&corrupt).unwrap()).unwrap();
+        assert!(
+            prepare_streaming(&g, &path, &work, Options::default())
+                .unwrap_err()
+                .contains("identity or bounds")
+        );
+        fs::write(&receipt, original).unwrap();
+        drop(prepare_streaming(&g, &path, &work, Options::default()).unwrap());
+    }
+    #[test]
+    fn bulk_lock_protects_scratch_and_legacy_checkpoint_is_never_selected() {
+        let tmp = Temp::new();
+        let rows = [row(0)];
+        let g = signed_stream(&rows);
+        let path = tmp.0.join("input.bin");
+        fs::write(&path, stream(&rows)).unwrap();
+        let work = tmp.0.join("work");
+        fs::create_dir_all(work.join("bulk-v1")).unwrap();
+        fs::write(work.join("CURRENT"), b"0\n").unwrap();
+        fs::write(
+            work.join("import-0000000000000000.redb"),
+            b"legacy unrelated checkpoint",
+        )
+        .unwrap();
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(work.join("bulk-v1/LOCK"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        assert!(prepare_streaming(&g, &path, &work, Options::default()).is_err());
+        assert!(!work.join("bulk-v1/IDENTITY").exists());
+        drop(lock);
+        drop(prepare_streaming(&g, &path, &work, Options::default()).unwrap());
+        assert_eq!(
+            fs::read(work.join("import-0000000000000000.redb")).unwrap(),
+            b"legacy unrelated checkpoint"
         );
     }
 }

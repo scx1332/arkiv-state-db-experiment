@@ -30,6 +30,10 @@
 //!   [`MerkleMap::preflight_with`] checks new nodes before encoding/hashing,
 //!   then [`MerkleMap::try_stage_with`] stops on sink or traversal failures.
 //!   A [`StageBudget`] is shared across nested maps in each phase.
+//! - **Sorted bulk construction.** [`SortedTrieBuilder`] emits the same
+//!   canonical objects directly from sorted encoded leaves while retaining
+//!   only the current key's branch frontier and one value. It supports the
+//!   same variable-length keys as the persistent map.
 //! - **Proofs.** [`MerkleMap::proof`] yields the root node and every
 //!   hash-referenced node on a key's path; [`walk`] is the strict verifier
 //!   that returns the proven value or rejects the proof.
@@ -80,6 +84,7 @@ pub mod order;
 mod proof;
 mod range;
 mod reach;
+mod sorted;
 mod stage;
 
 pub use alloy_trie::EMPTY_ROOT_HASH;
@@ -98,4 +103,5 @@ pub use proof::{
     inspect_path, walk,
 };
 pub use range::Range;
+pub use sorted::{SortedTrieBuilder, SortedTrieError};
 pub use stage::{NestedStageVisitor, ObjectSink, StageBudget, StageError, Staged, TryObjectSink};

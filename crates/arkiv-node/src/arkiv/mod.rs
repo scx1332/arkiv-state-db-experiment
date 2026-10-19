@@ -275,7 +275,7 @@ fn rejected(fault: ArkivFault) -> OpOutcome {
         fault: HostFault::Arkiv(fault),
     }
 }
-fn expiry(exp: &Expiry, c: &ArkivExecutionContext) -> Result<u64, HostFault> {
+pub(crate) fn expiry(exp: &Expiry, c: &ArkivExecutionContext) -> Result<u64, HostFault> {
     let floor = c
         .block_height
         .checked_add(exp.min_lifetime)
@@ -288,6 +288,39 @@ fn expiry(exp: &Expiry, c: &ArkivExecutionContext) -> Result<u64, HostFault> {
         return Err(HostFault::ExpiryInvalid(crate::ExpiryFault::TooFar));
     }
     Ok(target)
+}
+/// Canonical creation cells shared by live execution and bulk genesis.
+/// Callers validate the operation and expiry before invoking this helper.
+pub(crate) fn create_cells(
+    key: [u8; 32],
+    creator: [u8; 20],
+    height: u64,
+    expires: u64,
+    flags: u8,
+    attributes: &[(CellName, Value)],
+) -> Vec<(CellName, Cell)> {
+    let mut cells = vec![
+        (name("$key"), Cell::attribute(Value::Key(key))),
+        (name("$creator"), Cell::attribute(Value::Addr(creator))),
+        (name("$owner"), Cell::attribute(Value::Addr(creator))),
+        (name("$createdAt"), Cell::attribute(Value::U64(height))),
+        (name("$updatedAt"), Cell::attribute(Value::U64(height))),
+        (name("$expiresAt"), Cell::attribute(Value::U64(expires))),
+        (
+            name("$creationFlags"),
+            Cell::field(Value::U64(u64::from(flags))),
+        ),
+    ];
+    for (n, v) in attributes {
+        cells.push((n.clone(), user_cell(n, v).expect("validated")))
+    }
+    if !attributes.iter().any(|(n, _)| n.as_str() == "$payload") {
+        cells.push((name("$payload"), Cell::field(Value::bytes(&[]))))
+    }
+    if !attributes.iter().any(|(n, _)| n.as_str() == "$contentType") {
+        cells.push((name("$contentType"), Cell::attribute(Value::str(""))))
+    }
+    cells
 }
 /// Execute one operation; the enclosing transaction checkpoint provides atomic batches.
 /// Engine/storage errors remain fatal and may never be downgraded to user rejections.
@@ -373,36 +406,14 @@ pub fn execute_operation(
             };
             next_nonce = Some(next);
             let key = derive_entity_key(c.chain_id, &c.caller, nonce, *salt);
-            let mut cells = vec![
-                (name("$key"), Cell::attribute(Value::Key(key))),
-                (name("$creator"), Cell::attribute(Value::Addr(c.caller))),
-                (name("$owner"), Cell::attribute(Value::Addr(c.caller))),
-                (
-                    name("$createdAt"),
-                    Cell::attribute(Value::U64(c.block_height)),
-                ),
-                (
-                    name("$updatedAt"),
-                    Cell::attribute(Value::U64(c.block_height)),
-                ),
-                (
-                    name("$expiresAt"),
-                    Cell::attribute(Value::U64(new.expect("create expiry"))),
-                ),
-                (
-                    name("$creationFlags"),
-                    Cell::field(Value::U64(u64::from(*flags))),
-                ),
-            ];
-            for (n, v) in attributes {
-                cells.push((n.clone(), user_cell(n, v).expect("validated")))
-            }
-            if !attributes.iter().any(|(n, _)| n.as_str() == "$payload") {
-                cells.push((name("$payload"), Cell::field(Value::bytes(&[]))))
-            }
-            if !attributes.iter().any(|(n, _)| n.as_str() == "$contentType") {
-                cells.push((name("$contentType"), Cell::attribute(Value::str(""))))
-            }
+            let cells = create_cells(
+                key,
+                c.caller,
+                c.block_height,
+                new.expect("create expiry"),
+                *flags,
+                attributes,
+            );
             WriteOp::CreateRecord {
                 namespace,
                 key: RecordKey::new(&key).expect("32-byte key"),

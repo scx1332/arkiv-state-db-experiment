@@ -266,54 +266,65 @@ impl<V: TrieValue> Node<V> {
                     !value.is_empty(),
                     "TrieValue::encode returned an empty encoding"
                 );
-                let mut encoded_path = Vec::with_capacity(nibbles::encoded_path_len(path.len()));
-                nibbles::encode_path(path, true, &mut encoded_path);
-                let payload_length = encoded_path.as_slice().length() + value.as_slice().length();
-                Header {
-                    list: true,
-                    payload_length,
-                }
-                .encode(out);
-                encoded_path.as_slice().encode(out);
-                value.as_slice().encode(out);
+                encode_leaf(path, &value, out);
             }
             Self::Extension { path, child } => {
-                let mut encoded_path = Vec::with_capacity(nibbles::encoded_path_len(path.len()));
-                nibbles::encode_path(path, false, &mut encoded_path);
                 let child = child.reference();
                 let child = child.as_deref().unwrap_or(&[EMPTY_STRING_CODE]);
-                let payload_length = encoded_path.as_slice().length() + child.len();
-                Header {
-                    list: true,
-                    payload_length,
-                }
-                .encode(out);
-                encoded_path.as_slice().encode(out);
-                out.extend_from_slice(child);
+                encode_extension(path, child, out);
             }
             Self::Branch { children } => {
                 let references: [Option<RlpNode>; 16] =
                     std::array::from_fn(|index| children[index].reference());
-                // Sixteen child slots (an empty slot is 0x80) plus the empty value.
-                let payload_length = 1 + references
-                    .iter()
-                    .map(|reference| reference.as_ref().map_or(1, |reference| reference.len()))
-                    .sum::<usize>();
-                Header {
-                    list: true,
-                    payload_length,
-                }
-                .encode(out);
-                for reference in &references {
-                    match reference {
-                        Some(reference) => out.extend_from_slice(reference),
-                        None => out.push(EMPTY_STRING_CODE),
-                    }
-                }
-                out.push(EMPTY_STRING_CODE);
+                encode_branch(&references, out);
             }
         }
     }
+}
+
+/// The shared encoders for persistent and streaming construction.
+pub(crate) fn encode_leaf(path: &[u8], value: &[u8], out: &mut Vec<u8>) {
+    let mut encoded_path = Vec::with_capacity(nibbles::encoded_path_len(path.len()));
+    nibbles::encode_path(path, true, &mut encoded_path);
+    Header {
+        list: true,
+        payload_length: encoded_path.as_slice().length() + value.length(),
+    }
+    .encode(out);
+    encoded_path.as_slice().encode(out);
+    value.encode(out);
+}
+
+pub(crate) fn encode_extension(path: &[u8], child: &[u8], out: &mut Vec<u8>) {
+    let mut encoded_path = Vec::with_capacity(nibbles::encoded_path_len(path.len()));
+    nibbles::encode_path(path, false, &mut encoded_path);
+    Header {
+        list: true,
+        payload_length: encoded_path.as_slice().length() + child.len(),
+    }
+    .encode(out);
+    encoded_path.as_slice().encode(out);
+    out.extend_from_slice(child);
+}
+
+pub(crate) fn encode_branch(references: &[Option<RlpNode>; 16], out: &mut Vec<u8>) {
+    // Sixteen child slots (an empty slot is 0x80) plus the empty value.
+    let payload_length = 1 + references
+        .iter()
+        .map(|reference| reference.as_ref().map_or(1, |reference| reference.len()))
+        .sum::<usize>();
+    Header {
+        list: true,
+        payload_length,
+    }
+    .encode(out);
+    for reference in references {
+        match reference {
+            Some(reference) => out.extend_from_slice(reference),
+            None => out.push(EMPTY_STRING_CODE),
+        }
+    }
+    out.push(EMPTY_STRING_CODE);
 }
 
 /// A child reference as it appears in an encoded node.

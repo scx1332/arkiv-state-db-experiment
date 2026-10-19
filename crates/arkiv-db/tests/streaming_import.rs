@@ -345,3 +345,86 @@ impl VersionedStore for InterruptCopy {
         self.store.stage_objects(objects)
     }
 }
+
+#[test]
+fn bulk_stage_interruptions_never_publish_and_clean_rebuild_succeeds() {
+    use arkiv_db::{Limits, NamespaceDescriptor, Revision, durable::BulkGenesisBuilder};
+    let directory =
+        std::env::temp_dir().join(format!("arkiv-bulk-interrupt-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    let descriptor = NamespaceDescriptor {
+        id: NamespaceId::from_ordinal(1).unwrap(),
+        name: NamespaceName::new("entities").unwrap(),
+        owner: OwnerId::new([1; 20]),
+        revision: Revision::INITIAL,
+    };
+    let options = Options {
+        prepare_objects: 2,
+        prepare_bytes: 4096,
+        ..Options::default()
+    };
+    let make = |name: &str| {
+        let mut builder =
+            BulkGenesisBuilder::new(&directory.join(name), descriptor, Limits::DEFAULT, 4096)
+                .unwrap();
+        for n in 0..32u8 {
+            builder
+                .add_record(
+                    RecordKey::new(&[n]).unwrap(),
+                    vec![(
+                        CellName::new("shared").unwrap(),
+                        Cell::attribute(Value::U64(7)),
+                    )],
+                )
+                .unwrap();
+        }
+        builder
+    };
+    let complete = Arc::new(InterruptCopy {
+        store: Arc::new(MemoryVersionedStore::new()),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        fail_on: usize::MAX,
+    });
+    let expected = make("complete")
+        .finish(complete.clone(), PriceSchedule::FIXTURE, options.clone())
+        .unwrap()
+        .state_header()
+        .clone();
+    let calls = complete.calls.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(calls > 2);
+    for (i, fail_on) in [0, calls / 2, calls - 1].into_iter().enumerate() {
+        let target = Arc::new(MemoryVersionedStore::new());
+        let failing = Arc::new(InterruptCopy {
+            store: target.clone(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail_on,
+        });
+        assert!(
+            make(&format!("failed{i}"))
+                .finish(failing, PriceSchedule::FIXTURE, options.clone())
+                .is_err()
+        );
+        assert!(target.head().unwrap().is_none());
+        assert!(
+            target
+                .read_record(Table::Meta, b"engine/genesis")
+                .unwrap()
+                .is_none()
+        );
+        let build = make(&format!("retry{i}"))
+            .finish(target.clone(), PriceSchedule::FIXTURE, options.clone())
+            .unwrap();
+        assert_eq!(build.state_header(), &expected);
+        let mut genesis = EngineGenesis::new([42; 32], PriceSchedule::FIXTURE);
+        genesis.initial_state = Some(expected.clone());
+        committed(DurableEngine::initialize_bulk(build, genesis.clone(), options.clone()).unwrap());
+        assert_eq!(
+            DurableEngine::open(target, genesis, options.clone())
+                .unwrap()
+                .head_snapshot()
+                .state_header(),
+            expected
+        );
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}

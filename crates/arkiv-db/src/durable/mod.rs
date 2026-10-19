@@ -8,6 +8,7 @@
 //! State history is retained according to [`Retention`] (archive by
 //! default); see the [`retention`] module for the floor and pin semantics.
 
+mod bulk;
 pub(crate) mod cache;
 mod format;
 mod prepare;
@@ -15,6 +16,7 @@ pub mod reachability;
 pub mod retention;
 pub mod simulator;
 mod streaming;
+pub use bulk::{BulkBuild, BulkGenesisBuilder};
 
 use crate::{B256, Branch, Cost, EngineError, SealedCandidate, Snapshot, SnapshotId, nodes::Nodes};
 use arkiv_db_storage::versioned::{

@@ -295,22 +295,10 @@ fn create_host(
                 options.clone(),
             )
             .map_err(authoring_error)?;
-            let mut staging_bytes = 0u64;
-            for entry in std::fs::read_dir(path.join("prefill-work"))
-                .map_err(|_| Error("StorageUnavailable"))?
-            {
-                let entry = entry.map_err(|_| Error("StorageUnavailable"))?;
-                if entry.path().extension().is_some_and(|e| e == "redb") {
-                    staging_bytes = staging_bytes
-                        .checked_add(
-                            entry
-                                .metadata()
-                                .map_err(|_| Error("StorageUnavailable"))?
-                                .len(),
-                        )
-                        .ok_or(Error("CapacityReached"))?;
-                }
-            }
+            let staging_bytes =
+                std::fs::metadata(path.join("prefill-work/bulk-v1/complete/state.redb"))
+                    .map_err(|_| Error("StorageUnavailable"))?
+                    .len();
             arkiv_node::genesis_streaming::check_disk(path, staging_bytes)
                 .map_err(authoring_error)?;
             let host = Host::create_from_staged(
@@ -325,7 +313,7 @@ fn create_host(
                 input.clone(),
             )?;
             // Host serves the retained pathname. Re-audit after the final copy
-            // to catch path replacement or inode mutation since replay ended.
+            // to catch path replacement or inode mutation since bulk construction ended.
             arkiv_node::genesis_streaming::verify_stream_file(&host.genesis, &input)
                 .map_err(authoring_error)?;
             drop(staged);
@@ -453,6 +441,9 @@ fn genesis_command() -> Result<()> {
                 "--prefill" if prefill.is_none() => prefill = Some(value),
                 "--sponsor" if sponsor.is_none() => sponsor = Some(value),
                 "--batch-bytes" => {
+                    eprintln!(
+                        "--batch-bytes is deprecated: bulk genesis uses fixed bounded sort buffers; this option only controls progress sampling."
+                    );
                     batch_bytes = value.parse().map_err(|_| Error("InvalidRequest"))?
                 }
                 _ => return Err(Error("InvalidRequest")),
@@ -513,7 +504,7 @@ fn genesis_command() -> Result<()> {
         "lock" if out.is_none() && !locked => arkiv_node::genesis_authoring::lock(Path::new(source), refresh),
         "build" if out.is_some() && !refresh => arkiv_node::genesis_authoring::build(Path::new(source), Path::new(out.unwrap()), locked),
         "verify" if out.is_none() && !locked && !refresh => arkiv_node::genesis_authoring::verify(Path::new(source)),
-        _ => { eprintln!("genesis lock CHAIN [--refresh] | genesis build CHAIN --out BUNDLE --locked | genesis verify BUNDLE | genesis stream-build BASE_GENESIS --prefill FILE --out BUNDLE --sponsor 0xADDRESS [--batch-bytes N] | genesis stream-verify BUNDLE"); return Err(Error("InvalidRequest")); }
+        _ => { eprintln!("genesis lock CHAIN [--refresh] | genesis build CHAIN --out BUNDLE --locked | genesis verify BUNDLE | genesis stream-build BASE_GENESIS --prefill FILE --out BUNDLE --sponsor 0xADDRESS | genesis stream-verify BUNDLE"); return Err(Error("InvalidRequest")); }
     }.map_err(authoring_error)?;
     println!("{result}");
     Ok(())
@@ -536,7 +527,7 @@ async fn run() -> Result<()> {
     }
     if command == "--help" {
         println!(
-            "arkiv-proposer genesis lock CHAIN [--refresh]\narkiv-proposer genesis build CHAIN --out BUNDLE --locked\narkiv-proposer genesis verify BUNDLE\narkiv-proposer genesis stream-build BASE_GENESIS --prefill FILE --out BUNDLE --sponsor 0xADDRESS [--batch-bytes N]\narkiv-proposer genesis stream-verify BUNDLE\narkiv-proposer keygen --out FILE\narkiv-proposer producer --run-dir DIR --key-file FILE [--listen 127.0.0.1:9500] [--private-listen 127.0.0.1:9501] [--start paused|running] [--source-id UUID] [--chain-id 9001] [--block-period-ms 1000] [--state-retention archive|N] (--allocations-file FILE | --bundle BUNDLE)\narkiv-proposer full|light --run-dir DIR --peer URL --genesis-hash 0xHEX --proposer 0xADDRESS --chain-id N --source-id UUID --run-id HEX32 [--replication-peer URL] [--bundle BUNDLE] [--state-retention archive|N (full only)]\narkiv-proposer sign --key-file FILE --genesis-file FILE --tx-file FILE --nonce N --out FILE\narkiv-proposer create --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --payload-file FILE --out FILE [--salt 0] [--gas-limit 1000000] [--lifetime-blocks 17280]\narkiv-proposer transfer --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --to 0xADDRESS --amount-wei DECIMAL --out FILE [--gas-limit 21000]\narkiv-proposer submit --peer URL --transaction-file FILE\nOptional private Prometheus exporter: --metrics-listen 127.0.0.1:9600 [--metrics-interval-secs 300] (minimum 10). Metrics use rogue_one_ prefix.\nPrivate listener/full replication use ARKIV_PROPOSER_TOKEN (at least 32 bytes). Producer starts paused. Every chain runs the glm-v2 gas profile with funded accounts. A bundle chain creates the entities namespace (and its prefill) at height 0; a chain created from --allocations-file creates it with the proposer's bootstrap transaction in block 1. Each run exports public genesis.bin/certificate.bin. Sign/create files use native canonical bytes; submit polls pending/included status. Single-proposer authentication supplies no consensus or finality. Bodies are retained in history.redb separately from node.redb. --state-retention N serves state (balances, proofs, queries, receipts/logs) only for the head and the N snapshots before it and refuses older heights with HistoryPruned; archive (default) serves every height. Nothing is deleted yet, and a pruned floor never moves back."
+            "arkiv-proposer genesis lock CHAIN [--refresh]\narkiv-proposer genesis build CHAIN --out BUNDLE --locked\narkiv-proposer genesis verify BUNDLE\narkiv-proposer genesis stream-build BASE_GENESIS --prefill FILE --out BUNDLE --sponsor 0xADDRESS\narkiv-proposer genesis stream-verify BUNDLE\narkiv-proposer keygen --out FILE\narkiv-proposer producer --run-dir DIR --key-file FILE [--listen 127.0.0.1:9500] [--private-listen 127.0.0.1:9501] [--start paused|running] [--source-id UUID] [--chain-id 9001] [--block-period-ms 1000] [--state-retention archive|N] (--allocations-file FILE | --bundle BUNDLE)\narkiv-proposer full|light --run-dir DIR --peer URL --genesis-hash 0xHEX --proposer 0xADDRESS --chain-id N --source-id UUID --run-id HEX32 [--replication-peer URL] [--bundle BUNDLE] [--state-retention archive|N (full only)]\narkiv-proposer sign --key-file FILE --genesis-file FILE --tx-file FILE --nonce N --out FILE\narkiv-proposer create --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --payload-file FILE --out FILE [--salt 0] [--gas-limit 1000000] [--lifetime-blocks 17280]\narkiv-proposer transfer --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --to 0xADDRESS --amount-wei DECIMAL --out FILE [--gas-limit 21000]\narkiv-proposer submit --peer URL --transaction-file FILE\nOptional private Prometheus exporter: --metrics-listen 127.0.0.1:9600 [--metrics-interval-secs 300] (minimum 10). Metrics use rogue_one_ prefix.\nPrivate listener/full replication use ARKIV_PROPOSER_TOKEN (at least 32 bytes). Producer starts paused. Every chain runs the glm-v2 gas profile with funded accounts. A bundle chain creates the entities namespace (and its prefill) at height 0; a chain created from --allocations-file creates it with the proposer's bootstrap transaction in block 1. Each run exports public genesis.bin/certificate.bin. Sign/create files use native canonical bytes; submit polls pending/included status. Single-proposer authentication supplies no consensus or finality. Bodies are retained in history.redb separately from node.redb. --state-retention N serves state (balances, proofs, queries, receipts/logs) only for the head and the N snapshots before it and refuses older heights with HistoryPruned; archive (default) serves every height. Nothing is deleted yet, and a pruned floor never moves back."
         );
         return Ok(());
     }

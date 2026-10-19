@@ -96,6 +96,30 @@ def helper_bundle(root, rows):
     (root / "SHA256SUMS").write_text("".join(hashlib.sha256((root / name).read_bytes()).hexdigest() + "  " + name + "\n" for name in pins))
 
 
+def imported_bundle(root, rows):
+    helper_bundle(root, rows)
+    provenance = json.loads((root / "provenance.json").read_bytes())
+    original = provenance["source"]
+    original["schema"] = "arkiv-prefill.postgres-imported-seed.v1"
+    count = original["source"]["contracts"]["count"]
+    original["source"] = {"chainId": 1, "readOnly": True, "requested": {"mode": "imported-contracts", "count": count},
+                          "contracts": {"count": count}, "count": len(rows), "uploaded": sum(row["$key"] != "0x" + hashlib.sha256(b"arkiv-prefill.imported-staging.v1:" + row["stagingid"][10:].encode()).hexdigest() for row in rows), "synthetic": sum(row["$key"] == "0x" + hashlib.sha256(b"arkiv-prefill.imported-staging.v1:" + row["stagingid"][10:].encode()).hexdigest() for row in rows)}
+    original["identityPolicy"] = {"domain": "arkiv-prefill.imported-staging.v1:", "owner": CREATOR}
+    original["output"]["contracts"] = count
+    provenance["output"]["contracts"] = count
+    audit = [json.loads(line) for line in (root / "contracts.jsonl").read_bytes().splitlines()]
+    for i, row in enumerate(audit):
+        row["ordinal"] = str(i + 1)
+        row["inserted_at"] = row.pop("completed_at")
+    (root / "contracts.jsonl").write_bytes(b"".join(canonical(row) + b"\n" for row in audit))
+    for file in original["files"]:
+        raw = (root / file["path"]).read_bytes()
+        file.update(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+    (root / "provenance.json").write_bytes(canonical(provenance) + b"\n")
+    files = [file["path"] for file in original["files"]] + ["provenance.json"]
+    (root / "SHA256SUMS").write_text("".join(hashlib.sha256((root / name).read_bytes()).hexdigest() + "  " + name + "\n" for name in files))
+
+
 def uploaded_entity(kind, document, attrs, dependencies=None):
     payload = canonical(document) if isinstance(document, dict) else document
     ctype = "application/json" if isinstance(document, dict) else "application/octet-stream"
@@ -186,6 +210,105 @@ class ConversionTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_native_imported_manifest_and_subset(self):
+        source = self.root / "native"
+        imported_bundle(source, [entity("unused")] + uploaded_fixture())
+        provenance = json.loads((source / "provenance.json").read_bytes())["source"]
+        provenance["expiryPolicy"] = "never"
+        (source / "provenance.json").write_bytes(canonical(provenance) + b"\n")
+        pins = [file["path"] for file in provenance["files"]] + ["provenance.json"]
+        (source / "SHA256SUMS").write_text("".join(hashlib.sha256((source / name).read_bytes()).hexdigest() + "  " + name + "\n" for name in pins))
+        result = p.run(options(source, self.root / "out", "--contract-limit", "1"))
+        self.assertEqual((result["entities"], result["sourceEntities"]), (4, 5))
+
+    def test_imported_subset_complete_closure_and_renumber(self):
+        rows = uploaded_fixture()
+        unused = entity("unselected source")
+        source = self.root / "imported"
+        imported_bundle(source, [unused] + rows)
+        result = p.run(options(source, self.root / "out", "--contract-limit", "1"))
+        self.assertEqual(result["entities"], 4)
+        self.assertEqual(result["sourceEntities"], 5)
+        self.assertEqual(result["inputContracts"], 1)
+        self.assertEqual([f["nonce"] for f in frames(self.root / "out/prefill.bin")], list(range(4)))
+        keys = [json.loads(line) for line in (self.root / "out/keys.jsonl").read_bytes().splitlines()]
+        self.assertEqual({k["sourceKey"] for k in keys}, {r["$key"] for r in rows})
+
+    def test_imported_subset_excludes_second_contract_root(self):
+        rows = uploaded_fixture()
+        first = rows[0]
+        document = json.loads(base64.b64decode(first["$payload"]))
+        document["address"] = "0x" + "34" * 20
+        attrs = {"address": {"type": "addr", "value": document["address"]},
+                 "chainid": {"type": "u64", "value": "1"},
+                 "compilationref": {"type": "key", "value": rows[2]["$key"]}}
+        second = uploaded_entity("verified_contract", document, attrs, {rows[2]["$key"]: rows[2]})
+        source = self.root / "imported"
+        imported_bundle(source, [entity("unused")] + rows + [second])
+        one = p.run(options(source, self.root / "one", "--contract-limit", "1"))
+        two = p.run(options(source, self.root / "two", "--contract-limit", "2"))
+        self.assertEqual((one["entities"], two["entities"]), (4, 5))
+        self.assertEqual((one["sourceContracts"], one["inputContracts"]), (2, 1))
+
+    def test_imported_subset_follows_transitive_spill_parts(self):
+        rows = uploaded_fixture()
+        content = "x" * 130000
+        logical = canonical({"schema": "sourcify.sourcefile.v1", "content": content})
+        digest = "0x" + hashlib.sha256(logical).hexdigest()
+        blobs = [uploaded_entity("blob", logical[i:i + 100000], {
+            "hash": {"type": "bytes32", "value": digest}, "part": {"type": "i32", "value": i // 100000},
+            "parts": {"type": "i32", "value": 2}, "size": {"type": "i32", "value": len(logical[i:i + 100000])}})
+                 for i in range(0, len(logical), 100000)]
+        spill = uploaded_entity("sourcefile", {"$spill": {"hash": digest, "bytes": len(logical), "parts": 2}},
+                                {"hash": {"type": "bytes32", "value": "0x" + hashlib.sha256(content.encode()).hexdigest()}})
+        rows[3] = uploaded_entity("code", b"code", {
+            "hash": {"type": "bytes32", "value": rows[3]["hash"][8:]},
+            "extra": {"type": "key", "value": spill["$key"]}}, {spill["$key"]: spill})
+        source = self.root / "imported"
+        imported_bundle(source, [entity("unused")] + rows + [spill] + blobs)
+        result = p.run(options(source, self.root / "out", "--contract-limit", "1"))
+        self.assertEqual(result["entities"], 7)
+        self.assertEqual(result["entitiesByKind"]["blob"], 2)
+
+    def test_imported_synthetic_owner_rejected(self):
+        source = self.root / "imported"
+        imported_bundle(source, [entity("unused", "0x" + "34" * 20)] + uploaded_fixture())
+        with self.assertRaisesRegex(p.Invalid, "synthetic identity owner mismatch"):
+            p.run(options(source, self.root / "out", "--contract-limit", "1"))
+
+    def test_subset_expiry_capacity_uses_selected_count(self):
+        source = self.root / "imported"
+        imported_bundle(source, [entity(str(i)) for i in range(20)] + uploaded_fixture())
+        result = p.run(options(source, self.root / "out", "--contract-limit", "1", "--min-expiry", "1", "--max-expiry", "1"))
+        self.assertEqual((result["entities"], result["sourceEntities"]), (4, 24))
+
+    def test_imported_subset_rejects_selected_payload_corruption(self):
+        rows = uploaded_fixture()
+        rows[1]["$payload"] = base64.b64encode(b"wrong").decode()
+        source = self.root / "imported"
+        imported_bundle(source, [entity("unused")] + rows)
+        with self.assertRaisesRegex(p.Invalid, "payload checksum"):
+            p.run(options(source, self.root / "out", "--contract-limit", "1"))
+
+    def test_imported_subset_missing_dependency_rejected(self):
+        rows = uploaded_fixture()
+        source = self.root / "imported"
+        imported_bundle(source, [entity("unused")] + rows[:-1])
+        with self.assertRaisesRegex(p.Invalid, "missing code payload dependency"):
+            p.run(options(source, self.root / "out", "--contract-limit", "1"))
+
+    def test_imported_identity_counts_rejected(self):
+        rows = uploaded_fixture()
+        source = self.root / "imported"
+        imported_bundle(source, rows)
+        report, parts, _ = p.manifest(source, 7706815, 5)
+        report["identityCounts"] = (0, len(rows))
+        db = p.database(self.root / "test.sqlite", 1)
+        with self.assertRaisesRegex(p.Invalid, "imported identity counts mismatch"):
+            p.ingest(source, parts, report, db, options(source, self.root / "out", "--contract-limit", "1"), self.root)
+        db.close()
+
 
     def test_ethereum_keccak_known_vectors(self):
         self.assertEqual(p.keccak(b"abc").hexdigest(), "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45")

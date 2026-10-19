@@ -4,6 +4,12 @@
 Only this tool's new output/scratch directory is written. Dataset-sized indexes,
 rows, dependency edges and sort queues live in SQLite, not Python collections.
 The source bundle is never changed; conversion does not start a node.
+
+--contract-limit selects the first N imported contract audit ordinals and their
+complete dependency closure. All source checksums and wire inventory are checked;
+semantic payload validation applies to that closure. Source ordinals are retained,
+but selected creator nonces are reassigned, so nested subsets need not share the
+same derived destination keys.
 """
 
 import argparse
@@ -171,7 +177,7 @@ def manifest(root, chain_id, max_skipped):
     number(report.get("entities"), 0, (1 << 63) - 1, "entity count")
     number(report.get("contracts"), 0, (1 << 63) - 1, "contract count")
     part_locks = locks[2:]
-    if report["adapter"] == "helper-uploaded-v1":
+    if report["adapter"].startswith("helper-"):
         locks.append(report["contractsFile"])
     lock = {"schema": "arkiv-sourcify-source-lock-v1", "sourceChainId": 1,
             "destinationChainId": chain_id, "sha256sums": hashlib.sha256(sums_raw).hexdigest(),
@@ -185,31 +191,40 @@ def helper_manifest(provenance, chain_id, sums):
     Its permanent derivation replaces part hashes, while contracts/seed hashes
     remain those of the embedded original provenance. Never mix the two sets.
     """
-    require(isinstance(provenance, dict) and provenance.get("schema") == "arkiv-prefill.derived-permanent-seed.v1"
-            and provenance.get("status") == "completed", "unsupported/incomplete helper provenance")
-    derivation = provenance.get("derivation", {})
-    require(derivation.get("operation") == "replace every entity $expiresAt with never", "unsupported helper derivation")
-    for field in ("sourceChecksumsSha256", "sourceProvenanceSha256"):
-        require(isinstance(derivation.get(field), str) and re.fullmatch(r"[0-9a-f]{64}", derivation[field]), "invalid helper source pin")
-    original = provenance.get("source", {})
-    require(original.get("schema") == "arkiv-prefill.postgres-uploaded-seed.v1"
+    native_imported = isinstance(provenance, dict) and provenance.get("schema") == "arkiv-prefill.postgres-imported-seed.v1"
+    if native_imported:
+        require(provenance.get("status") == "completed" and provenance.get("expiryPolicy") == "never", "incomplete/nonpermanent imported provenance")
+        original = provenance
+    else:
+        require(isinstance(provenance, dict) and provenance.get("schema") == "arkiv-prefill.derived-permanent-seed.v1"
+                and provenance.get("status") == "completed", "unsupported/incomplete helper provenance")
+        derivation = provenance.get("derivation", {})
+        require(derivation.get("operation") == "replace every entity $expiresAt with never", "unsupported helper derivation")
+        for field in ("sourceChecksumsSha256", "sourceProvenanceSha256"):
+            require(isinstance(derivation.get(field), str) and re.fullmatch(r"[0-9a-f]{64}", derivation[field]), "invalid helper source pin")
+        original = provenance.get("source", {})
+    imported = original.get("schema") == "arkiv-prefill.postgres-imported-seed.v1"
+    require(original.get("schema") in ("arkiv-prefill.postgres-uploaded-seed.v1", "arkiv-prefill.postgres-imported-seed.v1")
             and original.get("status") == "completed", "unsupported/incomplete uploaded helper schema")
     source, output = original.get("source", {}), provenance.get("output", {})
     require(output == original.get("output") and output.get("chainId") == chain_id
             and output.get("dependencyClosed") is True, "inconsistent helper output inventory")
-    require(source.get("chainId") == chain_id and source.get("target") == "sorbet"
+    require((source.get("chainId") == 1 if imported else source.get("chainId") == chain_id and source.get("target") == "sorbet")
             and source.get("readOnly") is True, "unsupported helper source")
     requested, contracts = source.get("requested", {}), source.get("contracts", {})
-    require(requested.get("mode") == "contracts" and requested.get("count") == contracts.get("count"), "unsupported helper selection")
+    require(requested.get("mode") == ("imported-contracts" if imported else "contracts") and requested.get("count") == contracts.get("count"), "unsupported helper selection")
     count = number(output.get("entities"), 0, (1 << 63) - 1, "helper entity count")
     number(contracts.get("count"), 0, count, "helper contract count")
-    require(source.get("count") == count and source.get("unique_keys") == count, "inconsistent helper entity counts")
+    require(source.get("count") == count and (imported or source.get("unique_keys") == count), "inconsistent helper entity counts")
     kinds = output.get("kinds")
     require(isinstance(kinds, dict) and set(kinds) <= KINDS, "unsupported helper kinds")
     for value in kinds.values():
         number(value, 0, count, "helper kind count")
     require(sum(kinds.values()) == count and kinds.get("verified_contract", 0) == contracts["count"], "inconsistent helper kind counts")
     files = provenance.get("files")
+    if native_imported:
+        require(isinstance(files, list), "missing imported files")
+        files = [file for file in files if file.get("path") not in ("seed.json", "contracts.jsonl")]
     require(isinstance(files, list) and output.get("parts") == len(files), "inconsistent helper part count")
     original_files = original.get("files")
     require(isinstance(original_files, list), "missing original helper files")
@@ -224,9 +239,19 @@ def helper_manifest(provenance, chain_id, sums):
     for file in files:
         number(file.get("entities"), 0, count, "helper part entity count")
     require(sum(file["entities"] for file in files) == count, "inconsistent helper part entity counts")
-    return {"adapter": "helper-uploaded-v1", "entities": count, "contracts": contracts["count"],
+    if imported:
+        policy = original.get("identityPolicy", {})
+        require(policy.get("domain") == "arkiv-prefill.imported-staging.v1:", "unsupported imported identity domain")
+        owner = hex_bytes(policy.get("owner"), 20)
+        require(any(owner), "zero imported owner")
+        uploaded = number(source.get("uploaded"), 0, count, "uploaded identity count")
+        synthetic = number(source.get("synthetic"), 0, count, "synthetic identity count")
+        require(uploaded + synthetic == count and output.get("contracts") == contracts["count"], "imported identity/contract count mismatch")
+    return {"adapter": "helper-imported-v1" if imported else "helper-uploaded-v1",
+            "identityCounts": (uploaded, synthetic) if imported else None,
+            "syntheticOwner": owner if imported else None, "entities": count, "contracts": contracts["count"],
             "parts": files, "contractsFile": by_name["contracts.jsonl"], "helperOutput": output,
-            "publishers": number(source.get("publishers"), 1, count, "helper publisher count")}
+            "publishers": None if imported else number(source.get("publishers"), 1, count, "helper publisher count")}
 
 
 def decode_payload(row):
@@ -250,7 +275,7 @@ def decode_payload(row):
     return payload, raw
 
 
-def validate_row(row, adapter="processor-v1"):
+def validate_row(row, adapter="processor-v1", decode=True):
     require(isinstance(row, dict) and {k for k in row if k.startswith("$")} == SYSTEM, "unsupported entity system fields")
     require(row["$expiresAt"] == "never" and row["$creationFlags"] == [], "unsupported source flags/expiry")
     creator = hex_bytes(row["$creator"], 20)
@@ -262,7 +287,7 @@ def validate_row(row, adapter="processor-v1"):
     sid = hex_bytes(typed(row, "stagingid", "bytes32"), 32)
     old_key = hex_bytes(row["$key"], 32)
     expected = hashlib.sha256(b"arkiv-prefill.imported-staging.v1:" + sid.hex().encode()).digest()
-    require(adapter == "helper-uploaded-v1" or old_key == expected, "source key does not match staging identity")
+    require(adapter.startswith("helper-") or old_key == expected, "source key does not match staging identity")
     attrs = {k: v for k, v in row.items() if not k.startswith("$")}
     require(len(attrs) <= ATTR_CAP, "too many user attributes")
     for name, value in attrs.items():
@@ -270,7 +295,8 @@ def validate_row(row, adapter="processor-v1"):
                 and "--" not in name and name.lower() not in RESERVED, f"invalid attribute name {name}")
         encode_value(value)
     encode_value("str:" + row["$contentType"])
-    payload, raw = decode_payload(row)
+    payload, raw = decode_payload(row) if decode else (base64.b64decode(row["$payload"], validate=True), b"")
+    require(len(payload) <= 120000, "wire payload exceeds limit")
     return creator, kind, sid, old_key, attrs, payload, raw
 
 
@@ -366,6 +392,8 @@ def database(path, cache_mib):
       CREATE TABLE ready(seq INTEGER PRIMARY KEY);
       CREATE TABLE contract_audit(address BLOB PRIMARY KEY,root_key BLOB UNIQUE NOT NULL) WITHOUT ROWID;
       CREATE TABLE verified_compilations(seq INTEGER PRIMARY KEY);
+      CREATE TABLE selected(seq INTEGER PRIMARY KEY,done INTEGER NOT NULL);
+      CREATE INDEX selected_work ON selected(done,seq);
     """)
     return db
 
@@ -374,6 +402,7 @@ def ingest(root, parts, report, db, args, scratch):
     counts = collections.Counter()
     attributes = collections.Counter()
     total = payload_bytes = wire_bytes = max_wire = key_references = 0
+    identity_counts = [0, 0]
     for part in parts:
         digest, size = hashlib.sha256(), 0
         with open_relative(root, part["path"]) as source:
@@ -386,7 +415,11 @@ def ingest(root, parts, report, db, args, scratch):
                 size += len(raw_line)
                 require(raw_line.strip(), "blank entity line")
                 row = parse_json(raw_line)
-                creator, kind, sid, key, attrs, payload, raw = validate_row(row, report["adapter"])
+                creator, kind, sid, key, attrs, payload, raw = validate_row(row, report["adapter"], decode=not args.contract_limit)
+                if report["adapter"] == "helper-imported-v1":
+                    synthetic = key == hashlib.sha256(b"arkiv-prefill.imported-staging.v1:" + sid.hex().encode()).digest()
+                    identity_counts[int(synthetic)] += 1
+                    require(not synthetic or creator == report["syntheticOwner"], "synthetic identity owner mismatch")
                 nonce_row = db.execute("SELECT nonce FROM creators WHERE creator=?", (creator,)).fetchone()
                 nonce = nonce_row[0] if nonce_row else 0
                 db.execute("INSERT INTO creators VALUES(?,?) ON CONFLICT(creator) DO UPDATE SET nonce=excluded.nonce", (creator, nonce + 1))
@@ -410,17 +443,21 @@ def ingest(root, parts, report, db, args, scratch):
         db.commit()
         progress("ingest", total, force=True)
     require(total == report["entities"], "entity count differs from source report")
-    if report["adapter"] == "helper-uploaded-v1":
+    if report["adapter"].startswith("helper-"):
         output = report["helperOutput"]
         require(dict(counts) == output["kinds"] and wire_bytes == output.get("payloadBytes")
                 and max_wire == output.get("maxPayloadBytes") and key_references == output.get("keyReferences"), "helper row inventory mismatch")
-        require(db.execute("SELECT count(*) FROM creators").fetchone()[0] == report["publishers"], "helper publisher count mismatch")
+        if report["publishers"] is not None:
+            require(db.execute("SELECT count(*) FROM creators").fetchone()[0] == report["publishers"], "helper publisher count mismatch")
+        if report["identityCounts"] is not None:
+            require(tuple(identity_counts) == report["identityCounts"], "imported identity counts mismatch")
         helper_contracts(root, report, db, args, scratch)
-    require(total <= EXPIRY_CAP * (args.max_expiry - args.min_expiry + 1), "dataset exceeds finite-expiry capacity")
+    require(args.contract_limit or total <= EXPIRY_CAP * (args.max_expiry - args.min_expiry + 1), "dataset exceeds finite-expiry capacity")
     return {"entities": total, "entitiesByKind": dict(sorted(counts.items())),
             "attributeCounts": {str(k): v for k, v in sorted(attributes.items())},
             "maxUserAttributes": max(attributes, default=0), "decodedPayloadBytes": payload_bytes,
-            "wirePayloadBytes": wire_bytes, "inputContracts": report["contracts"]}
+            "wirePayloadBytes": wire_bytes, "inputContracts": report["contracts"],
+            "sourceIdentityCounts": dict(zip(("uploaded", "synthetic"), identity_counts)) if report["adapter"] == "helper-imported-v1" else None}
 
 
 def helper_contracts(root, report, db, args, scratch):
@@ -435,16 +472,22 @@ def helper_contracts(root, report, db, args, scratch):
             digest.update(raw)
             size += len(raw)
             row = parse_json(raw)
-            require(isinstance(row, dict) and set(row) == {"address", "contract_id", "root_entity_key", "completed_at"}, "unsupported contract audit schema")
+            imported = report["adapter"] == "helper-imported-v1"
+            fields = {"address", "contract_id", "root_entity_key", "ordinal", "inserted_at"} if imported else {"address", "contract_id", "root_entity_key", "completed_at"}
+            require(isinstance(row, dict) and set(row) == fields, "unsupported contract audit schema")
+            if imported:
+                require(row["ordinal"] == str(count + 1), "noncontiguous contract audit ordinal")
             address, key = hex_bytes(row["address"], 20), hex_bytes(row["root_entity_key"], 32)
             require(isinstance(row["contract_id"], str) and re.fullmatch(r"[0-9a-f]{64}", row["contract_id"])
-                    and isinstance(row["completed_at"], str) and row["completed_at"], "invalid contract audit identity")
+                    and isinstance(row["inserted_at" if imported else "completed_at"], str) and row["inserted_at" if imported else "completed_at"], "invalid contract audit identity")
             found = db.execute("SELECT kind,raw FROM entities WHERE old_key=?", (key,)).fetchone()
             require(found is not None and found[0] == "verified_contract", "missing contract audit root")
             entity = parse_json(found[1])
             require(hex_bytes(typed(entity, "address", "addr"), 20) == address
                     and typed(entity, "chainid", "u64") == "1", "contract audit address/chain mismatch")
             db.execute("INSERT INTO contract_audit VALUES(?,?)", (address, key))
+            if args.contract_limit and count < args.contract_limit:
+                db.execute("INSERT INTO selected VALUES(?,0)", (db.execute("SELECT seq FROM entities WHERE old_key=?", (key,)).fetchone()[0],))
             count += 1
             if count % 1024 == 0:
                 db.commit()
@@ -537,9 +580,23 @@ def helper_dependencies(db, seq, row, document, args):
     db.execute("INSERT OR IGNORE INTO verified_compilations VALUES(?)", (found[0],))
 
 
+def dependency_rows(db, subset):
+    if not subset:
+        yield from db.execute("SELECT seq,raw FROM entities ORDER BY seq")
+        return
+    while True:
+        row = db.execute("SELECT e.seq,e.raw FROM selected s JOIN entities e ON s.seq=e.seq WHERE s.done=0 ORDER BY s.seq LIMIT 1").fetchone()
+        if row is None:
+            return
+        yield row
+        db.execute("UPDATE selected SET done=1 WHERE seq=?", (row[0],))
+        db.execute("INSERT OR IGNORE INTO selected SELECT dependency,0 FROM edges WHERE parent=?", (row[0],))
+
+
 def dependencies(db, args, scratch, adapter="processor-v1"):
-    for seq, raw_line in db.execute("SELECT seq,raw FROM entities ORDER BY seq"):
+    for processed, (seq, raw_line) in enumerate(dependency_rows(db, args.contract_limit), 1):
         row = parse_json(raw_line)
+        validate_row(row, adapter)
         _, raw = decode_payload(row)
         staging_identity(row, raw, db)
         for name, value in row.items():
@@ -554,14 +611,14 @@ def dependencies(db, args, scratch, adapter="processor-v1"):
         if kind in ("sourcefile", "compilation", "verified_contract"):
             document = parse_json(logical)
             schemas = {"sourcefile": "sourcify.sourcefile.v1", "compilation": "sourcify.compilation.v3", "verified_contract": "sourcify.verified-contract.v3"}
-            if adapter == "helper-uploaded-v1":
+            if adapter.startswith("helper-"):
                 schemas.update(compilation="sourcify.compilation.v2", verified_contract="sourcify.verifiedContract.v2")
             schema = schemas[kind]
             require(isinstance(document, dict) and document.get("schema") == schema, f"unsupported {kind} payload schema")
             if kind == "sourcefile":
                 require(isinstance(document.get("content"), str) and hashlib.sha256(document["content"].encode()).digest()
                         == hex_bytes(typed(row, "hash", "bytes32"), 32), "source content hash mismatch")
-            elif adapter == "helper-uploaded-v1":
+            elif adapter.startswith("helper-"):
                 helper_dependencies(db, seq, row, document, args)
             else:
                 require(isinstance(document.get("data"), dict) and isinstance(document.get("references"), list), "invalid payload envelope")
@@ -576,14 +633,66 @@ def dependencies(db, args, scratch, adapter="processor-v1"):
                     require(ref_kind in ("sourcefile", "code", "compilation"), "unsupported payload reference kind")
                     target, _ = resolve(db, ref_kind, reference.get("hash"))
                     add_edge(db, seq, target)
-        if seq % 1024 == 0:
+        if processed % 1024 == 0:
             db.commit()
             check_disk(scratch, args.reserve_gib * GIB)
-            progress("dependencies", seq + 1)
-    if adapter == "helper-uploaded-v1":
-        require(db.execute("SELECT 1 FROM entities e LEFT JOIN verified_compilations v ON e.seq=v.seq WHERE e.kind='compilation' AND v.seq IS NULL LIMIT 1").fetchone() is None,
+            progress("dependencies", processed)
+    if adapter.startswith("helper-"):
+        require(db.execute("SELECT 1 FROM entities e LEFT JOIN verified_compilations v ON e.seq=v.seq WHERE e.kind='compilation' AND v.seq IS NULL AND (?=0 OR e.seq IN (SELECT seq FROM selected)) LIMIT 1", (args.contract_limit or 0,)).fetchone() is None,
                 "helper compilation has no verified contract fingerprint")
     db.commit()
+
+
+def select_inventory(db, args, original):
+    scratch = args.out.absolute().parent
+    for lower in range(0, original["entities"], 1024):
+        db.execute("DELETE FROM entities WHERE seq>=? AND seq<? AND seq NOT IN (SELECT seq FROM selected)", (lower, lower + 1024))
+        db.execute("UPDATE entities SET nonce=nonce+? WHERE seq>=? AND seq<?", (original["entities"], lower, lower + 1024))
+        db.commit()
+        check_disk(scratch, args.reserve_gib * GIB)
+        progress("subset-prune", min(lower + 1024, original["entities"]))
+    db.execute("DELETE FROM creators")
+    # Pruning moved nonces out of the new range; now assign compact nonces.
+    counts, attributes = collections.Counter(), collections.Counter()
+    payload_bytes = wire_bytes = 0
+    identities = collections.Counter()
+    for processed, (seq, creator, raw) in enumerate(db.execute("SELECT seq,creator,raw FROM entities ORDER BY seq"), 1):
+        row = parse_json(raw)
+        _, kind, sid, key, attrs, payload, decoded = validate_row(row, "helper-imported-v1")
+        synthetic = key == hashlib.sha256(b"arkiv-prefill.imported-staging.v1:" + sid.hex().encode()).digest()
+        identities["synthetic" if synthetic else "uploaded"] += 1
+        prior = db.execute("SELECT nonce FROM creators WHERE creator=?", (creator,)).fetchone()
+        nonce = prior[0] if prior else 0
+        # Old derived keys can collide with new ones until all are reassigned.
+        db.execute("UPDATE entities SET new_key=?,nonce=? WHERE seq=?", (b"temporary:" + seq.to_bytes(8, "big"), nonce, seq))
+        db.execute("INSERT INTO creators VALUES(?,?) ON CONFLICT(creator) DO UPDATE SET nonce=excluded.nonce", (creator, nonce + 1))
+        counts[kind] += 1
+        attributes[len(attrs)] += 1
+        payload_bytes += len(decoded)
+        wire_bytes += len(payload)
+        if processed % 1024 == 0:
+            db.commit()
+            check_disk(scratch, args.reserve_gib * GIB)
+            progress("subset-nonces", processed)
+    db.commit()
+    for processed, (seq, creator, nonce) in enumerate(db.execute("SELECT seq,creator,nonce FROM entities ORDER BY seq"), 1):
+        db.execute("UPDATE entities SET new_key=? WHERE seq=?", (derived_key(args.chain_id, creator, nonce), seq))
+        if processed % 1024 == 0:
+            db.commit()
+            check_disk(scratch, args.reserve_gib * GIB)
+            progress("subset-keys", processed)
+    require(counts["verified_contract"] == args.contract_limit, "closure contains extra contract roots")
+    require(sum(counts.values()) <= EXPIRY_CAP * (args.max_expiry - args.min_expiry + 1), "dataset exceeds finite-expiry capacity")
+    db.commit()
+    return {"entities": sum(counts.values()), "entitiesByKind": dict(sorted(counts.items())),
+            "attributeCounts": {str(k): v for k, v in sorted(attributes.items())},
+            "maxUserAttributes": max(attributes, default=0), "decodedPayloadBytes": payload_bytes,
+            "wirePayloadBytes": wire_bytes, "inputContracts": args.contract_limit,
+            "sourceEntities": original["entities"], "sourceContracts": original["inputContracts"],
+            "sourceIdentityCounts": original["sourceIdentityCounts"],
+            "selectedIdentityCounts": {kind: identities[kind] for kind in ("uploaded", "synthetic")},
+            "validationScope": "all-source-checksums-and-wire-inventory/selected-closure-semantic-validation",
+            "selectionPolicy": "first-audited-contract-ordinals-and-complete-dependency-closure-v1"}
 
 
 def assign_expiry(db, count, maximum):
@@ -705,6 +814,10 @@ def run(args):
     require(destination.parent.is_dir(), "output parent must already exist")
     check_disk(destination.parent, args.reserve_gib * GIB)
     report, parts, lock = manifest(root, args.chain_id, args.max_skipped)
+    if args.contract_limit is not None:
+        number(args.contract_limit, 1, report["contracts"], "contract limit")
+        require(report["adapter"] == "helper-imported-v1", "contract limit requires imported helper audit ordinals")
+        lock["selection"] = {"policy": "first-audited-contract-ordinals-and-complete-dependency-closure-v1", "contracts": args.contract_limit}
     with tempfile.TemporaryDirectory(prefix=".sourcify-prefill-", dir=destination.parent) as temporary:
         scratch = Path(temporary)
         staged = scratch / "published"
@@ -713,6 +826,8 @@ def run(args):
         try:
             inventory = ingest(root, parts, report, db, args, scratch)
             dependencies(db, args, scratch, report["adapter"])
+            if args.contract_limit:
+                inventory = select_inventory(db, args, inventory)
             minimum = assign_expiry(db, inventory["entities"], args.max_expiry)
             inventory.update({"schema": "arkiv-sourcify-conversion-v2", "chainId": args.chain_id,
                               "sourceLockSha256": hashlib.sha256(json_bytes(lock)).hexdigest(),
@@ -745,6 +860,7 @@ def parser():
     result.add_argument("--min-expiry", type=int, default=1, help="minimum acceptable dataset lifetime in blocks")
     result.add_argument("--max-expiry", type=int, default=MAX_EXPIRY)
     result.add_argument("--max-skipped", type=int, default=5)
+    result.add_argument("--contract-limit", type=int, help="first N imported audit ordinals, retaining complete dependency closure")
     result.add_argument("--cache-mib", type=int, default=64)
     result.add_argument("--max-logical-payload-mib", type=int, default=64)
     result.add_argument("--reserve-gib", type=int, default=80)

@@ -410,6 +410,8 @@ uses [bulk index construction](docs/bulk-prefill.md) with bounded external
 sorting and atomic publication. Incomplete construction restarts from input;
 completed private state can be reused. A
 [Sourcify converter](docs/sourcify-prefill-converter.md) preserves dataset references.
+The [matched 100k/200k bulk scaling report](docs/bulk-prefill-scaling.md) records
+producer startup, memory, write activity and final disk allocation.
 The [100,000-contract validation report](docs/streaming-prefill-100k-validation.md)
 records the historical incremental sample import, recovery and producer/full/light checks,
 including the existing broad equality-proof resource limit.

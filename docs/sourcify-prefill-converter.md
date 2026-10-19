@@ -14,7 +14,7 @@ python3 scripts/sourcify-prefill.py convert \
 ```
 
 The default destination chain is `7706815`; a different `--chain-id` must match
-the seed's chain ID. Both adapters accept seed version 1 and upload schema
+the seed's chain ID. All adapters accept seed version 1 and upload schema
 `sourcify-arkiv.upload.v1`. The pinned metadata selects the adapter automatically;
 the converter refuses ambiguous processor/helper manifests.
 
@@ -22,16 +22,22 @@ the converter refuses ambiguous processor/helper manifests.
 | --- | --- |
 | `processor-v1` | Completed `report.json` schema `sourcify-offline-import.v1`, required complete Ethereum-mainnet source, v3 compilation/verified-contract payloads |
 | `helper-uploaded-v1` | Completed `provenance.json` schema `arkiv-prefill.derived-permanent-seed.v1`, wrapping `arkiv-prefill.postgres-uploaded-seed.v1`; contract selection from Sorbet, v2 compilation/verified-contract payloads |
+| `helper-imported-v1` | Completed native `arkiv-prefill.postgres-imported-seed.v1` provenance with `expiryPolicy: never`, or its permanent derivation wrapper; imported Ethereum-mainnet contracts with mixed uploaded/synthetic identities, v2 compilation/verified-contract payloads |
 
 The processor adapter accepts up to five documented source skips by default;
 `--max-skipped 0` requires none. This option does not relax helper validation.
-The helper adapter checks the nested inventory, part pins from the permanent
-derivation, and unchanged `contracts.jsonl`/seed pins from original provenance.
+The helper adapters check the inventory and original `contracts.jsonl`/seed pins.
+For permanent derivations, entity-part pins come from the derivation while the
+contract audit and seed pins come from the embedded original provenance. Native
+imported provenance pins all these files directly.
 It streams the contract audit into SQLite, requiring unique addresses and root
 keys, matching Ethereum-mainnet contract entities, and matching totals, kinds,
-publisher count, payload bytes and typed-reference count. Other provenance
+publisher count for uploaded exports, payload bytes and typed-reference count.
+Imported exports require source chain ID 1, `imported-contracts` selection,
+matching uploaded/synthetic totals, the supported imported-key derivation domain
+and a nonzero synthetic owner. Other provenance
 versions, expiry policies and selection modes require an explicit extension.
-Neither adapter treats a provenance statement as a fresh RPC verification.
+No adapter treats a provenance statement as a fresh RPC verification.
 
 Metadata and each part are checked against `SHA256SUMS` and declared lengths. JSON duplicate
 members, duplicate entity identities/locators, missing dependencies, unsupported
@@ -41,6 +47,41 @@ The script uses Python's standard library, including SQLite and
 `hashlib.new("KECCAK-256")`. The latter requires a Python/OpenSSL build exposing
 Ethereum Keccak, such as this host's OpenSSL 3.5. It self-tests that algorithm and
 fails clearly when unavailable; NIST `sha3_256` is never substituted.
+
+## Deterministic imported-contract subsets
+
+For a native or derived imported-helper bundle, select the first N contract
+ordinals from its pinned `contracts.jsonl` audit:
+
+```sh
+python3 scripts/sourcify-prefill.py convert \
+  --bundle /absolute/path/to/imported-source \
+  --out /absolute/path/to/converted-200k --contract-limit 200000
+```
+
+The ordinal order records the exporter's oldest revision per distinct Ethereum
+address, ordered by insertion time and stable contract ID. The converter requires
+contiguous audit ordinals, distinct addresses and root keys, and matching source
+contract entities. It retains those roots and their complete transitive typed-key,
+payload-locator and spill-blob dependency closure. Shared dependencies occur once;
+unselected contract roots are excluded. The resulting entity count is not the
+contract limit. Missing dependencies or additional contract roots in the closure
+fail conversion. The limit is supported only for imported-helper input.
+
+Every source part is still streamed into bounded SQLite scratch and checked
+against its checksum, byte length, wire inventory and identity counts. Payload
+semantic validation applies to the selected closure: its staging identities,
+payload checksums, source/code hashes, compilation fingerprints and spill contents
+are all checked. Unselected payloads are not claimed to have passed semantic
+validation. The report explicitly records this `validationScope`.
+
+`source-lock.json` retains the original source pins and adds the selection policy
+and requested contract count; it does not invent a smaller source export.
+`sourceEntities`, `sourceContracts` and `sourceIdentityCounts` describe the full
+source. `entities`, `inputContracts`, `entitiesByKind` and
+`selectedIdentityCounts` describe the selected closure. Finite-expiry capacity
+is checked against that closure. Each invocation creates its own scratch and
+rechecks the source; it does not reuse another conversion's validation.
 
 ## Output and reproducibility
 
@@ -65,7 +106,10 @@ canonical bytes and recompute state and rent before publishing genesis. The
 conversion report is an audit artifact, not an authority for chain state.
 
 Per-creator nonces are consecutive from zero in the pinned source manifest's
-part/line order; salt is zero. The final stream is ordered by creator bytes and
+part/line order; salt is zero. Subset conversion assigns these nonces after
+selection, preserving original source ordinals in `keys.jsonl`. First-100k and
+first-200k subsets are nested in source keys/staging IDs, but shared entities can
+have different destination keys when the larger closure adds earlier entities. The final stream is ordered by creator bytes and
 nonce using SQLite's disk index. Changing source order can therefore change
 derived keys and genesis identity. Cache size, local paths and execution speed
 do not change canonical bytes. Attributes sort by exact name bytes.
@@ -74,13 +118,21 @@ Only typed `key` attributes are remapped. Payload hash references remain content
 locators. The converter recomputes the source's staging identity after
 resolving source-key references back to staging IDs, so keeping an old staging ID
 while silently changing its semantic attributes is rejected. Processor source
-keys must match its imported-staging derivation. Helper source keys are actual
-uploaded keys and are instead checked for uniqueness and joined to the contract
-audit; the processor key restriction is retained for processor input. Owner must equal
+keys must match its imported-staging derivation. Uploaded-helper keys are preserved source upload keys, checked for uniqueness
+and joined to the contract audit. Imported-helper inputs combine these with
+synthetic keys computed as SHA-256 of the ASCII domain
+`arkiv-prefill.imported-staging.v1:` followed by the lowercase staging-ID hex
+without `0x`. Synthetic identities must use the provenance owner; the complete
+source identity totals must match provenance. These checks do not independently
+prove an on-chain upload. The stricter processor key rule remains unchanged. Owner must equal
 creator, source expiry must be `never`, and source flags must be empty; other
 source policies need an explicit adapter extension.
 
-The v2 profile permits 64 total cells / 55 user attributes. The preserved
+The v2 frame profile permits 64 total cells / 55 user attributes. Current node
+entity-operation validation permits at most 32 supplied attributes, including
+payload and content type, so its effective limit is **30 user attributes**. The
+converter's `maxUserAttributesSupported: 55` describes its frame bound, not node
+admission; check the actual `maxUserAttributes` against 30 before bundle building. The preserved
 39d5b75 smoke bundle actually uses 29 attributes on verified-contract entities,
 including four Sourcify provenance IDs. These are preserved without schema
 packing or omission.
@@ -100,19 +152,30 @@ arkiv-proposer genesis stream-verify /absolute/path/to/new-node-bundle
 The base is an existing encoded signed genesis whose allocations fund the chosen
 sponsor. The builder clears any prior prefill, selects the v2 64-cell profile and
 recalculates the block expiry reservation. Chain ID, creator derivation and
-funding must match the intended launch. `stream-verify` independently replays the
-canonical stream and checks the resulting commitment.
+funding must match the intended launch. `stream-verify` independently constructs
+the canonical stream's state and checks the resulting commitment.
 
-Streaming replay uses 1 MiB batches by default; the builder accepts
-`--batch-bytes` to override this. A batch is reduced when durable preparation
-limits require it. Import-only decoded caches are bounded to 256 MiB and
-262,144 entries, and each import redb cache is bounded to 256 MiB. Durable checkpoints bind the prefix
-hash, stream cursor, state, logical units and accumulated burn; resumption checks
-the source prefix. This is separate from the converter's non-resumable scratch.
-Completed node-builder scratch is removed. The v2 protocol admission ceilings
-are 100,915,200 rows, 1 TiB canonical bytes, 1 PiB logical units, 8 MiB per frame
-and 55 user attributes; these are rejection bounds, not a measured capacity
-claim for this host or evidence that the full dataset has been imported.
+Version-two import uses bounded external sorting and bulk authenticated-index
+construction, without an incremental replay fallback. It validates canonical
+frames, spills sorted runs, merges them and builds complete posting lists and
+tries before publishing state. The deprecated `--batch-bytes` option controls
+progress sampling only; it does not set replay transaction sizes or sort buffers.
+See [the bulk construction design and measured resource behavior](bulk-prefill.md)
+and [streaming genesis resource bounds](streaming-genesis-v2.md).
+
+Incomplete `bulk-v1` scratch is rebuilt from input after interruption. Completed
+scratch may be reused only after validating its input/genesis binding, durable
+receipt and engine association. This is not committed-prefix resumption; old
+incremental checkpoints are not interpreted as bulk state. Final installation
+still copies reachable objects in bounded durable batches into the headless node
+store, then publishes height-zero metadata. A failed installation restarts its
+traversal; successful installation removes importer scratch. This recovery is
+separate from the converter's non-resumable SQLite scratch.
+
+The v2 protocol admission ceilings are 100,915,200 rows, 1 TiB canonical bytes,
+1 PiB logical units, 8 MiB per frame and 55 user attributes, with the effective
+node limit of 30 user attributes described above. These are rejection bounds,
+not a measured capacity claim for this host or evidence of a full-dataset import.
 
 ## Dependencies, expiry and funding
 
@@ -169,8 +232,8 @@ intervals between bounded row batches. The final JSON report remains on stdout.
 This first converter has atomic publication, **not resumable conversion**.
 Ordinary errors remove private scratch; an abrupt kill may leave an unreferenced
 `.sourcify-prefill-*` directory, which is never accepted as a finished bundle.
-Retry from the pinned source into a new destination. Durable node-import
-checkpoints are a separate mechanism. The original source remains the recovery
+Retry from the pinned source into a new destination. Completed bulk node-import
+scratch has a separate validated reuse mechanism. The original source remains the recovery
 input and is never deleted by this tool.
 
 ## Validation
@@ -190,8 +253,12 @@ members, line/decompression bounds, symlinks, expiry capacity and graph cycles.
 The optional processor test checks every payload and typed key reference.
 Helper tests cover uploaded keys, v2 dependencies/fingerprints, contract audit
 tampering, unsupported provenance and unchanged processor key restrictions.
-The optional helper test selects one complete contract closure from at most
-1,000 source rows; it does not launch the whole 445,583-entity conversion.
+Imported-adapter tests cover native and derived manifests, deterministic subset
+selection, shared dependencies, transitive spill closure, synthetic owner/count
+validation, missing or corrupt selected dependencies, nonce reassignment and
+expiry capacity based on the selected closure. The optional helper test accepts
+an uploaded or imported source directory and selects one complete contract
+closure from at most 1,000 source rows; it does not run a full-source conversion.
 
 The preserved 16-contract fixture converts to 263 rows, 288 dependency edges,
 795,646 canonical bytes, 1,544,460 logical storage units and

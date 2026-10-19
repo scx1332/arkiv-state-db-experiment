@@ -18,7 +18,7 @@ prefill, selects 64 total cells and recalculates the expiry reservation.
 export ARKIV_PREFILL_RESERVE_GIB=80
 arkiv-proposer genesis stream-build /data/base/genesis.bin \
   --prefill /data/converted/prefill.bin --out /data/bundle \
-  --sponsor 0xYOUR_FUNDED_SPONSOR --batch-bytes 65536
+  --sponsor 0xYOUR_FUNDED_SPONSOR --batch-bytes 1048576
 arkiv-proposer genesis stream-verify /data/bundle
 arkiv-proposer producer --bundle /data/bundle --run-dir /data/producer \
   --key-file /private/proposer.key --listen 127.0.0.1:9500
@@ -51,10 +51,14 @@ creator addresses and consecutive per-creator creation nonces. Attribute order,
 value encoding, row counts, total length, trailing bytes and the incremental
 Keccak commitment are checked.
 
-A replay batch defaults to 64 KiB of canonical row bytes, plus at most one
+A replay batch defaults to 1 MiB of canonical row bytes, plus at most one
 bounded row. A durable preparation limit triggers a retry from the last
 committed cursor with a smaller batch. Failure at one-row granularity is explicit.
-The existing decoded-node and redb caches remain separately bounded. No
+Import-only decoded-node caching is capped at 256 MiB and 262,144 entries; each
+import redb handle has a 256 MiB page cache. Copying uses two redb handles, so
+their caches plus the decoded cache have a combined configured ceiling of
+768 MiB, excluding batch buffers, traversal stacks and allocator overhead.
+Live node cache defaults are unchanged. No
 whole-dataset entity array, key set, report array or reachable-object visited set
 is retained in RAM. The importer reuses ordinary height-zero entity operations,
 including typed indexes, expiry accounting, record allocators and creator nonces.
@@ -74,7 +78,9 @@ rehashed without re-executing its entities. This is bounded memory but takes tim
 proportional to the consumed input; it is not an O(1) seek-only recovery promise.
 
 Staging generations compact after at least 1,024 batches and geometric physical
-file growth. The replacement contains only current reachable objects and its
+file growth. Each compaction emits one begin and one completion event with
+generation, source/output file sizes and elapsed time. The replacement contains
+only current reachable objects and its
 checkpoint. Its database and genesis description are synced before switching
 `CURRENT`; old generations are removed after the switch. A crash leaves the
 selected generation authoritative and any unselected successor disposable.
@@ -107,6 +113,32 @@ The processor-to-stream converter has atomic publication but is not resumable.
 The earlier Parquet-to-processor export also has its own memory characteristics;
 this work does not establish bounded memory for that separate executable.
 
+## Progress and measurement
+
+The importer writes one-line JSON progress records to **stderr**, leaving stdout
+for the final result JSON. Records use `event: "prefill_progress"` and stages
+`audit`, `recover_prefix`, and `replay`. Each phase reports at its start, roughly
+every ten seconds while processing, and on successful completion. Fields include
+`rows`, `totalRows`, `bytes`, `totalBytes`, `elapsedSeconds`,
+`checkpointSequence`, and `complete`. No source paths or credentials are logged.
+Automatic preparation retries emit `prefill_batch_retry` with the smaller
+`batchBytes` value and `reason: "prepare_resource_limit"`.
+
+Replay counters advance only after a durable checkpoint commits. Recovery counts
+prefix rows checked, not entities written again. Elapsed time restarts per phase
+and retry; checkpoint sequence is private to a staging generation and resets on
+compaction. A phase's `complete` record does not assert bundle publication or
+full benchmark acceptance: require the command's successful exit and final JSON.
+Compaction and final object copying can delay progress records while they run.
+
+Capture stderr alongside external measurements of cgroup memory/peak and events,
+process RSS, wall time, free disk, and allocated bytes for the staging and output
+directories. Keep raw samples and the exact command, binary revision, input hash,
+cache/batch settings, and restart history with the result. Measure physical disk
+allocation separately from logical storage units. Run one heavy phase at a time;
+progress rates from small or synthetic samples do not establish a full-dataset
+completion estimate.
+
 ## Validation evidence, 2026-10-19
 
 The isolated `scripts/streaming-prefill-smoke.py` accepts `--prefill` and a new
@@ -119,7 +151,8 @@ exit. It passed on the real 16-contract / 263-entity Sourcify fixture:
 - No prefill file in the light-node directory.
 
 Debug-build streaming construction of synthetic 29-attribute entities with
-1 KiB payloads, on the local host, produced these preliminary measurements:
+1 KiB payloads, on the local host, produced these preliminary measurements
+using the original 64 KiB batches and 8 MiB caches (before the import tuning):
 
 | Entities | Canonical bytes | Wall time | Peak process RSS | Peak cgroup memory |
 | --- | ---: | ---: | ---: | ---: |

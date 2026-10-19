@@ -408,6 +408,9 @@ use a [TOML genesis bundle with prefills](docs/examples/genesis-bundle/README.md
 For larger datasets, the [streaming genesis v2 path](docs/streaming-genesis-v2.md)
 uses bounded durable batches and resumable private staging; a
 [Sourcify converter](docs/sourcify-prefill-converter.md) preserves dataset references.
+The [100,000-contract validation report](docs/streaming-prefill-100k-validation.md)
+records the actual sample import, recovery and producer/full/light checks,
+including the existing broad equality-proof resource limit.
 
 Browse the signed node’s [API reference](docs/node-api-reference.md)
 at `/docs` (Scalar), with an OpenAPI specification at `/openapi.json`.

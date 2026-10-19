@@ -1,8 +1,8 @@
 # Sourcify prefill conversion
 
 `scripts/sourcify-prefill.py` converts a completed, checksummed Sourcify processor
-bundle into the experimental v2 canonical entity stream. It preserves the
-processor's compressed payload bytes, typed attributes, semantic content hashes
+or supported helper export into the experimental v2 canonical entity stream. It preserves the
+source's compressed payload bytes, typed attributes, semantic content hashes
 and staging identities. It writes only a new local output directory; it does not
 start a node, fund accounts, modify the source, or create a signed genesis.
 
@@ -14,12 +14,26 @@ python3 scripts/sourcify-prefill.py convert \
 ```
 
 The default destination chain is `7706815`; a different `--chain-id` must match
-the seed's chain ID. Input is processor seed version 1, report
-`sourcify-offline-import.v1`, upload schema `sourcify-arkiv.upload.v1`, and v3
-compilation/verified-contract payloads. The source must be a completed Ethereum
-mainnet export with the completion requirement enabled. Up to five documented
-source skips are accepted by default; `--max-skipped 0` requires none. Metadata
-and each part are checked against `SHA256SUMS` and report lengths. JSON duplicate
+the seed's chain ID. Both adapters accept seed version 1 and upload schema
+`sourcify-arkiv.upload.v1`. The pinned metadata selects the adapter automatically;
+the converter refuses ambiguous processor/helper manifests.
+
+| Adapter | Accepted metadata and payloads |
+| --- | --- |
+| `processor-v1` | Completed `report.json` schema `sourcify-offline-import.v1`, required complete Ethereum-mainnet source, v3 compilation/verified-contract payloads |
+| `helper-uploaded-v1` | Completed `provenance.json` schema `arkiv-prefill.derived-permanent-seed.v1`, wrapping `arkiv-prefill.postgres-uploaded-seed.v1`; contract selection from Sorbet, v2 compilation/verified-contract payloads |
+
+The processor adapter accepts up to five documented source skips by default;
+`--max-skipped 0` requires none. This option does not relax helper validation.
+The helper adapter checks the nested inventory, part pins from the permanent
+derivation, and unchanged `contracts.jsonl`/seed pins from original provenance.
+It streams the contract audit into SQLite, requiring unique addresses and root
+keys, matching Ethereum-mainnet contract entities, and matching totals, kinds,
+publisher count, payload bytes and typed-reference count. Other provenance
+versions, expiry policies and selection modes require an explicit extension.
+Neither adapter treats a provenance statement as a fresh RPC verification.
+
+Metadata and each part are checked against `SHA256SUMS` and declared lengths. JSON duplicate
 members, duplicate entity identities/locators, missing dependencies, unsupported
 schemas/types, unsafe paths and symlinks fail before publication.
 
@@ -57,9 +71,12 @@ derived keys and genesis identity. Cache size, local paths and execution speed
 do not change canonical bytes. Attributes sort by exact name bytes.
 
 Only typed `key` attributes are remapped. Payload hash references remain content
-locators. The converter recomputes the processor's staging identity after
+locators. The converter recomputes the source's staging identity after
 resolving source-key references back to staging IDs, so keeping an old staging ID
-while silently changing its semantic attributes is rejected. Owner must equal
+while silently changing its semantic attributes is rejected. Processor source
+keys must match its imported-staging derivation. Helper source keys are actual
+uploaded keys and are instead checked for uniqueness and joined to the contract
+audit; the processor key restriction is retained for processor input. Owner must equal
 creator, source expiry must be `never`, and source flags must be empty; other
 source policies need an explicit adapter extension.
 
@@ -86,8 +103,10 @@ recalculates the block expiry reservation. Chain ID, creator derivation and
 funding must match the intended launch. `stream-verify` independently replays the
 canonical stream and checks the resulting commitment.
 
-Node replay uses 64 KiB batches by default (`--batch-bytes`), reducing a batch
-when durable preparation limits require it. Durable checkpoints bind the prefix
+Streaming replay uses 1 MiB batches by default; the builder accepts
+`--batch-bytes` to override this. A batch is reduced when durable preparation
+limits require it. Import-only decoded caches are bounded to 256 MiB and
+262,144 entries, and each import redb cache is bounded to 256 MiB. Durable checkpoints bind the prefix
 hash, stream cursor, state, logical units and accumulated burn; resumption checks
 the source prefix. This is separate from the converter's non-resumable scratch.
 Completed node-builder scratch is removed. The v2 protocol admission ceilings
@@ -98,10 +117,16 @@ claim for this host or evidence that the full dataset has been imported.
 ## Dependencies, expiry and funding
 
 The disk graph includes typed entity-key references, source/code/compilation
-references in logical payload envelopes, and every spill-blob reference. The
-converter validates blob dimensions/checksums and reconstructed source/code/
-compilation content hashes. Local compilation references do not add external
-dependencies. Cyclic graphs and ambiguous/missing locators are rejected.
+references in logical payloads, and every spill-blob reference. The converter
+validates blob dimensions/checksums and reconstructed source/code hashes.
+Processor compilation hashes cover the v3 payload; helper v2 compilation hashes
+cover the original ordered fingerprint array of compiler details, settings,
+source path/hash pairs and four code hashes. Each helper compilation must have
+a contract that verifies this fingerprint. Helper `sources`, recompiled code
+locators and contract `codeRefs` become expiry dependencies. Local processor
+compilation references do not add external dependencies. Cyclic graphs and
+ambiguous/missing locators are rejected. Payloads are validated in their source
+schema and never rewritten into another payload version.
 
 A deterministic queue starts with entities that nobody depends on, breaking
 ties by source ordinal. Dependency nodes are scheduled after all their parents.
@@ -138,6 +163,9 @@ work under the separate 32 GiB cgroup limit. Inventory and conversion do not
 claim that the entire dataset or final node database fits this host until
 measured at scale.
 
+Progress goes to stderr at phase changes, completed parts and roughly ten-second
+intervals between bounded row batches. The final JSON report remains on stdout.
+
 This first converter has atomic publication, **not resumable conversion**.
 Ordinary errors remove private scratch; an abrupt kill may leave an unreferenced
 `.sourcify-prefill-*` directory, which is never accepted as a finished bundle.
@@ -151,13 +179,19 @@ input and is never deleted by this tool.
 python3 scripts/test-sourcify-prefill.py -v
 SOURCIFY_SMOKE_BUNDLE=/absolute/path/to/the/263-entity/bundle \
   python3 scripts/test-sourcify-prefill.py -v
+SOURCIFY_HELPER_BUNDLE=/absolute/path/to/sourcify-uploaded-100k-contracts-never \
+  python3 scripts/test-sourcify-prefill.py -v
 ```
 
 Tests cover Ethereum Keccak vectors, independent binary-frame decoding,
 determinism across cache sizes and multiple creators, manifest tampering,
 semantic identity tampering, unsupported schemas, duplicate identities/JSON
 members, line/decompression bounds, symlinks, expiry capacity and graph cycles.
-The optional real-bundle test checks every payload and typed key reference.
+The optional processor test checks every payload and typed key reference.
+Helper tests cover uploaded keys, v2 dependencies/fingerprints, contract audit
+tampering, unsupported provenance and unchanged processor key restrictions.
+The optional helper test selects one complete contract closure from at most
+1,000 source rows; it does not launch the whole 445,583-entity conversion.
 
 The preserved 16-contract fixture converts to 263 rows, 288 dependency edges,
 795,646 canonical bytes, 1,544,460 logical storage units and

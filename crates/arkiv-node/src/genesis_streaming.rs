@@ -17,6 +17,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufReader, Read, Write},
     path::Path,
+    time::{Duration, Instant},
 };
 
 pub use crate::genesis_streaming_compaction::check_disk;
@@ -31,7 +32,47 @@ pub const MAX_USER_ATTRIBUTES: u32 = 55;
 pub const MAX_ENTITIES: u64 = 100_915_200;
 pub const MAX_CANONICAL_BYTES: u64 = 1 << 40;
 pub const MAX_STORAGE_UNITS: u64 = 1 << 50;
-pub const DEFAULT_BATCH_BYTES: usize = 64 * 1024;
+pub const DEFAULT_BATCH_BYTES: usize = 1024 * 1024;
+
+/// Operational telemetry only: no paths, identities, or canonical fields change.
+struct Progress {
+    stage: &'static str,
+    started: Instant,
+    last: Option<Instant>,
+    total_rows: u64,
+    total_bytes: u64,
+}
+impl Progress {
+    fn new(stage: &'static str, total_rows: u64, total_bytes: u64) -> Self {
+        Self {
+            stage,
+            started: Instant::now(),
+            last: None,
+            total_rows,
+            total_bytes,
+        }
+    }
+    fn report(&mut self, rows: u64, bytes: u64, checkpoint: Option<u64>, complete: bool) {
+        let now = Instant::now();
+        if !complete
+            && self
+                .last
+                .is_some_and(|last| now.duration_since(last) < Duration::from_secs(10))
+        {
+            return;
+        }
+        self.last = Some(now);
+        let record = serde_json::json!({
+            "event": "prefill_progress", "stage": self.stage,
+            "rows": rows, "totalRows": self.total_rows,
+            "bytes": bytes, "totalBytes": self.total_bytes,
+            "elapsedSeconds": now.duration_since(self.started).as_secs_f64(),
+            "checkpointSequence": checkpoint, "complete": complete,
+        });
+        // Telemetry errors must never change import or publication behavior.
+        let _ = writeln!(std::io::stderr().lock(), "{record}");
+    }
+}
 
 pub fn validate_limits(l: PrefillLimits) -> Result<()> {
     if l.max_entities > MAX_ENTITIES
@@ -169,9 +210,17 @@ fn validate_row(row: &PrefillEntity) -> Result<()> {
     Ok(())
 }
 pub fn audit_stream(path: &Path, limits: PrefillLimits) -> Result<StreamSummary> {
-    let mut reader = StreamReader::new(BufReader::new(File::open(path).map_err(err)?), limits)?;
-    while reader.next_row()?.is_some() {}
-    reader.finish()
+    let file = File::open(path).map_err(err)?;
+    let bytes = file.metadata().map_err(err)?.len();
+    let mut reader = StreamReader::new(BufReader::new(file), limits)?;
+    let mut progress = Progress::new("audit", reader.rows, bytes);
+    progress.report(0, reader.bytes, None, false);
+    while reader.next_row()?.is_some() {
+        progress.report(reader.consumed, reader.bytes, None, false);
+    }
+    let summary = reader.finish()?;
+    progress.report(summary.rows, summary.bytes, None, true);
+    Ok(summary)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -251,6 +300,8 @@ fn replay(
         ) {
             Err(error) if batch_bytes > 1 && error.starts_with("batch preparation limit:") => {
                 batch_bytes = (batch_bytes / 2).max(1);
+                let record = serde_json::json!({"event": "prefill_batch_retry", "batchBytes": batch_bytes, "reason": "prepare_resource_limit"});
+                let _ = writeln!(std::io::stderr().lock(), "{record}");
             }
             result => return result,
         }
@@ -309,12 +360,27 @@ fn replay_once(
     }
     // Replay the prefix through the bounded parser/hash, never through the engine.
     // This binds every recovered cursor to exactly the input bytes already applied.
+    let mut recovery_progress = Progress::new("recover_prefix", cp.rows, cp.bytes);
+    if cp.rows > 0 {
+        recovery_progress.report(0, reader.bytes, Some(engine.head().sequence()), false);
+    }
     while reader.consumed < cp.rows {
         reader.next_row()?.ok_or("checkpoint beyond stream")?;
+        recovery_progress.report(
+            reader.consumed,
+            reader.bytes,
+            Some(engine.head().sequence()),
+            false,
+        );
     }
     if reader.bytes != cp.bytes || reader.prefix_hash().to_string() != cp.prefix {
         return Err("import checkpoint prefix mismatch".into());
     }
+    if cp.rows > 0 {
+        recovery_progress.report(cp.rows, cp.bytes, Some(engine.head().sequence()), true);
+    }
+    let mut progress = Progress::new("replay", summary.rows, summary.bytes);
+    progress.report(cp.rows, cp.bytes, Some(engine.head().sequence()), false);
     let mut burn = U256::from_str_radix(&cp.burn, 10).map_err(err)?;
     while reader.consumed < reader.rows || !initialized {
         check_disk(work_dir, options.prepare_bytes as u64)?;
@@ -416,6 +482,7 @@ fn replay_once(
         cp.prefix = reader.prefix_hash().to_string();
         cp.burn = burn.to_string();
         publish(&mut engine, branch, &cp)?;
+        progress.report(cp.rows, cp.bytes, Some(engine.head().sequence()), false);
         initialized = true;
         engine = crate::genesis_streaming_compaction::maybe_compact(
             work_dir,
@@ -450,6 +517,7 @@ fn replay_once(
         cp.finalized = true;
         publish(&mut engine, branch, &cp)?;
     }
+    progress.report(cp.rows, cp.bytes, Some(engine.head().sequence()), true);
     Ok((engine, burn, cp.units))
 }
 
@@ -496,7 +564,7 @@ pub fn prepare_streaming(
         p.sponsor,
         stream,
         work_dir,
-        options,
+        crate::genesis_streaming_compaction::import_options(options),
         DEFAULT_BATCH_BYTES,
         &summary,
     )?;
@@ -560,7 +628,7 @@ pub fn build_bundle(
         sponsor,
         stream,
         &work,
-        Options::default(),
+        crate::genesis_streaming_compaction::import_options(Options::default()),
         batch_bytes,
         &summary,
     )?;

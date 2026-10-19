@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a pinned Sourcify processor bundle to the experimental v2 prefill.
+"""Convert a pinned Sourcify processor/helper bundle to experimental v2 prefill.
 
 Only this tool's new output/scratch directory is written. Dataset-sized indexes,
 rows, dependency edges and sort queues live in SQLite, not Python collections.
@@ -21,6 +21,7 @@ import sqlite3
 import struct
 import sys
 import tempfile
+import time
 import zlib
 
 
@@ -136,19 +137,26 @@ def manifest(root, chain_id, max_skipped):
         sums[path] = digest
     documents = {}
     locks = []
-    for name in ("seed.json", "report.json"):
+    require(("report.json" in sums) != ("provenance.json" in sums), "ambiguous/unsupported source manifest")
+    audit_name = "report.json" if "report.json" in sums else "provenance.json"
+    for name in ("seed.json", audit_name):
         raw = read_small(root, name)
         digest = hashlib.sha256(raw).hexdigest()
         require(sums.get(name) == digest, f"{name}: checksum mismatch")
         documents[name] = parse_json(raw)
         locks.append({"path": name, "bytes": len(raw), "sha256": digest})
-    seed, report = documents["seed.json"], documents["report.json"]
+    seed = documents["seed.json"]
     require(set(seed) == {"version", "chainId", "entities"} and seed["version"] == 1, "unsupported seed schema/defaults")
     require(seed["chainId"] == chain_id, "destination chain ID differs from source seed")
-    require(report.get("schema") == "sourcify-offline-import.v1" and report.get("status") == "completed", "unsupported/incomplete processor report")
-    require(report.get("sourceChainId") == 1 and report.get("sourceCompleteRequired") is True, "complete Ethereum-mainnet source required")
-    number(report.get("sourceSkippedCount", 0), 0, max_skipped, "source skip count")
-    require(report.get("expiry") == "never", "unsupported source expiry policy")
+    if audit_name == "report.json":
+        report = documents[audit_name]
+        require(report.get("schema") == "sourcify-offline-import.v1" and report.get("status") == "completed", "unsupported/incomplete processor report")
+        require(report.get("sourceChainId") == 1 and report.get("sourceCompleteRequired") is True, "complete Ethereum-mainnet source required")
+        number(report.get("sourceSkippedCount", 0), 0, max_skipped, "source skip count")
+        require(report.get("expiry") == "never", "unsupported source expiry policy")
+        report = {**report, "adapter": "processor-v1"}
+    else:
+        report = helper_manifest(documents[audit_name], chain_id, sums)
     parts = seed["entities"]
     require(isinstance(parts, list) and len(parts) <= 100000 and len(parts) == len(report.get("parts", [])), "invalid part inventory")
     paths = set()
@@ -162,10 +170,63 @@ def manifest(root, chain_id, max_skipped):
         locks.append({"path": path, "bytes": audit["bytes"], "sha256": sums[path]})
     number(report.get("entities"), 0, (1 << 63) - 1, "entity count")
     number(report.get("contracts"), 0, (1 << 63) - 1, "contract count")
+    part_locks = locks[2:]
+    if report["adapter"] == "helper-uploaded-v1":
+        locks.append(report["contractsFile"])
     lock = {"schema": "arkiv-sourcify-source-lock-v1", "sourceChainId": 1,
             "destinationChainId": chain_id, "sha256sums": hashlib.sha256(sums_raw).hexdigest(),
             "files": locks, "sourceSkippedCount": report.get("sourceSkippedCount", 0)}
-    return report, locks[2:], lock
+    return report, part_locks, lock
+
+
+def helper_manifest(provenance, chain_id, sums):
+    """The pinned October export predates the processor and uses real chain keys.
+
+    Its permanent derivation replaces part hashes, while contracts/seed hashes
+    remain those of the embedded original provenance. Never mix the two sets.
+    """
+    require(isinstance(provenance, dict) and provenance.get("schema") == "arkiv-prefill.derived-permanent-seed.v1"
+            and provenance.get("status") == "completed", "unsupported/incomplete helper provenance")
+    derivation = provenance.get("derivation", {})
+    require(derivation.get("operation") == "replace every entity $expiresAt with never", "unsupported helper derivation")
+    for field in ("sourceChecksumsSha256", "sourceProvenanceSha256"):
+        require(isinstance(derivation.get(field), str) and re.fullmatch(r"[0-9a-f]{64}", derivation[field]), "invalid helper source pin")
+    original = provenance.get("source", {})
+    require(original.get("schema") == "arkiv-prefill.postgres-uploaded-seed.v1"
+            and original.get("status") == "completed", "unsupported/incomplete uploaded helper schema")
+    source, output = original.get("source", {}), provenance.get("output", {})
+    require(output == original.get("output") and output.get("chainId") == chain_id
+            and output.get("dependencyClosed") is True, "inconsistent helper output inventory")
+    require(source.get("chainId") == chain_id and source.get("target") == "sorbet"
+            and source.get("readOnly") is True, "unsupported helper source")
+    requested, contracts = source.get("requested", {}), source.get("contracts", {})
+    require(requested.get("mode") == "contracts" and requested.get("count") == contracts.get("count"), "unsupported helper selection")
+    count = number(output.get("entities"), 0, (1 << 63) - 1, "helper entity count")
+    number(contracts.get("count"), 0, count, "helper contract count")
+    require(source.get("count") == count and source.get("unique_keys") == count, "inconsistent helper entity counts")
+    kinds = output.get("kinds")
+    require(isinstance(kinds, dict) and set(kinds) <= KINDS, "unsupported helper kinds")
+    for value in kinds.values():
+        number(value, 0, count, "helper kind count")
+    require(sum(kinds.values()) == count and kinds.get("verified_contract", 0) == contracts["count"], "inconsistent helper kind counts")
+    files = provenance.get("files")
+    require(isinstance(files, list) and output.get("parts") == len(files), "inconsistent helper part count")
+    original_files = original.get("files")
+    require(isinstance(original_files, list), "missing original helper files")
+    by_name = {}
+    for file in original_files:
+        require(isinstance(file, dict) and isinstance(file.get("path"), str) and file["path"] not in by_name, "invalid helper file inventory")
+        by_name[file["path"]] = file
+    require(set(by_name) == {f.get("path") for f in files} | {"seed.json", "contracts.jsonl"}, "unexpected helper file inventory")
+    for name in ("seed.json", "contracts.jsonl"):
+        require(by_name[name].get("sha256") == sums.get(name), f"{name}: helper checksum mismatch")
+        number(by_name[name].get("bytes"), 0, (1 << 63) - 1, "helper file bytes")
+    for file in files:
+        number(file.get("entities"), 0, count, "helper part entity count")
+    require(sum(file["entities"] for file in files) == count, "inconsistent helper part entity counts")
+    return {"adapter": "helper-uploaded-v1", "entities": count, "contracts": contracts["count"],
+            "parts": files, "contractsFile": by_name["contracts.jsonl"], "helperOutput": output,
+            "publishers": number(source.get("publishers"), 1, count, "helper publisher count")}
 
 
 def decode_payload(row):
@@ -189,7 +250,7 @@ def decode_payload(row):
     return payload, raw
 
 
-def validate_row(row):
+def validate_row(row, adapter="processor-v1"):
     require(isinstance(row, dict) and {k for k in row if k.startswith("$")} == SYSTEM, "unsupported entity system fields")
     require(row["$expiresAt"] == "never" and row["$creationFlags"] == [], "unsupported source flags/expiry")
     creator = hex_bytes(row["$creator"], 20)
@@ -201,7 +262,7 @@ def validate_row(row):
     sid = hex_bytes(typed(row, "stagingid", "bytes32"), 32)
     old_key = hex_bytes(row["$key"], 32)
     expected = hashlib.sha256(b"arkiv-prefill.imported-staging.v1:" + sid.hex().encode()).digest()
-    require(old_key == expected, "source key does not match staging identity")
+    require(adapter == "helper-uploaded-v1" or old_key == expected, "source key does not match staging identity")
     attrs = {k: v for k, v in row.items() if not k.startswith("$")}
     require(len(attrs) <= ATTR_CAP, "too many user attributes")
     for name, value in attrs.items():
@@ -240,7 +301,7 @@ def encode_value(value, key_map=None):
             return b"\x10" + (value + (1 << 31)).to_bytes(4, "big")
         number(value, 0, (1 << 64) - 1, "u64")
         return b"\x0d" + value.to_bytes(8, "big")
-    raise Invalid(f"unsupported processor attribute type {tag}")
+    raise Invalid(f"unsupported source attribute type {tag}")
 
 
 def staging_identity(row, raw, db):
@@ -274,6 +335,18 @@ def check_disk(directory, reserve):
     require(shutil.disk_usage(directory).free >= reserve, "free disk is below configured reserve")
 
 
+_progress_time = 0.0
+_progress_phase = None
+
+
+def progress(phase, rows, force=False):
+    global _progress_time, _progress_phase
+    now = time.monotonic()
+    if force or phase != _progress_phase or now - _progress_time >= 10:
+        print(f"sourcify-prefill phase={phase} rows={rows}", file=sys.stderr, flush=True)
+        _progress_time, _progress_phase = now, phase
+
+
 def database(path, cache_mib):
     db = sqlite3.connect(path)
     db.execute("PRAGMA journal_mode=DELETE")
@@ -291,6 +364,8 @@ def database(path, cache_mib):
       CREATE TABLE edges(parent INTEGER NOT NULL,dependency INTEGER NOT NULL,PRIMARY KEY(parent,dependency)) WITHOUT ROWID;
       CREATE INDEX dependency_edges ON edges(dependency,parent);
       CREATE TABLE ready(seq INTEGER PRIMARY KEY);
+      CREATE TABLE contract_audit(address BLOB PRIMARY KEY,root_key BLOB UNIQUE NOT NULL) WITHOUT ROWID;
+      CREATE TABLE verified_compilations(seq INTEGER PRIMARY KEY);
     """)
     return db
 
@@ -298,7 +373,7 @@ def database(path, cache_mib):
 def ingest(root, parts, report, db, args, scratch):
     counts = collections.Counter()
     attributes = collections.Counter()
-    total = payload_bytes = wire_bytes = 0
+    total = payload_bytes = wire_bytes = max_wire = key_references = 0
     for part in parts:
         digest, size = hashlib.sha256(), 0
         with open_relative(root, part["path"]) as source:
@@ -311,7 +386,7 @@ def ingest(root, parts, report, db, args, scratch):
                 size += len(raw_line)
                 require(raw_line.strip(), "blank entity line")
                 row = parse_json(raw_line)
-                creator, kind, sid, key, attrs, payload, raw = validate_row(row)
+                creator, kind, sid, key, attrs, payload, raw = validate_row(row, report["adapter"])
                 nonce_row = db.execute("SELECT nonce FROM creators WHERE creator=?", (creator,)).fetchone()
                 nonce = nonce_row[0] if nonce_row else 0
                 db.execute("INSERT INTO creators VALUES(?,?) ON CONFLICT(creator) DO UPDATE SET nonce=excluded.nonce", (creator, nonce + 1))
@@ -325,17 +400,60 @@ def ingest(root, parts, report, db, args, scratch):
                 attributes[len(attrs)] += 1
                 payload_bytes += len(raw)
                 wire_bytes += len(payload)
+                max_wire = max(max_wire, len(payload))
+                key_references += sum(value.startswith("key:") for value in attrs.values())
                 if total % 1024 == 0:
                     db.commit()
                     check_disk(scratch, args.reserve_gib * GIB)
+                    progress("ingest", total)
         require(size == part["bytes"] and digest.hexdigest() == part["sha256"], f"{part['path']}: source checksum/length mismatch")
         db.commit()
-    require(total == report["entities"], "entity count differs from processor report")
+        progress("ingest", total, force=True)
+    require(total == report["entities"], "entity count differs from source report")
+    if report["adapter"] == "helper-uploaded-v1":
+        output = report["helperOutput"]
+        require(dict(counts) == output["kinds"] and wire_bytes == output.get("payloadBytes")
+                and max_wire == output.get("maxPayloadBytes") and key_references == output.get("keyReferences"), "helper row inventory mismatch")
+        require(db.execute("SELECT count(*) FROM creators").fetchone()[0] == report["publishers"], "helper publisher count mismatch")
+        helper_contracts(root, report, db, args, scratch)
     require(total <= EXPIRY_CAP * (args.max_expiry - args.min_expiry + 1), "dataset exceeds finite-expiry capacity")
     return {"entities": total, "entitiesByKind": dict(sorted(counts.items())),
             "attributeCounts": {str(k): v for k, v in sorted(attributes.items())},
             "maxUserAttributes": max(attributes, default=0), "decodedPayloadBytes": payload_bytes,
             "wirePayloadBytes": wire_bytes, "inputContracts": report["contracts"]}
+
+
+def helper_contracts(root, report, db, args, scratch):
+    audit = report["contractsFile"]
+    digest, size, count = hashlib.sha256(), 0, 0
+    with open_relative(root, audit["path"]) as source:
+        while True:
+            raw = source.readline(LINE_CAP + 1)
+            if not raw:
+                break
+            require(len(raw) <= LINE_CAP and raw.endswith(b"\n"), "oversized or unterminated contract audit line")
+            digest.update(raw)
+            size += len(raw)
+            row = parse_json(raw)
+            require(isinstance(row, dict) and set(row) == {"address", "contract_id", "root_entity_key", "completed_at"}, "unsupported contract audit schema")
+            address, key = hex_bytes(row["address"], 20), hex_bytes(row["root_entity_key"], 32)
+            require(isinstance(row["contract_id"], str) and re.fullmatch(r"[0-9a-f]{64}", row["contract_id"])
+                    and isinstance(row["completed_at"], str) and row["completed_at"], "invalid contract audit identity")
+            found = db.execute("SELECT kind,raw FROM entities WHERE old_key=?", (key,)).fetchone()
+            require(found is not None and found[0] == "verified_contract", "missing contract audit root")
+            entity = parse_json(found[1])
+            require(hex_bytes(typed(entity, "address", "addr"), 20) == address
+                    and typed(entity, "chainid", "u64") == "1", "contract audit address/chain mismatch")
+            db.execute("INSERT INTO contract_audit VALUES(?,?)", (address, key))
+            count += 1
+            if count % 1024 == 0:
+                db.commit()
+                check_disk(scratch, args.reserve_gib * GIB)
+                progress("contract-audit", count)
+    require(size == audit["bytes"] and digest.hexdigest() == audit["sha256"], "contract audit checksum/length mismatch")
+    require(count == report["contracts"], "contract audit count mismatch")
+    db.commit()
+    progress("contract-audit", count, force=True)
 
 
 def add_edge(db, parent, dependency):
@@ -376,7 +494,50 @@ def logical_payload(db, seq, row, raw, cap):
     return out.getvalue()
 
 
-def dependencies(db, args, scratch):
+def helper_dependencies(db, seq, row, document, args):
+    kind = typed(row, "kind", "str")
+    if kind == "compilation":
+        sources = document.get("sources")
+        require(isinstance(sources, dict), "invalid helper compilation sources")
+        for digest in sources.values():
+            target, _ = resolve(db, "sourcefile", digest)
+            add_edge(db, seq, target)
+        for field in ("recompiledCreationHash", "recompiledRuntimeHash"):
+            require(field in document, "missing helper compilation code locator")
+            if document[field] is not None:
+                target, _ = resolve(db, "code", document[field])
+                add_edge(db, seq, target)
+        return
+    require(str(document.get("chainId")) == "1"
+            and hex_bytes(document.get("address"), 20) == hex_bytes(typed(row, "address", "addr"), 20), "helper payload contract identity mismatch")
+    code_refs = document.get("codeRefs")
+    fields = ("creationOnchain", "creationRecompiled", "runtimeOnchain", "runtimeRecompiled")
+    require(isinstance(code_refs, dict) and set(code_refs) == set(fields), "invalid helper contract code references")
+    for digest in code_refs.values():
+        if digest is not None:
+            target, _ = resolve(db, "code", digest)
+            add_edge(db, seq, target)
+    found = db.execute("SELECT seq,kind,raw FROM entities WHERE old_key=?",
+                       (hex_bytes(typed(row, "compilationref", "key"), 32),)).fetchone()
+    require(found is not None and found[1] == "compilation", "invalid helper compilation reference")
+    compilation = parse_json(found[2])
+    _, raw = decode_payload(compilation)
+    compiled = parse_json(logical_payload(db, found[0], compilation, raw, args.max_logical_payload_mib << 20))
+    require(compiled.get("schema") == "sourcify.compilation.v2"
+            and isinstance(compiled.get("sources"), dict), "unsupported helper compilation payload")
+    require(compiled.get("recompiledCreationHash") == code_refs["creationRecompiled"]
+            and compiled.get("recompiledRuntimeHash") == code_refs["runtimeRecompiled"], "helper compilation/code mismatch")
+    # This historical fingerprint hashes the transform's ordered JSON array,
+    # not the compilation payload. Preserve source/settings key insertion order.
+    fingerprint = [compiled.get(field) for field in ("compiler", "compilerVersion", "language", "fullyQualifiedName")]
+    fingerprint.extend([compiled.get("compilerSettings") or {}, list(map(list, compiled["sources"].items()))])
+    fingerprint.extend(code_refs[field] for field in fields)
+    encoded = json.dumps(fingerprint, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
+    require(hashlib.sha256(encoded).digest() == hex_bytes(typed(compilation, "hash", "bytes32"), 32), "helper compilation fingerprint mismatch")
+    db.execute("INSERT OR IGNORE INTO verified_compilations VALUES(?)", (found[0],))
+
+
+def dependencies(db, args, scratch, adapter="processor-v1"):
     for seq, raw_line in db.execute("SELECT seq,raw FROM entities ORDER BY seq"):
         row = parse_json(raw_line)
         _, raw = decode_payload(row)
@@ -392,11 +553,16 @@ def dependencies(db, args, scratch):
             require(keccak(logical).digest() == hex_bytes(typed(row, "hash", "bytes32"), 32), "code content hash mismatch")
         if kind in ("sourcefile", "compilation", "verified_contract"):
             document = parse_json(logical)
-            schema = {"sourcefile": "sourcify.sourcefile.v1", "compilation": "sourcify.compilation.v3", "verified_contract": "sourcify.verified-contract.v3"}[kind]
+            schemas = {"sourcefile": "sourcify.sourcefile.v1", "compilation": "sourcify.compilation.v3", "verified_contract": "sourcify.verified-contract.v3"}
+            if adapter == "helper-uploaded-v1":
+                schemas.update(compilation="sourcify.compilation.v2", verified_contract="sourcify.verifiedContract.v2")
+            schema = schemas[kind]
             require(isinstance(document, dict) and document.get("schema") == schema, f"unsupported {kind} payload schema")
             if kind == "sourcefile":
                 require(isinstance(document.get("content"), str) and hashlib.sha256(document["content"].encode()).digest()
                         == hex_bytes(typed(row, "hash", "bytes32"), 32), "source content hash mismatch")
+            elif adapter == "helper-uploaded-v1":
+                helper_dependencies(db, seq, row, document, args)
             else:
                 require(isinstance(document.get("data"), dict) and isinstance(document.get("references"), list), "invalid payload envelope")
                 if kind == "compilation":
@@ -413,6 +579,10 @@ def dependencies(db, args, scratch):
         if seq % 1024 == 0:
             db.commit()
             check_disk(scratch, args.reserve_gib * GIB)
+            progress("dependencies", seq + 1)
+    if adapter == "helper-uploaded-v1":
+        require(db.execute("SELECT 1 FROM entities e LEFT JOIN verified_compilations v ON e.seq=v.seq WHERE e.kind='compilation' AND v.seq IS NULL LIMIT 1").fetchone() is None,
+                "helper compilation has no verified contract fingerprint")
     db.commit()
 
 
@@ -433,6 +603,7 @@ def assign_expiry(db, count, maximum):
             db.execute("INSERT OR IGNORE INTO ready SELECT seq FROM entities WHERE seq=? AND remaining=0", (dependency,))
         if rank % 1024 == 0:
             db.commit()
+            progress("expiry", rank + 1)
     db.commit()
     require(db.execute("SELECT 1 FROM edges JOIN entities p ON p.seq=parent JOIN entities d ON d.seq=dependency WHERE p.expiry>d.expiry LIMIT 1").fetchone() is None, "unsafe dependency expiry")
     return minimum
@@ -482,6 +653,7 @@ def emit(db, count, out_dir, args):
                                    "expiresAtHeight": str(expiry), "storageUnits": str(row_units), "rentWei": str(row_rent * 1000000000)}) + b"\n")
             if i % 1024 == 0:
                 check_disk(out_dir, args.reserve_gib * GIB)
+                progress("emit", i + 1)
         for file in (stream, keys):
             file.flush()
             os.fsync(file.fileno())
@@ -540,11 +712,12 @@ def run(args):
         db = database(scratch / "index.sqlite", args.cache_mib)
         try:
             inventory = ingest(root, parts, report, db, args, scratch)
-            dependencies(db, args, scratch)
+            dependencies(db, args, scratch, report["adapter"])
             minimum = assign_expiry(db, inventory["entities"], args.max_expiry)
             inventory.update({"schema": "arkiv-sourcify-conversion-v2", "chainId": args.chain_id,
                               "sourceLockSha256": hashlib.sha256(json_bytes(lock)).hexdigest(),
                               "sourceSkippedCount": report.get("sourceSkippedCount", 0),
+                              "sourceAdapter": report["adapter"],
                               "dependencyEdges": db.execute("SELECT count(*) FROM edges").fetchone()[0],
                               "expiryPolicy": "dependency-safe-v1", "expiryPerHeight": EXPIRY_CAP,
                               "minimumExpiryHeight": minimum, "maximumExpiryHeight": args.max_expiry,

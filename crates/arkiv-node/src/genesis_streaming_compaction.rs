@@ -13,10 +13,38 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
+    time::Instant,
 };
 type Result<T> = std::result::Result<T, String>;
 fn err(e: impl std::fmt::Display) -> String {
     format!("import generation: {e}")
+}
+/// Import-local caches: two redb handles during copying plus one decoded
+/// engine cache have a combined configured ceiling of 768 MiB. Preparation
+/// caps remain unchanged. These settings are operational, never canonical.
+const IMPORT_CACHE_BYTES: usize = 256 * 1024 * 1024;
+const IMPORT_CACHE_ENTRIES: usize = 262_144;
+pub fn import_options(mut options: Options) -> Options {
+    options.cache_bytes = IMPORT_CACHE_BYTES;
+    options.cache_entries = IMPORT_CACHE_ENTRIES;
+    options
+}
+fn import_redb_config() -> RedbConfig {
+    RedbConfig::with_cache_size(IMPORT_CACHE_BYTES)
+}
+fn compaction_progress(
+    phase: &str,
+    generation: u64,
+    source_bytes: u64,
+    output_bytes: Option<u64>,
+    started: Instant,
+) {
+    let record = serde_json::json!({
+        "event": "prefill_compaction", "phase": phase,
+        "generation": generation, "sourceBytes": source_bytes,
+        "outputBytes": output_bytes, "elapsedSeconds": started.elapsed().as_secs_f64(),
+    });
+    let _ = writeln!(std::io::stderr().lock(), "{record}");
 }
 /// Enforce a configurable free-space reserve before growing an import.
 /// `additional_bytes` is a conservative projection, not an exact disk quota.
@@ -192,9 +220,9 @@ pub fn open_stage(dir: &Path, original: EngineGenesis, options: Options) -> Resu
     }
     let store = Arc::new(
         if path.exists() {
-            RedbStore::open(&path, RedbConfig::default())
+            RedbStore::open(&path, import_redb_config())
         } else {
-            RedbStore::create(&path, RedbConfig::default())
+            RedbStore::create(&path, import_redb_config())
         }
         .map_err(err)?,
     );
@@ -253,11 +281,13 @@ pub fn maybe_compact(
     // Only an unselected successor is discarded. An interrupted copy cannot
     // have changed CURRENT, and copying again is safe.
     remove_generation(dir, next)?;
-    check_disk(dir, fs::metadata(db_path(dir, old)).map_err(err)?.len())?;
+    let source_bytes = fs::metadata(db_path(dir, old)).map_err(err)?.len();
+    check_disk(dir, source_bytes)?;
+    let started = Instant::now();
+    compaction_progress("begin", next, source_bytes, None, started);
     let mut genesis = original.clone();
     genesis.initial_state = Some(engine.head_snapshot().state_header());
-    let store =
-        Arc::new(RedbStore::create(db_path(dir, next), RedbConfig::default()).map_err(err)?);
+    let store = Arc::new(RedbStore::create(db_path(dir, next), import_redb_config()).map_err(err)?);
     let replacement = committed(
         engine
             .initialize_from_staged(store, genesis.clone(), options)
@@ -270,6 +300,8 @@ pub fn maybe_compact(
     drop(engine);
     remove_generation(dir, old)?;
     sync_dir(dir)?;
+    let output_bytes = fs::metadata(db_path(dir, next)).map_err(err)?.len();
+    compaction_progress("complete", next, source_bytes, Some(output_bytes), started);
     Ok(replacement)
 }
 
@@ -303,12 +335,19 @@ mod tests {
         // An interrupted predecessor attempt may have left arbitrary incomplete
         // successor files. They are unselected and can safely be rebuilt.
         fs::write(db_path(&dir, 1), b"incomplete copy").unwrap();
-        let engine = maybe_compact(&dir, engine, &original, options.clone(), true).unwrap();
+        let engine = maybe_compact(
+            &dir,
+            engine,
+            &original,
+            import_options(options.clone()),
+            true,
+        )
+        .unwrap();
         assert_eq!(current(&dir).unwrap(), Some(1));
         assert!(!db_path(&dir, 0).exists());
         assert_eq!(engine.head().sequence(), 0);
         drop(engine);
-        let mut reopened = open_stage(&dir, original, options).unwrap();
+        let mut reopened = open_stage(&dir, original, import_options(options)).unwrap();
         assert_eq!(reopened.head_snapshot().state_header(), root);
         assert_eq!(
             reopened.import_checkpoint(6).unwrap(),

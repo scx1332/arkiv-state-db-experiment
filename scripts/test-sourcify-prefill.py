@@ -6,6 +6,7 @@ Set SOURCIFY_SMOKE_BUNDLE to exercise the preserved 263-entity source fixture.
 """
 
 import base64
+import collections
 import hashlib
 import importlib.util
 import json
@@ -62,6 +63,76 @@ def bundle(root, rows, lines=None):
         (root / name).write_bytes(canonical(value) + b"\n")
     files = ["seed.json", "report.json", part["path"]]
     (root / "SHA256SUMS").write_text("".join(hashlib.sha256((root / name).read_bytes()).hexdigest() + "  " + name + "\n" for name in files))
+
+
+def helper_bundle(root, rows):
+    """A new test manifest around fixture rows; no claim of upload verification."""
+    bundle(root, rows)
+    (root / "report.json").unlink()
+    contracts = [{"address": row["address"][5:].lower(), "root_entity_key": row["$key"],
+                  "contract_id": "ab" * 32, "completed_at": "2026-10-02 01:02:03+00"}
+                 for row in rows if row["kind"] == "str:verified_contract"]
+    (root / "contracts.jsonl").write_bytes(b"".join(canonical(row) + b"\n" for row in contracts))
+    files = []
+    for name in ("entities/000001.jsonl", "contracts.jsonl", "seed.json"):
+        raw = (root / name).read_bytes()
+        files.append({"path": name, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+    files[0]["entities"] = len(rows)
+    output = {"chainId": 7706815, "entities": len(rows), "parts": 1, "dependencyClosed": True,
+              "kinds": dict(collections.Counter(row["kind"][4:] for row in rows)),
+              "keyReferences": sum(value.startswith("key:") for row in rows for name, value in row.items() if not name.startswith("$")),
+              "payloadBytes": sum(len(base64.b64decode(row["$payload"])) for row in rows),
+              "maxPayloadBytes": max(len(base64.b64decode(row["$payload"])) for row in rows)}
+    source = {"chainId": 7706815, "target": "sorbet", "readOnly": True, "count": len(rows),
+              "unique_keys": len(rows), "publishers": len({row["$creator"] for row in rows}),
+              "requested": {"mode": "contracts", "count": len(contracts)}, "contracts": {"count": len(contracts)}}
+    original = {"schema": "arkiv-prefill.postgres-uploaded-seed.v1", "status": "completed", "source": source,
+                "output": output, "files": files}
+    provenance = {"schema": "arkiv-prefill.derived-permanent-seed.v1", "status": "completed", "source": original,
+                  "output": output, "files": files[:1], "derivation": {"operation": "replace every entity $expiresAt with never",
+                  "sourceChecksumsSha256": "cd" * 32, "sourceProvenanceSha256": "ef" * 32}}
+    (root / "provenance.json").write_bytes(canonical(provenance) + b"\n")
+    pins = [file["path"] for file in files] + ["provenance.json"]
+    (root / "SHA256SUMS").write_text("".join(hashlib.sha256((root / name).read_bytes()).hexdigest() + "  " + name + "\n" for name in pins))
+
+
+def uploaded_entity(kind, document, attrs, dependencies=None):
+    payload = canonical(document) if isinstance(document, dict) else document
+    ctype = "application/json" if isinstance(document, dict) else "application/octet-stream"
+    attrs = {"projectId": {"type": "str", "value": "sourcify"}, "kind": {"type": "str", "value": kind}, **attrs}
+    staged_attrs = json.loads(json.dumps(attrs))
+    for value in staged_attrs.values():
+        if value["type"] == "key":
+            value["value"] = dependencies[value["value"]]["stagingid"][10:]
+    content = {"schema": "sourcify-arkiv.staging-entity.v1", "contentType": ctype, "payloadEncoding": "hex",
+               "payload": "0x" + payload.hex(), "attributes": staged_attrs, "keyReferences": "staging-entity-id"}
+    sid = hashlib.sha256(p.json_bytes({"kind": kind, "content": content})).hexdigest()
+    row = {"$key": "0x" + hashlib.sha256(b"actual-upload-key:" + sid.encode()).hexdigest(), "$creator": CREATOR,
+           "$owner": CREATOR, "$expiresAt": "never", "$creationFlags": [], "$contentType": ctype,
+           "$payload": base64.b64encode(payload).decode(), "contentencoding": "str:identity", "originalcontenttype": "str:" + ctype,
+           "payloadsha256": "bytes32:0x" + hashlib.sha256(payload).hexdigest(), "stagingid": "bytes32:0x" + sid,
+           "uploadschema": "str:sourcify-arkiv.upload.v1"}
+    for name, value in attrs.items():
+        row["projectid" if name == "projectId" else name] = f"{value['type']}:{value['value']}"
+    return row
+
+
+def uploaded_fixture():
+    source = entity("contract Example {}")
+    source["$key"] = "0x" + "ab" * 32
+    code_hash = "0x" + p.keccak(b"code").hexdigest()
+    code = uploaded_entity("code", b"code", {"hash": {"type": "bytes32", "value": code_hash}})
+    fingerprint = ["solc", "0.8.0", "Solidity", "Example.sol:Example", {}, [["Example.sol", source["hash"][8:]]], code_hash, code_hash, code_hash, code_hash]
+    compiled = {"schema": "sourcify.compilation.v2", "compiler": "solc", "compilerVersion": "0.8.0", "language": "Solidity",
+                "fullyQualifiedName": "Example.sol:Example", "compilerSettings": {}, "sources": {"Example.sol": source["hash"][8:]},
+                "recompiledCreationHash": code_hash, "recompiledRuntimeHash": code_hash}
+    compilation = uploaded_entity("compilation", compiled, {"hash": {"type": "bytes32", "value": "0x" + hashlib.sha256(canonical(fingerprint)).hexdigest()}})
+    document = {"schema": "sourcify.verifiedContract.v2", "chainId": "1", "address": CREATOR,
+                "codeRefs": {field: code_hash for field in ("creationOnchain", "creationRecompiled", "runtimeOnchain", "runtimeRecompiled")}}
+    contract = uploaded_entity("verified_contract", document, {"address": {"type": "addr", "value": CREATOR},
+                               "chainid": {"type": "u64", "value": "1"}, "compilationref": {"type": "key", "value": compilation["$key"]}},
+                               {compilation["$key"]: compilation})
+    return [contract, source, compilation, code]
 
 
 def options(source, out, *extra):
@@ -149,6 +220,98 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(result["entities"], 1)
         self.assertFalse((out / "prefill.bin").exists())
         self.assertTrue((out / "source-lock.json").is_file())
+
+    def test_helper_uploaded_keys_payloads_and_dependency_expiry(self):
+        source, out = self.root / "helper", self.root / "out"
+        rows = uploaded_fixture()
+        helper_bundle(source, rows)
+        result = p.run(options(source, out))
+        self.assertEqual((result["entities"], result["dependencyEdges"], result["sourceAdapter"]), (4, 4, "helper-uploaded-v1"))
+        decoded = list(frames(out / "prefill.bin"))
+        self.assertEqual([row["payload"] for row in decoded], [base64.b64decode(row["$payload"]) for row in rows])
+        keys = [json.loads(line) for line in (out / "keys.jsonl").read_text().splitlines()]
+        self.assertEqual(decoded[0]["attrs"]["compilationref"], (64, bytes.fromhex(keys[2]["key"][2:])))
+        self.assertEqual(keys[0]["stagingId"], rows[0]["stagingid"][8:])
+        self.assertLessEqual(int(keys[0]["expiresAtHeight"]), int(keys[2]["expiresAtHeight"]))
+        lock = json.loads((out / "source-lock.json").read_text())
+        self.assertIn("contracts.jsonl", [file["path"] for file in lock["files"]])
+
+    def test_helper_fingerprint_validation_and_processor_key_rule(self):
+        rows = uploaded_fixture()
+        source = self.root / "processor"
+        bundle(source, rows)
+        with self.assertRaisesRegex(p.Invalid, "source key"):
+            p.run(options(source, self.root / "wrong-profile"))
+        original = rows[2]
+        compiled = json.loads(base64.b64decode(original["$payload"]))
+        compiled["compilerVersion"] = "0.9.0"
+        changed = uploaded_entity("compilation", compiled, {"hash": {"type": "bytes32", "value": original["hash"][8:]}})
+        contract = json.loads(base64.b64decode(rows[0]["$payload"]))
+        rows[0] = uploaded_entity("verified_contract", contract, {"address": {"type": "addr", "value": CREATOR},
+                                  "chainid": {"type": "u64", "value": "1"}, "compilationref": {"type": "key", "value": changed["$key"]}},
+                                  {changed["$key"]: changed})
+        rows[2] = changed
+        source = self.root / "helper"
+        helper_bundle(source, rows)
+        with self.assertRaisesRegex(p.Invalid, "compilation fingerprint"):
+            p.run(options(source, self.root / "wrong-hash"))
+
+    def test_helper_manifest_and_contract_audit_are_verified(self):
+        source = self.root / "helper"
+        helper_bundle(source, uploaded_fixture())
+        audit = source / "contracts.jsonl"
+        audit.write_bytes(audit.read_bytes().replace(CREATOR.encode(), ("0x" + "ff" * 20).encode()))
+        with self.assertRaisesRegex(p.Invalid, "contract audit"):
+            p.run(options(source, self.root / "wrong-audit"))
+        provenance = json.loads((source / "provenance.json").read_bytes())
+        provenance["source"]["schema"] = "arkiv-prefill.postgres-uploaded-seed.v99"
+        with self.assertRaisesRegex(p.Invalid, "uploaded helper schema"):
+            p.helper_manifest(provenance, 7706815, {})
+
+    @unittest.skipUnless(os.environ.get("SOURCIFY_HELPER_BUNDLE"), "set SOURCIFY_HELPER_BUNDLE for bounded actual helper-row integration")
+    def test_actual_helper_first_contract_closure(self):
+        root = Path(os.environ["SOURCIFY_HELPER_BUNDLE"])
+        # Bound this fixture selection to 1000 rows, never load the full dataset.
+        part = json.loads((root / "seed.json").read_text())["entities"][0]["path"]
+        rows = []
+        with (root / part).open() as source:
+            for _ in range(1000):
+                line = source.readline(p.LINE_CAP + 1)
+                if not line:
+                    break
+                self.assertLessEqual(len(line), p.LINE_CAP)
+                rows.append(json.loads(line))
+        by_key = {row["$key"]: row for row in rows}
+        by_hash = {(row["kind"][4:], row.get("hash", "")[8:]): row for row in rows}
+        contract = next(row for row in rows if row["kind"] == "str:verified_contract")
+        required, pending = set(), [contract]
+        while pending:
+            row = pending.pop()
+            if row["$key"] in required:
+                continue
+            required.add(row["$key"])
+            for name, value in row.items():
+                if not name.startswith("$") and value.startswith("key:"):
+                    pending.append(by_key[value[4:]])
+            if row["kind"] not in ("str:compilation", "str:verified_contract"):
+                continue
+            _, raw = p.decode_payload(row)
+            doc = json.loads(raw)
+            self.assertNotIn("$spill", doc)
+            for digest in doc.get("sources", {}).values():
+                pending.append(by_hash[("sourcefile", digest)])
+            for digest in [*doc.get("codeRefs", {}).values(), doc.get("recompiledCreationHash"), doc.get("recompiledRuntimeHash")]:
+                if digest:
+                    pending.append(by_hash[("code", digest)])
+        selected = [row for row in rows if row["$key"] in required]
+        fixture, out = self.root / "actual-helper", self.root / "actual-helper-out"
+        helper_bundle(fixture, selected)
+        result = p.run(options(fixture, out, "--cache-mib", "1"))
+        self.assertEqual(result["inputContracts"], 1)
+        self.assertGreaterEqual(result["entities"], 8)
+        actual_payloads = {row["stagingid"][8:]: base64.b64decode(row["$payload"]) for row in selected}
+        for row in frames(out / "prefill.bin"):
+            self.assertEqual(row["payload"], actual_payloads["0x" + row["attrs"]["stagingid"][1].hex()])
 
     def test_rejects_changed_source_and_publishes_nothing(self):
         source, out = self.root / "source", self.root / "out"

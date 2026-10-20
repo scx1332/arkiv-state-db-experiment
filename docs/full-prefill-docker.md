@@ -152,3 +152,42 @@ at 10^12 is estimated at about 5.2e28 wei from a 24,000-row sample (7,315
 storage units per row), about 5% of the 10^30 wei sponsor allocation. Do not run
 it beside another full prefill: each needs the disk headroom and memory limit
 alone.
+
+## Unlimited expiry rerun
+
+`--expiry-policy unlimited` makes every entity permanent: each row gets the
+`u64::MAX` never-expires sentinel, there is no dependency graph and no rent
+(`rentWei` and the bundle's `burnedWei` are `0`). See
+[Sourcify prefill conversion](sourcify-prefill-converter.md#unlimited-expiry---expiry-policy-unlimited).
+It needs a node binary with permanent-prefill support and a new base genesis
+authored with `[prefill] allow_permanent = true`, which is
+[examples/unlimited-prefill](examples/unlimited-prefill): the far-future base's
+chain ID, allocation, block period and sponsor with the standard profile and a
+new run ID. `genesis stream-build` on that base commits a version-4
+permanent-prefill launch; any other base rejects the stream before building.
+
+```sh
+OLD=/home/ubuntu/arkiv-network/operations/runs/full-prefill-20261019
+RUN=/home/ubuntu/arkiv-network/operations/runs/full-prefill-unlimited-YYYYMMDD
+REPO=/path/to/this/checkout   # built with permanent-prefill support
+BIN="$REPO/target/release/arkiv-proposer"
+mkdir -p "$RUN/snapshot" "$RUN/genesis-src"
+cp "$REPO"/docs/examples/unlimited-prefill/chain.toml "$RUN/genesis-src/"
+cd "$RUN/genesis-src"
+"$BIN" genesis lock chain.toml
+"$BIN" genesis build chain.toml --out base --locked
+"$BIN" genesis verify base
+cp "$BIN" "$RUN/genesis-src/base/genesis.bin" "$RUN/snapshot/"
+cp "$REPO"/scripts/{sourcify-prefill.py,run-full-prefill.py} "$RUN/snapshot/"
+install -m 600 "$OLD/snapshot/fixture.key" "$RUN/snapshot/fixture.key"
+```
+
+Then start the container as in the far-future rerun, with
+`arkiv-experiment-full-unlimited-YYYYMMDD` as its name, and replace the final
+`--expiry-policy far-future --max-expiry 1000000000000` with
+`--expiry-policy unlimited` (`--max-expiry` is rejected for this policy). After
+`stream-build` the runner also requires the bundle report to say
+`permanentPrefill: true` and to match the conversion report's stream hash, rent
+(`0`) and storage units, and at readiness that `/signed/v1/status` reports
+`capabilities.gas.permanentEntitiesSupported: true`. The same one-run-at-a-time
+disk and memory caveats apply.

@@ -111,6 +111,10 @@ fn open_complete(
     Ok((engine, burn, complete.units))
 }
 
+/// `permanent` selects the permanent-prefill contract (launch version 4): a row
+/// whose expiry is `u64::MAX` is created permanent, is not scheduled for expiry
+/// (no due/total counts, so the per-height capacity does not apply) and adds
+/// storage units but no rent. Finite rows are unaffected by the policy.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_file(
     base: &SignedGenesis,
@@ -121,6 +125,7 @@ pub(crate) fn build_file(
     options: Options,
     ingestion_bytes: usize,
     summary: &StreamSummary,
+    permanent: bool,
 ) -> Result<(DurableEngine, U256, u64)> {
     if ingestion_bytes == 0 || ingestion_bytes > 4 * 1024 * 1024 {
         return Err("batch bytes must be 1..=4194304".into());
@@ -130,7 +135,7 @@ pub(crate) fn build_file(
     if base.genesis.pricing != crate::gas::schedule() {
         return Err("streaming prefill requires GLM pricing".into());
     }
-    let identity = import_identity(base, limits, sponsor, summary);
+    let identity = import_identity(base, limits, sponsor, summary, permanent);
     let mut genesis = EngineGenesis::new(identity.0, base.genesis.pricing.clone());
     genesis.limits = base.genesis.limits;
     genesis.validate().map_err(err)?;
@@ -168,7 +173,7 @@ pub(crate) fn build_file(
     if ready.exists() {
         // A verified descriptor may have changed after its first audit. Even a
         // completed restart must read/hash it before returning stored state.
-        if audit_file(file, limits)? != *summary {
+        if audit_file(file, limits, permanent)? != *summary {
             return Err("prefill stream changed during import".into());
         }
         return open_complete(&ready, &genesis, summary, limits, balance, options);
@@ -201,7 +206,7 @@ pub(crate) fn build_file(
         let _ = writeln!(std::io::stderr().lock(), "{record}");
     });
     file.rewind().map_err(err)?;
-    let mut reader = StreamReader::new(BufReader::new(file), limits)?;
+    let mut reader = StreamReader::with_policy(BufReader::new(file), limits, permanent)?;
     let mut progress = Progress::new("bulk_normalize", summary.rows, summary.bytes);
     progress.report(0, reader.bytes, None, false);
     let mut units = 0u64;
@@ -235,6 +240,8 @@ pub(crate) fn build_file(
             chain_id: base.genesis.chain_id,
             max_lifetime: base.genesis.params.max_lifetime,
             expiry_per_block: base.genesis.params.expiry_per_block,
+            // Only used for expiry resolution; no operation executes here.
+            allow_permanent_create: false,
         };
         let expiry = crate::Expiry {
             expires_at: row.expires_at_height,
@@ -248,6 +255,10 @@ pub(crate) fn build_file(
         };
         op.validate().map_err(debug_err)?;
         let expires = arkiv::expiry(&expiry, &context).map_err(debug_err)?;
+        let is_permanent = expires == crate::genesis_bundle::PERMANENT_EXPIRY;
+        if is_permanent && !permanent {
+            return Err("permanent prefill rows require a permanent-prefill launch".into());
+        }
         let arkiv::ArkivOperation::Create { attributes, .. } = &op else {
             unreachable!()
         };
@@ -259,9 +270,14 @@ pub(crate) fn build_file(
         if units > limits.max_storage_units {
             return Err("prefill storage limit".into());
         }
-        let rent = crate::gas::rent(0, row_units, None, Some(expires), 0)
-            .map_err(debug_err)?
-            .gas;
+        let rent = if is_permanent {
+            // Permanent rows prepay no time-based rent (see prefill_rent_gas).
+            crate::genesis_bundle::prefill_rent_gas(row_units, expires, permanent).map_err(err)?
+        } else {
+            crate::gas::rent(0, row_units, None, Some(expires), 0)
+                .map_err(debug_err)?
+                .gas
+        };
         burn = burn
             .checked_add(accounts::fee(rent))
             .ok_or("prefill rent overflow")?;
@@ -271,13 +287,17 @@ pub(crate) fn build_file(
         builder
             .add_record(RecordKey::new(&key).ok_or("invalid entity key")?, cells)
             .map_err(err)?;
-        for host in [
-            crate::exec::due_key(expires, arkiv::entity_namespace()),
-            crate::exec::total_key(expires),
-        ] {
-            builder
-                .add_host_count(host, 1, u64::from(base.genesis.params.expiry_per_block))
-                .map_err(err)?;
+        // A permanent row is never due, exactly as live execution never
+        // schedules `u64::MAX`; the expiry sweep therefore never visits it.
+        if !is_permanent {
+            for host in [
+                crate::exec::due_key(expires, arkiv::entity_namespace()),
+                crate::exec::total_key(expires),
+            ] {
+                builder
+                    .add_host_count(host, 1, u64::from(base.genesis.params.expiry_per_block))
+                    .map_err(err)?;
+            }
         }
         let next = row
             .create_nonce

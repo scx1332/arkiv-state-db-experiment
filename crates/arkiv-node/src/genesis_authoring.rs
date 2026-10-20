@@ -93,6 +93,13 @@ struct Prefill {
     namespace: String,
     rent_policy: String,
     sponsor: String,
+    /// Selects the permanent-prefill contract (launch version 3, and version 4
+    /// once `genesis stream-build` uses this genesis as its base): rows may
+    /// use `expires_at_height = "18446744073709551615"` (`u64::MAX`) to never
+    /// expire, without expiry scheduling or time-based rent. Absent or false
+    /// keeps the finite-only version 1 launch and its identity unchanged.
+    #[serde(default)]
+    allow_permanent: bool,
     limits: AuthorLimits,
     #[serde(default)]
     entity: Vec<Entity>,
@@ -918,9 +925,10 @@ fn compile(path: &Path) -> Result<Compiled> {
         }
         entities.push(entity);
     }
-    let stream = genesis_bundle::encode_stream(&entities)?;
-    let canonical = genesis_bundle::decode_stream(&stream)?;
-    let genesis = genesis_bundle::build_genesis(base, limits, sponsor, &canonical)?;
+    let permanent = prefill.allow_permanent;
+    let stream = genesis_bundle::encode_stream_with(&entities, permanent)?;
+    let canonical = genesis_bundle::decode_stream_with(&stream, permanent)?;
+    let genesis = genesis_bundle::build_genesis_with(base, limits, sponsor, &canonical, permanent)?;
     inputs.pins.sort_by(|a, b| a.path.cmp(&b.path));
     let profile_bytes = toml::to_string(&profile).map_err(err)?;
     let lock = Lock {
@@ -1001,6 +1009,18 @@ pub fn lock(chain_path: &Path, refresh: bool) -> Result<AuthoringReport> {
                     field.clone(),
                     serde_json::json!({"before":before,"after":now}),
                 );
+            }
+        }
+        // Optional fields (such as the permanent-prefill markers) can also
+        // disappear; report them as changed to null.
+        if let Some(old_fields) = previous.resolved.as_object() {
+            for (field, before) in old_fields {
+                if !fields.contains_key(field) {
+                    changes.insert(
+                        field.clone(),
+                        serde_json::json!({"before":before,"after":null}),
+                    );
+                }
             }
         }
     }
@@ -1272,6 +1292,61 @@ mod tests {
         assert_ne!(original["sources"], refreshed["sources"]);
         assert_eq!(refreshed["resolvedChanges"], serde_json::json!({}));
         build(&fixture.inline(), &fixture.bundle(), true).unwrap();
+    }
+
+    #[test]
+    fn permanent_rows_require_the_explicit_allow_permanent_switch() {
+        let fixture = Fixture::new();
+        let finite = lock(&fixture.inline(), false).unwrap();
+        assert!(finite.get("permanentPrefill").is_none());
+        // An explicit `false` is the default: only the source pin changes.
+        fixture.change(
+            &fixture.inline(),
+            "sponsor = \"@catalog\"",
+            "sponsor = \"@catalog\"\nallow_permanent = false",
+        );
+        let same = lock(&fixture.inline(), true).unwrap();
+        assert_eq!(same["resolvedChanges"], serde_json::json!({}));
+        assert_eq!(same["genesisHash"], finite["genesisHash"]);
+        fixture.change(
+            &fixture.inline(),
+            "expires_at_height = \"86400\"",
+            "expires_at_height = \"18446744073709551615\"",
+        );
+        let error = lock(&fixture.inline(), true).unwrap_err();
+        assert!(error.contains("finite positive expiry"), "{error}");
+        fixture.change(
+            &fixture.inline(),
+            "allow_permanent = false",
+            "allow_permanent = true",
+        );
+        let permanent = lock(&fixture.inline(), true).unwrap();
+        assert_eq!(permanent["permanentPrefill"], true);
+        assert_eq!(permanent["prefillVersion"], 3);
+        assert_eq!(permanent["entities"][0]["rentGas"], "0");
+        assert_ne!(permanent["genesisHash"], finite["genesisHash"]);
+        let built = build(&fixture.inline(), &fixture.bundle(), true).unwrap();
+        assert_eq!(built, verify(&fixture.bundle()).unwrap());
+        let genesis: SignedGenesis =
+            decode_exact(&stdfs::read(fixture.bundle().join("genesis.bin")).unwrap()).unwrap();
+        assert_eq!(genesis.prefill.unwrap().version, 3);
+        // Turning the switch off again reports the vanished markers.
+        fixture.change(
+            &fixture.inline(),
+            "allow_permanent = true",
+            "allow_permanent = false",
+        );
+        fixture.change(
+            &fixture.inline(),
+            "expires_at_height = \"18446744073709551615\"",
+            "expires_at_height = \"86400\"",
+        );
+        let back = lock(&fixture.inline(), true).unwrap();
+        assert_eq!(back["genesisHash"], finite["genesisHash"]);
+        assert_eq!(
+            back["resolvedChanges"]["permanentPrefill"],
+            serde_json::json!({"before":true,"after":null})
+        );
     }
 
     #[test]

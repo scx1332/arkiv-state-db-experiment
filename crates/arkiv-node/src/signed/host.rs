@@ -269,7 +269,7 @@ impl Host {
         prefill_file: std::path::PathBuf,
     ) -> Result<Self> {
         genesis.validate()?;
-        if genesis.prefill.as_ref().is_none_or(|p| p.version != 2)
+        if genesis.prefill.as_ref().is_none_or(|p| !p.is_streaming())
             || staged.head_snapshot().state_header()
                 != genesis
                     .prefill

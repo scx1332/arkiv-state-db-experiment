@@ -44,6 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             chain_id: 1337,
             max_lifetime: 6_307_200,
             expiry_per_block: 16,
+            allow_permanent_create: false,
         };
         let mut attrs = vec![
             (CellName::new("$payload")?, Value::bytes(&vec![0; payload])),

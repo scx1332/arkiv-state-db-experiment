@@ -26,6 +26,7 @@ fn setup() -> (Engine, Branch, ArkivExecutionContext) {
         chain_id: 1337,
         max_lifetime: 1000,
         expiry_per_block: 100,
+        allow_permanent_create: false,
     };
     (engine, branch, ctx)
 }
@@ -486,4 +487,158 @@ fn generic_namespaces_without_glm_cannot_receive_arkiv_entities() {
         )
         .is_err()
     );
+}
+
+/// A GLM-priced branch holding one permanent entity created the way a
+/// permanent-prefill genesis creates it (height 0, `allow_permanent_create`),
+/// plus the live context of block 5.
+fn glm_permanent() -> (Engine, Branch, ArkivExecutionContext, RecordKey) {
+    let engine = Engine::with_limits(crate::gas::schedule(), Limits::DEFAULT);
+    let mut branch = engine.begin(engine.head(), None).unwrap();
+    branch
+        .try_execute(
+            OwnerId::new([1; 20]),
+            WriteOp::CreateNamespace {
+                name: NamespaceName::new("entities").unwrap(),
+            },
+            Budget::unlimited(),
+        )
+        .unwrap()
+        .unwrap();
+    let mut genesis = ArkivExecutionContext {
+        caller: [1; 20],
+        block_height: 0,
+        chain_id: 1337,
+        max_lifetime: 1000,
+        expiry_per_block: 1,
+        allow_permanent_create: true,
+    };
+    let mut op = create(2);
+    if let ArkivOperation::Create { expiry, .. } = &mut op {
+        *expiry = Expiry::PERMANENT;
+    }
+    let applied_create = run(&mut branch, &genesis, &op);
+    let OpOutcome::Applied { receipt, .. } = &applied_create else {
+        panic!("{applied_create:?}")
+    };
+    // The genesis exemption removes rent only; execution is still metered.
+    assert!(receipt.spent.units() > 0);
+    let key = key(&genesis, 0);
+    assert_eq!(read(&branch, &key).expires_at, u64::MAX);
+    // The flag only waives rent for creations: a second, finite creation
+    // pays and schedules exactly as without it.
+    let finite = run(&mut branch, &genesis, &create(0));
+    assert!(matches!(finite, OpOutcome::Applied { .. }), "{finite:?}");
+    assert_eq!(count(&branch, &crate::exec::total_key(10)).unwrap(), 1);
+    assert_eq!(
+        count(&branch, &crate::exec::total_key(u64::MAX)).unwrap(),
+        0
+    );
+    assert_eq!(
+        count(&branch, &crate::exec::due_key(u64::MAX, entity_namespace())).unwrap(),
+        0
+    );
+    genesis.block_height = 5;
+    genesis.allow_permanent_create = false;
+    (engine, branch, genesis, key)
+}
+
+#[test]
+fn glm_rejects_live_permanence_and_updates_of_permanent_entities() {
+    let (_engine, mut b, mut live, k) = glm_permanent();
+    let mut permanent = create(0);
+    if let ArkivOperation::Create { expiry, .. } = &mut permanent {
+        *expiry = Expiry::PERMANENT;
+    }
+    // A live creation is never permanent under GLM rent.
+    assert_eq!(
+        run(&mut b, &live, &permanent),
+        rejected(ArkivFault::PermanentStorageUnsupported)
+    );
+    // Updates that would keep it permanent need unbounded rent: rejected.
+    for op in [
+        ArkivOperation::Patch {
+            key: k.clone(),
+            set: vec![(name("score"), Value::I32(7))],
+            remove: vec![],
+        },
+        ArkivOperation::Patch {
+            key: k.clone(),
+            set: vec![],
+            remove: vec![name("score")],
+        },
+        ArkivOperation::TransferOwnership {
+            key: k.clone(),
+            owner: [2; 20],
+        },
+        ArkivOperation::ExtendExpiry {
+            key: k.clone(),
+            expiry: Expiry::PERMANENT,
+        },
+    ] {
+        assert_eq!(
+            run(&mut b, &live, &op),
+            rejected(ArkivFault::PermanentStorageUnsupported),
+            "{op:?}"
+        );
+    }
+    // A permanent entity is never shortened to a finite lifetime, including
+    // by a permissionless extender (creation flag 2).
+    for caller in [[1; 20], [3; 20]] {
+        live.caller = caller;
+        assert_eq!(
+            run(
+                &mut b,
+                &live,
+                &ArkivOperation::ExtendExpiry {
+                    key: k.clone(),
+                    expiry: Expiry {
+                        expires_at: 10,
+                        min_lifetime: 0,
+                    },
+                },
+            ),
+            OpOutcome::HostRejected {
+                fault: HostFault::ExpiryShortened
+            }
+        );
+    }
+    live.caller = [1; 20];
+    let p = read(&b, &k);
+    assert_eq!(
+        (p.expires_at, p.owner, p.updated_at),
+        (u64::MAX, [1; 20], 0)
+    );
+    // The rejected updates left the schedule as genesis wrote it: only the
+    // finite row is due (at 10); nothing is ever due at u64::MAX.
+    let schedule = |b: &Branch| {
+        [
+            crate::exec::total_key(10),
+            crate::exec::due_key(10, entity_namespace()),
+            crate::exec::total_key(u64::MAX),
+            crate::exec::due_key(u64::MAX, entity_namespace()),
+        ]
+        .map(|key| count(b, &key).unwrap())
+    };
+    assert_eq!(schedule(&b), [1, 1, 0, 0]);
+    // The owner can still delete it; no expiry count is touched (a decrement
+    // of an absent count would fail as corrupt state).
+    applied(run(
+        &mut b,
+        &live,
+        &ArkivOperation::Delete { key: k.clone() },
+    ));
+    assert!(
+        b.try_get_record(
+            entity_namespace(),
+            &k,
+            &Projection::ALL,
+            Budget::unlimited()
+        )
+        .unwrap()
+        .unwrap()
+        .value
+        .is_none()
+    );
+    assert_eq!(schedule(&b), [1, 1, 0, 0]);
 }

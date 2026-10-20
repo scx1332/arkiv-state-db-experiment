@@ -159,7 +159,7 @@ impl SignedGenesis {
             || p.expiry_per_block > 16
             || self.genesis.limits.namespace_cap > 1024
             || self.genesis.limits.max_cells
-                > if self.prefill.as_ref().is_some_and(|p| p.version == 2) {
+                > if self.prefill.as_ref().is_some_and(|p| p.is_streaming()) {
                     64
                 } else {
                     32

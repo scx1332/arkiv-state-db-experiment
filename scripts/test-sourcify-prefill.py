@@ -203,6 +203,10 @@ def frames(path):
         assert stream.read(1) == b""
 
 
+# --expiry-policy unlimited over the preserved 263-entity fixture.
+REAL_UNLIMITED_STREAM_HASH = "0x3b39bb8f248464c10cdabfdc3a8400b055d132b0959783489b7b433ca66e351d"
+
+
 class ConversionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -611,6 +615,91 @@ class ConversionTests(unittest.TestCase):
         self.assertLess(max(int(json.loads(k)["rentWei"]) // 1000000000
                             for k in (self.root / "far-top/keys.jsonl").read_bytes().splitlines()), 1 << 64)
         self.assertEqual(top["entities"], 17)
+
+    def test_unlimited_makes_every_entity_permanent_without_graph_or_rent(self):
+        source, out = self.root / "source", self.root / "out"
+        # 37 rows exceed any 16-per-height expiry capacity; permanence has none.
+        rows = [entity(str(i), CREATOR if i % 3 else "0x" + "34" * 20) for i in range(37)]
+        bundle(source, rows)
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("unlimited conversion must not build or order a dependency graph")
+        original = (p.dependencies, p.assign_expiry, p.uniform_minimum)
+        p.dependencies = p.assign_expiry = p.uniform_minimum = forbidden
+        try:
+            result = p.run(options(source, out, "--expiry-policy", "unlimited"))
+        finally:
+            p.dependencies, p.assign_expiry, p.uniform_minimum = original
+        self.assertEqual((result["expiryPolicy"], result["dependencyEdges"], result["expiryPerHeight"]),
+                         ("unlimited-v1", None, None))
+        self.assertEqual((result["minimumExpiryHeight"], result["maximumExpiryHeight"]), ("never", "never"))
+        self.assertEqual((result["permanentExpiry"], result["permanentPrefillRequired"]), (str(2 ** 64 - 1), True))
+        self.assertIn("no-semantic-payload-validation", result["validationScope"])
+        self.assertEqual(result["rentWei"], "0")
+        decoded = list(frames(out / "prefill.bin"))
+        self.assertEqual({row["expiry"] for row in decoded}, {p.PERMANENT_EXPIRY})
+        self.assertEqual(p.PERMANENT_EXPIRY, 0xFFFFFFFFFFFFFFFF)
+        keys = [json.loads(line) for line in (out / "keys.jsonl").read_bytes().splitlines()]
+        self.assertEqual({(k["expiresAtHeight"], k["rentWei"]) for k in keys}, {(str(2 ** 64 - 1), "0")})
+        self.assertEqual(int(result["storageUnits"]), sum(int(k["storageUnits"]) for k in keys))
+        # Same rows, keys, order and storage units as the finite policy; only
+        # the expiry sentinel and the (absent) rent differ.
+        finite = p.run(options(source, self.root / "finite"))
+        same = lambda path: [(r["creator"], r["nonce"], r["salt"], r["flags"], r["contentType"], r["payload"], r["attrs"])
+                             for r in frames(path / "prefill.bin")]
+        self.assertEqual(same(out), same(self.root / "finite"))
+        self.assertEqual(result["storageUnits"], finite["storageUnits"])
+        self.assertGreater(int(finite["rentWei"]), 0)
+        finite_keys = [json.loads(line) for line in (self.root / "finite/keys.jsonl").read_bytes().splitlines()]
+        self.assertEqual([k["key"] for k in keys], [k["key"] for k in finite_keys])
+        # Exactly one frame field differs: the 8-byte expiry at offset 44.
+        self.assertEqual((out / "prefill.bin").stat().st_size, (self.root / "finite/prefill.bin").stat().st_size)
+
+    def test_unlimited_rejects_finite_expiry_options_and_keeps_closure_checks(self):
+        source = self.root / "source"
+        bundle(source, [entity(str(i)) for i in range(17)])
+        for name, extra in (("max", ("--max-expiry", "100")), ("min", ("--min-expiry", "1"))):
+            with self.assertRaisesRegex(p.Invalid, "do not apply"):
+                p.run(options(source, self.root / name, "--expiry-policy", "unlimited", *extra))
+            self.assertFalse((self.root / name).exists())
+        # The finite capacity bound does not constrain permanent rows.
+        with self.assertRaisesRegex(p.Invalid, "capacity"):
+            p.run(options(source, self.root / "finite", "--min-expiry", "100", "--max-expiry", "100"))
+        self.assertEqual(p.run(options(source, self.root / "unlimited", "--expiry-policy", "unlimited"))["entities"], 17)
+        # The node's streaming row limit still applies, before any output.
+        limit = p.STREAM_ROW_LIMIT
+        p.STREAM_ROW_LIMIT = 16
+        try:
+            with self.assertRaisesRegex(p.Invalid, "row limit"):
+                p.run(options(source, self.root / "too-many", "--expiry-policy", "unlimited"))
+        finally:
+            p.STREAM_ROW_LIMIT = limit
+        self.assertFalse((self.root / "too-many").exists())
+        self.assertEqual(p.STREAM_ROW_LIMIT, 16 * p.MAX_EXPIRY)
+        rows = uploaded_fixture()
+        source = self.root / "imported"
+        imported_bundle(source, [entity("unused")] + rows)
+        result = p.run(options(source, self.root / "subset", "--contract-limit", "1", "--expiry-policy", "unlimited"))
+        self.assertEqual((result["entities"], result["dependencyEdges"], result["expiryPolicy"]), (4, 4, "unlimited-v1"))
+        self.assertIn("selected-closure-semantic-validation", result["validationScope"])
+        self.assertEqual({f["expiry"] for f in frames(self.root / "subset/prefill.bin")}, {p.PERMANENT_EXPIRY})
+        source = self.root / "missing"
+        imported_bundle(source, [entity("unused")] + rows[:-1])
+        with self.assertRaisesRegex(p.Invalid, "missing code payload dependency"):
+            p.run(options(source, self.root / "missing-out", "--contract-limit", "1", "--expiry-policy", "unlimited"))
+
+    @unittest.skipUnless(os.environ.get("SOURCIFY_SMOKE_BUNDLE"), "set SOURCIFY_SMOKE_BUNDLE for real dataset integration")
+    def test_real_263_entity_bundle_unlimited(self):
+        source, out = Path(os.environ["SOURCIFY_SMOKE_BUNDLE"]), self.root / "real-unlimited"
+        result = p.run(options(source, out, "--cache-mib", "1", "--expiry-policy", "unlimited"))
+        self.assertEqual((result["entities"], result["maxUserAttributes"], result["dependencyEdges"]), (263, 29, None))
+        self.assertEqual((result["expiryPolicy"], result["rentWei"]), ("unlimited-v1", "0"))
+        self.assertEqual(result["streamHash"], REAL_UNLIMITED_STREAM_HASH)
+        finite = self.root / "real-finite"
+        finite_result = p.run(options(source, finite, "--cache-mib", "1"))
+        same = lambda path: [(r["creator"], r["nonce"], r["payload"], r["attrs"]) for r in frames(path / "prefill.bin")]
+        self.assertEqual(same(out), same(finite))
+        self.assertEqual({r["expiry"] for r in frames(out / "prefill.bin")}, {p.PERMANENT_EXPIRY})
+        self.assertEqual(result["storageUnits"], finite_result["storageUnits"])
 
     @unittest.skipUnless(os.environ.get("SOURCIFY_SMOKE_BUNDLE"), "set SOURCIFY_SMOKE_BUNDLE for real dataset integration")
     def test_real_263_entity_bundle_far_future(self):

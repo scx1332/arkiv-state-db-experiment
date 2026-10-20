@@ -353,6 +353,14 @@ diff and new pins. The reviewed result is the input. Permanent genesis datasets
 or delayed sweeping require their own retention, pricing and proof contract;
 they cannot be enabled by a magic value in this format.
 
+That separate contract now exists as prefill launch versions 3 (small) and 4
+(streaming), selected only by an explicit `[prefill] allow_permanent = true` and
+committed by the launch version and recipe domain. It admits `u64::MAX` rows
+with no expiry scheduling and no time-based rent (storage units still count);
+finite rows are unchanged. Live execution gains nothing: permanent creation,
+extension to permanent and updates of permanent entities stay rejected, and only
+deletion applies to them. Versions 1 and 2 keep rejecting the sentinel.
+
 ## Future larger-scale construction and portability
 
 This section preserves the larger importer proposal. It is not the v4 admission

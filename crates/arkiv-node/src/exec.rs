@@ -863,6 +863,8 @@ impl Executor<'_> {
                 chain_id: self.spec.chain_id(),
                 max_lifetime: self.spec.params().max_lifetime,
                 expiry_per_block: self.spec.params().expiry_per_block,
+                // Live blocks never create permanent entities under GLM rent.
+                allow_permanent_create: false,
             };
             let outcome = crate::arkiv::execute_operation(
                 &mut self.branch,

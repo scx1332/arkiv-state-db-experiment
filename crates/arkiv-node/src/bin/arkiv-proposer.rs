@@ -195,7 +195,7 @@ enum PrefillSource {
     },
 }
 fn streaming(genesis: &SignedGenesis) -> bool {
-    genesis.prefill.as_ref().is_some_and(|p| p.version == 2)
+    genesis.prefill.as_ref().is_some_and(|p| p.is_streaming())
 }
 fn load_bundle(path: &Path) -> Result<(SignedGenesis, PathBuf)> {
     let genesis: SignedGenesis = decode_exact(&read_file(

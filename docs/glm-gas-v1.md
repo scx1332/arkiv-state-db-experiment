@@ -62,7 +62,12 @@ changes the real duration bought by the same charge.
 - Shrinking or deleting gives no refund. Regrowing pays for the renewed increase.
 - Ownership transfer does not change occupancy, but pays execution gas.
 - Permanent entities (`u64::MAX` expiry) are rejected: a finite fee does not
-  purchase unbounded retention.
+  purchase unbounded retention. This holds for every live transaction. Only a
+  permanent-prefill genesis (prefill launch version 3 or 4) creates permanent
+  entities, at height 0 and without rent. Updating one (patch, ownership
+  transfer, extension to permanent) needs unbounded rent and is rejected with
+  `PermanentStorageUnsupported`; a finite extension is `ExpiryShortened`; its
+  owner may delete it.
 
 All arithmetic is checked and integer-only, using a wide intermediate for
 unit-block multiplication and one upward division per operation. An operation

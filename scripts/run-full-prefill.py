@@ -134,6 +134,16 @@ class Runner:
                                     '--prefill', str(converted / 'prefill.bin'), '--out', str(bundle),
                                     '--sponsor', a.sponsor])
         expected = json.loads((bundle / 'report.json').read_text())
+        permanent = a.expiry_policy == 'unlimited'
+        if permanent:
+            # Permanent rows pay no genesis rent; the node must agree with the
+            # converter's accounting and have committed the permanent launch.
+            conversion = json.loads((converted / 'conversion-report.json').read_text())
+            if (expected.get('permanentPrefill') is not True
+                    or expected['streamHash'] != conversion['streamHash']
+                    or expected['burnedWei'] != conversion['rentWei']
+                    or expected['storageUnits'] != conversion['storageUnits']):
+                raise RuntimeError('Permanent bundle report does not match the conversion report')
         public, private = free_port(), free_port()
         while private == public:
             private = free_port()
@@ -150,6 +160,8 @@ class Runner:
             if (head['height'] != '0' or head['hash'] != expected['genesisHash']
                     or head['stateRoot'] != expected['stateRoot']):
                 raise RuntimeError('Producer readiness state does not match the genesis bundle')
+            if permanent and status['capabilities']['gas'].get('permanentEntitiesSupported') is not True:
+                raise RuntimeError('Producer does not report permanent genesis entities')
             return status
 
         self.phase('producer', [str(a.bin), 'producer', '--run-dir', str(a.out / 'node'),
@@ -164,10 +176,14 @@ def main():
         parser.add_argument('--' + name, type=lambda value: Path(value).resolve(), required=True)
     parser.add_argument('--sponsor', required=True)
     parser.add_argument('--reserve-gib', type=int, default=80)
-    # far-future needs a base genesis whose max_lifetime is at least --max-expiry.
-    parser.add_argument('--expiry-policy', choices=('dependency-safe', 'far-future'), default='dependency-safe')
+    # far-future needs a base genesis whose max_lifetime is at least --max-expiry;
+    # unlimited needs a base genesis built with [prefill] allow_permanent = true.
+    parser.add_argument('--expiry-policy', choices=('dependency-safe', 'far-future', 'unlimited'),
+                        default='dependency-safe')
     parser.add_argument('--max-expiry', type=int)
     args = parser.parse_args()
+    if args.expiry_policy == 'unlimited' and args.max_expiry is not None:
+        parser.error('--max-expiry does not apply to --expiry-policy unlimited')
     if args.reserve_gib < 0:
         parser.error('--reserve-gib must be nonnegative')
     os.environ['ARKIV_PREFILL_RESERVE_GIB'] = str(args.reserve_gib)

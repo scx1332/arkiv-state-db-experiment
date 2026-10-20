@@ -242,6 +242,13 @@ pub struct ArkivExecutionContext {
     pub chain_id: u64,
     pub max_lifetime: u64,
     pub expiry_per_block: u32,
+    /// Lets a `Create` with the permanent expiry (`u64::MAX`) be admitted
+    /// without GLM rent. Only height-zero construction of a permanent-prefill
+    /// launch sets it; live blocks always pass `false`, so live permanent
+    /// creation, extension to permanent and every mutation of a permanent
+    /// entity other than deletion keep failing with
+    /// [`ArkivFault::PermanentStorageUnsupported`] under GLM pricing.
+    pub allow_permanent_create: bool,
 }
 fn name(s: &str) -> CellName {
     CellName::new(s).expect("system name")
@@ -508,6 +515,12 @@ pub fn execute_operation(
         })();
         match quoted {
             Ok(quote) => quote.gas,
+            // Genesis permanent prefill: no time-based rent for a creation.
+            Err(crate::gas::GasError::PermanentUnsupported)
+                if c.allow_permanent_create && matches!(op, ArkivOperation::Create { .. }) =>
+            {
+                0
+            }
             Err(crate::gas::GasError::PermanentUnsupported) => {
                 return Ok(rejected(ArkivFault::PermanentStorageUnsupported));
             }

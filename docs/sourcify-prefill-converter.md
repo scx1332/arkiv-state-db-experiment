@@ -208,10 +208,12 @@ debit a wallet. The node builder independently verifies this amount.
 ### Far-future expiry (`--expiry-policy far-future`)
 
 The source rows say `$expiresAt: never`, and the original Arkiv prefill stores
-them as `u64::MAX` with no rent and no ordering. This protocol cannot: the stream
-format rejects `u64::MAX` (`genesis_streaming::validate_row`), GLM rent rejects
-it as `PermanentUnsupported` (`gas::rent`), and every signed genesis must use GLM
-pricing. A finite height within `max_lifetime` is the only admissible expiry.
+them as `u64::MAX` with no rent and no ordering. A finite-expiry (version 2)
+launch cannot: the stream reader rejects `u64::MAX` (`genesis_streaming::validate_row`),
+GLM rent rejects it as `PermanentUnsupported` (`gas::rent`), and every signed
+genesis must use GLM pricing. There a finite height within `max_lifetime` is the
+only admissible expiry. A permanent-prefill base genesis admits the sentinel;
+see [unlimited expiry](#unlimited-expiry---expiry-policy-unlimited).
 
 `--expiry-policy far-future` therefore keeps finite heights but puts them beyond
 any realistic chain horizon. The last expiry defaults to `--max-expiry
@@ -249,6 +251,56 @@ assumes.
 [`examples/far-future-prefill`](examples/far-future-prefill) pins a profile with
 `max_lifetime = 1000000000000` and a 10^30 wei sponsor. A larger `max_lifetime` also lets live
 transactions buy longer lifetimes, still limited by their gas budget.
+
+### Unlimited expiry (`--expiry-policy unlimited`)
+
+`--expiry-policy unlimited` makes every entity permanent, as the source's
+`never` intends. Each frame carries the expiry `u64::MAX`
+(18446744073709551615), the same sentinel the original Arkiv prefill writes,
+the executor stores for a permanent `$expiresAt` (`Expiry::PERMANENT`), the
+light verifiers already exempt from expiry checks and the SDK reads as
+`U64_MAX`. RPC reads return `expiresAt: "0xffffffffffffffff"`; `/signed/v1`
+query proofs return the decimal string. Like far-future, the policy builds no
+dependency graph and skips expiry ordering unless `--contract-limit` needs the
+closure, with the same narrower `validationScope`. `--min-expiry` and
+`--max-expiry` do not apply and are rejected.
+
+The report records `expiryPolicy: unlimited-v1`, `dependencyEdges: null`,
+`expiryPerHeight: null`, `minimumExpiryHeight` and `maximumExpiryHeight` as
+`"never"`, `permanentExpiry: "18446744073709551615"` and
+`permanentPrefillRequired: true`. Every `keys.jsonl` row has
+`expiresAtHeight: "18446744073709551615"` and `rentWei: "0"`. `rentWei` is
+`"0"`; `storageUnits` is reported and equals the finite policies' units. Keys,
+creator/nonce order, payloads and attributes are identical to the other
+policies; only the 8-byte expiry field of each frame differs.
+
+Only a **permanent-prefill** launch accepts these rows. Its base genesis is
+authored with `[prefill] allow_permanent = true` (see
+[`examples/unlimited-prefill`](examples/unlimited-prefill)), which compiles to
+prefill launch version 3; `genesis stream-build` on that base commits version 4.
+A finite base rejects the stream before any state is built, with an error naming
+`allow_permanent`. Under versions 3 and 4:
+
+- a permanent row is created with `$expiresAt = u64::MAX` and never enters the
+  expiry due/total schedule, so the 16-per-height capacity does not apply and
+  the expiry sweep never visits it;
+- it prepays **no time-based rent** (a finite fee cannot price unbounded
+  retention), so an all-permanent prefill burns 0 and materializes no sponsor or
+  burn record; its storage units still count toward `storageUnits` and the
+  declared limit;
+- finite rows in the same stream are scheduled and charged exactly as in
+  version 2.
+
+The launch version and recipe domain change the genesis hash, so the policy is
+part of chain identity; nothing else in the layout changes. Live execution is
+unchanged: GLM still rejects live permanent creation and extension to permanent.
+Updating a permanent entity (patch, ownership transfer, permanent extension) is
+rejected with `PermanentStorageUnsupported`; a finite extension is
+`ExpiryShortened`. A permanent entity therefore can never be patched or
+transferred to a new owner; it stays permanent and unchanged until its owner
+(the genesis creator) deletes it, which is allowed. `/signed/v1/status` reports
+`capabilities.gas.permanentEntitiesSupported: true` and a
+`permanentEntities` object with these rules on such a chain.
 
 ## Memory, disk and interruption
 
@@ -315,10 +367,23 @@ With `--expiry-policy far-future` the same fixture keeps all keys, payloads and
 attributes. It reports no dependency graph, expiries 999,999,999,984 to
 1,000,000,000,000, and 715,027,777,772,040,000,000,000 wei rent. Its stream hash is
 `0xd6d893668d463a3f944792caa69af23db779e4d5ba0e7ce66dfcf6891eb08042`.
+With `--expiry-policy unlimited` every row expires never (`u64::MAX`), rent is 0,
+storage units stay 1,544,460 and the stream hash is
+`0x3b39bb8f248464c10cdabfdc3a8400b055d132b0959783489b7b433ca66e351d`. Built on
+the [unlimited-prefill](examples/unlimited-prefill) base it is a version-4
+launch with `burnedWei` 0 and the same storage units.
 
 On October 20, 2026 the 445,583-entity 100k helper bundle was converted on the
 same host, while the full prefill was running alongside. The default
 `dependency-safe` conversion took 513.9 s and reproduced the recorded stream hash
 `0x58691b67…1eb6`. Ingest took 113 s, dependencies 288 s, expiry 33 s and
 emit 73 s. `far-future` took 203.6 s: ingest 122 s and emit 73 s, with the same
-canonical bytes.
+canonical bytes. `unlimited` took 220 s (peak RSS 105 MB) with the same
+1,858,260,091 canonical bytes and 3,324,006,410 storage units as
+`dependency-safe`, rent 0 and stream hash `0xfecfa5c5…9f0d`. `genesis
+stream-build` on the [unlimited-prefill](examples/unlimited-prefill) base then
+took 418 s (peak RSS 396 MB) and committed a version-4 launch with `burnedWei`
+0 and the same storage units. Its bulk host phase received only the 40 creator
+nonces, with no expiry schedule or burn record. A finite build of a 445,600-row
+sample receives 891,242: two schedule counts per row plus nonces, sponsor and
+burn.

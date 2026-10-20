@@ -81,7 +81,14 @@ compared with the existing v1 builder on compatible fixtures. The v2 frame
 format allows up to 55 user attributes, but current entity-operation validation
 admits at most 32 supplied attributes including payload and content type, hence
 at most 30 user attributes. The real fixture's 29 attributes remain supported.
-Lifetime remains finite; this change does not introduce permanent storage.
+Lifetime is finite in a version-2 launch. A version-4 launch, built on a base
+genesis authored with `[prefill] allow_permanent = true`, also admits rows whose
+expiry is the `u64::MAX` never-expires sentinel. They are created permanent,
+never enter the expiry schedule (the 16-per-height capacity does not apply) and
+prepay no rent, while their storage units still count. Finite rows are built and
+charged exactly as in version 2. The version and recipe domain enter chain
+identity; the stream format and bulk algorithm are unchanged. See
+[unlimited expiry](sourcify-prefill-converter.md#unlimited-expiry---expiry-policy-unlimited).
 
 ## Recovery and publication
 

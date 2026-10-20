@@ -425,3 +425,379 @@ fn prefills_replay_proofs_next_create_expiry_and_restart() {
     );
     assert_eq!(account_proof(&producer, &light, 2, 0).1, launch.burned_wei);
 }
+
+fn permanent_row(n: u64) -> PrefillEntity {
+    row(n, PERMANENT_EXPIRY)
+}
+fn build_permanent(rows: &[PrefillEntity]) -> SignedGenesis {
+    build_genesis_with(
+        base(),
+        limits(),
+        *signer(2).address().as_bytes(),
+        rows,
+        true,
+    )
+    .unwrap()
+}
+fn entity_tx(g: &SignedGenesis, nonce: u64, operation: ArkivOperation) -> SignedTx {
+    SignedTx::sign(
+        g,
+        nonce,
+        TxEnvelope {
+            chain_id: g.genesis.chain_id,
+            actor: signer(2).address(),
+            request_id: [100 + nonce as u8; 32],
+            tx_budget: 1_000_000,
+            ops: vec![TxOp::Arkiv {
+                namespace: arkiv::entity_namespace(),
+                operation,
+            }],
+        },
+        &signer(2),
+    )
+    .unwrap()
+}
+#[test]
+fn permanent_policy_is_explicit_and_changes_identity_only() {
+    // The finite policy keeps rejecting the sentinel; the permanent one
+    // admits it with the same stream bytes and a distinct launch version.
+    assert!(encode_stream(&[permanent_row(0)]).is_err());
+    let stream = encode_stream_with(&[permanent_row(0)], true).unwrap();
+    assert!(decode_stream(&stream).is_err());
+    assert_eq!(
+        decode_stream_with(&stream, true).unwrap(),
+        [permanent_row(0)]
+    );
+    let rows = [row(0, 4), row(1, 5)];
+    let finite = build(&rows);
+    let permanent = build_permanent(&rows);
+    let (f, p) = (
+        finite.prefill.as_ref().unwrap(),
+        permanent.prefill.as_ref().unwrap(),
+    );
+    assert_eq!((f.version, p.version), (1, 3));
+    assert!(!f.permanent_prefill() && p.permanent_prefill());
+    assert_eq!(
+        (&f.state, f.burned_wei, f.storage_units, f.stream_hash),
+        (&p.state, p.burned_wei, p.storage_units, p.stream_hash)
+    );
+    assert_ne!(f.recipe_hash, p.recipe_hash);
+    assert_ne!(finite.hash(), permanent.hash());
+    assert_eq!(
+        decode_exact::<SignedGenesis>(&encode(&permanent)).unwrap(),
+        permanent
+    );
+    // A version-1 commitment cannot be relabelled as permanent.
+    let mut relabelled = finite.clone();
+    relabelled.prefill.as_mut().unwrap().version = 3;
+    assert!(relabelled.validate().is_err());
+    // Rows beyond the 16-per-height capacity are admitted only when permanent.
+    let many: Vec<_> = (0..40).map(permanent_row).collect();
+    let g = build_permanent(&many);
+    assert_eq!(g.prefill.as_ref().unwrap().burned_wei, U256::ZERO);
+    assert!(g.prefill.as_ref().unwrap().storage_units > 40 * 512);
+    let report = report(&g, &encode_stream_with(&many, true).unwrap());
+    assert_eq!(report["permanentPrefill"], true);
+    assert_eq!(report["prefillVersion"], 3);
+    assert_eq!(
+        report["entities"][0]["expiresAtHeight"],
+        u64::MAX.to_string()
+    );
+    assert_eq!(report["entities"][0]["rentGas"], "0");
+    assert!(
+        has_no_permanent_fields(&finite, &encode_stream(&rows).unwrap()),
+        "finite reports carry no permanent fields"
+    );
+}
+fn has_no_permanent_fields(g: &SignedGenesis, stream: &[u8]) -> bool {
+    let value = report(g, stream);
+    value.get("permanentPrefill").is_none() && value.get("prefillVersion").is_none()
+}
+#[test]
+fn permanent_genesis_entities_survive_blocks_and_reject_live_updates() {
+    let rows = permanent_chain_rows();
+    let stream = encode_stream_with(&rows, true).unwrap();
+    let g = build_permanent(&rows);
+    let make = |producer| {
+        host(
+            &g,
+            &stream,
+            producer,
+            Arc::new(MemoryVersionedStore::new()),
+            Arc::new(MemoryVersionedStore::new()),
+        )
+    };
+    exercise_permanent_chain(&g, &rows, make(true), make(false));
+}
+/// The same rows as a version-4 (file-backed) launch: bulk construction,
+/// staged installation, then the same live behaviour as version 3.
+#[test]
+fn streaming_permanent_genesis_installs_staged_state_and_behaves_the_same() {
+    use arkiv_node::genesis_streaming::{self as streaming, VerifiedStream};
+    let rows = permanent_chain_rows();
+    let small = build_permanent(&rows);
+    let mut bytes = b"ARKPFL02".to_vec();
+    bytes.extend_from_slice(&2u32.to_be_bytes());
+    bytes.extend_from_slice(&(rows.len() as u64).to_be_bytes());
+    for row in &rows {
+        let frame = encode(row);
+        bytes.extend_from_slice(&(frame.len() as u32).to_be_bytes());
+        bytes.extend(frame);
+    }
+    let mut g = small.clone();
+    let mut launch = g.prefill.take().unwrap();
+    launch.version = 4;
+    launch.limits = PrefillLimits {
+        max_entities: streaming::MAX_ENTITIES,
+        max_canonical_bytes: streaming::MAX_CANONICAL_BYTES,
+        max_storage_units: streaming::MAX_STORAGE_UNITS,
+    };
+    launch.stream_hash = arkiv_db::digest(streaming::STREAM_DOMAIN, &bytes);
+    launch.canonical_bytes = bytes.len() as u64;
+    launch.recipe_hash = recipe_hash(&g, &launch);
+    g.prefill = Some(launch);
+    g.validate().unwrap();
+    assert_ne!(g.hash(), small.hash());
+    let dir = std::env::temp_dir().join(format!("arkiv-permanent-v4-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("prefill.bin");
+    std::fs::write(&path, &bytes).unwrap();
+    let make = |producer: bool| {
+        let staged = streaming::prepare_verified_streaming(
+            &g,
+            VerifiedStream::open(&g, &path).unwrap(),
+            &dir.join(format!("work-{producer}")),
+            Options::default(),
+        )
+        .unwrap();
+        Host::create_from_staged(
+            Arc::new(MemoryVersionedStore::new()),
+            History::create(Arc::new(MemoryVersionedStore::new()), g.hash()).unwrap(),
+            g.clone(),
+            [3; 16],
+            SignedHeader::sign(&g, g.header(), &signer(1)).unwrap(),
+            producer.then(|| signer(1)),
+            Options::default(),
+            &staged,
+            path.clone(),
+        )
+        .unwrap()
+    };
+    let (producer, full) = (make(true), make(false));
+    // Bulk and the small v3 builder agree on state, burn and storage units.
+    let (p4, p3) = (g.prefill.as_ref().unwrap(), small.prefill.as_ref().unwrap());
+    assert_eq!(
+        (&p4.state, p4.burned_wei, p4.storage_units),
+        (&p3.state, p3.burned_wei, p3.storage_units)
+    );
+    exercise_permanent_chain(&g, &rows, producer, full);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+/// Nonce 0 expires at height 3; nonces 1 and 2 never expire.
+fn permanent_chain_rows() -> Vec<PrefillEntity> {
+    vec![row(0, 3), permanent_row(1), permanent_row(2)]
+}
+fn exercise_permanent_chain(
+    g: &SignedGenesis,
+    rows: &[PrefillEntity],
+    mut producer: Host,
+    mut full: Host,
+) {
+    use arkiv_node::{HostFault, OpOutcome, TxStatus, signed::runtime::Node};
+    let launch = g.prefill.clone().unwrap();
+    let mut light = Light::create(
+        Arc::new(MemoryVersionedStore::new()),
+        g.clone(),
+        producer.certificate(0).unwrap(),
+    )
+    .unwrap();
+    // Only the finite row is scheduled and charged.
+    let genesis = producer
+        .engine
+        .snapshot(SnapshotId::from_sequence(0))
+        .unwrap();
+    assert_eq!(
+        genesis
+            .try_host_get(&arkiv_node::exec::total_key(3))
+            .unwrap(),
+        Some(1u64.to_be_bytes().to_vec())
+    );
+    assert_eq!(
+        genesis
+            .try_host_get(&arkiv_node::exec::total_key(u64::MAX))
+            .unwrap(),
+        None
+    );
+    let finite_only = build(&rows[..1]);
+    assert_eq!(launch.burned_wei, finite_only.prefill.unwrap().burned_wei);
+    assert_eq!(account_proof(&producer, &light, 2, 0).1, launch.burned_wei);
+    let keys: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            RecordKey::new(&arkiv::derive_entity_key(
+                g.genesis.chain_id,
+                &r.creator,
+                r.create_nonce,
+                r.salt,
+            ))
+            .unwrap()
+        })
+        .collect();
+    let live = |h: &Host, k: &RecordKey| {
+        h.engine
+            .head_snapshot()
+            .try_get_record(
+                arkiv::entity_namespace(),
+                k,
+                &Projection::ALL,
+                Budget::unlimited(),
+            )
+            .unwrap()
+            .unwrap()
+            .value
+            .map(|r| arkiv::project(&r).unwrap())
+    };
+    // Live updates of a permanent entity are rejected; it stays permanent.
+    let set = vec![(CellName::new("label").unwrap(), Value::str("changed"))];
+    let attempts = [
+        ArkivOperation::Patch {
+            key: keys[1].clone(),
+            set,
+            remove: vec![],
+        },
+        ArkivOperation::TransferOwnership {
+            key: keys[1].clone(),
+            owner: [9; 20],
+        },
+        ArkivOperation::ExtendExpiry {
+            key: keys[1].clone(),
+            expiry: Expiry::PERMANENT,
+        },
+        ArkivOperation::ExtendExpiry {
+            key: keys[1].clone(),
+            expiry: Expiry {
+                expires_at: 1_000,
+                min_lifetime: 0,
+            },
+        },
+        ArkivOperation::Create {
+            salt: 77,
+            flags: 0,
+            expiry: Expiry::PERMANENT,
+            attributes: vec![],
+        },
+        ArkivOperation::Delete {
+            key: keys[2].clone(),
+        },
+    ];
+    for (nonce, operation) in attempts.into_iter().enumerate() {
+        producer
+            .submit(entity_tx(g, nonce as u64, operation))
+            .unwrap();
+    }
+    for height in 1..=6 {
+        producer.produce().unwrap();
+        let block = producer.block(height).unwrap();
+        full.import(block.clone()).unwrap();
+        light
+            .append(std::slice::from_ref(&block.header), &block.header)
+            .unwrap();
+        assert_eq!((producer.head, light.head), (full.head, full.head));
+        // Only the finite genesis row is ever swept.
+        assert_eq!(block.outcomes.expiry.len(), usize::from(height == 3));
+        if height == 1 {
+            let faults: Vec<_> = block
+                .outcomes
+                .txs
+                .iter()
+                .map(|tx| match (&tx.status, &tx.ops[0]) {
+                    (TxStatus::Committed, _) => None,
+                    (_, OpOutcome::HostRejected { fault }) => Some(*fault),
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            let permanent = Some(HostFault::Arkiv(
+                arkiv::ArkivFault::PermanentStorageUnsupported,
+            ));
+            assert_eq!(
+                faults,
+                [
+                    permanent,
+                    permanent,
+                    permanent,
+                    Some(HostFault::ExpiryShortened),
+                    permanent,
+                    None
+                ]
+            );
+        }
+    }
+    let kept = live(&producer, &keys[1]).unwrap();
+    assert_eq!((kept.expires_at, kept.owner), (u64::MAX, rows[1].creator));
+    assert_eq!(kept.updated_at, 0);
+    assert!(live(&producer, &keys[0]).is_none(), "finite row expired");
+    assert!(live(&producer, &keys[2]).is_none(), "owner deleted it");
+    assert_eq!(
+        producer
+            .engine
+            .head_snapshot()
+            .try_typed_record_count(arkiv::entity_namespace())
+            .unwrap(),
+        Some(1)
+    );
+    // Reads report the sentinel, as the SDK's U64_MAX bigint.
+    let page = arkiv_node::signed::rpc_reads::dispatch(
+        &producer,
+        "arkiv_query",
+        &serde_json::json!(["*", {"atBlock":"0x0","select":{"key":true,"expiresAt":true}}]),
+    )
+    .unwrap()
+    .unwrap();
+    let expiries: Vec<_> = page["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["expiresAt"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(expiries.len(), 3);
+    assert_eq!(
+        expiries
+            .iter()
+            .filter(|e| *e == "0xffffffffffffffff")
+            .count(),
+        2
+    );
+    // Status reports the genesis-only permanence truthfully.
+    let status = arkiv_node::signed::runtime::status(&Node::Full(Box::new(producer)));
+    let gas = &status["capabilities"]["gas"];
+    assert_eq!(gas["permanentEntitiesSupported"], true);
+    assert_eq!(gas["permanentEntities"]["source"], "genesis-prefill");
+    assert_eq!(gas["permanentEntities"]["liveCreate"], false);
+    assert_eq!(
+        status["capabilities"]["sdkRpcProfile"]["unsupported"][0],
+        "permanent-entity-writes"
+    );
+    let finite = build(&rows[..1]);
+    let finite_host = host(
+        &finite,
+        &encode_stream(&rows[..1]).unwrap(),
+        true,
+        Arc::new(MemoryVersionedStore::new()),
+        Arc::new(MemoryVersionedStore::new()),
+    );
+    let status = arkiv_node::signed::runtime::status(&Node::Full(Box::new(finite_host)));
+    assert_eq!(
+        status["capabilities"]["gas"]["permanentEntitiesSupported"],
+        false
+    );
+    assert!(
+        status["capabilities"]["gas"]
+            .get("permanentEntities")
+            .is_none()
+    );
+    assert_eq!(
+        status["capabilities"]["sdkRpcProfile"]["unsupported"][0],
+        "permanent-entities"
+    );
+}

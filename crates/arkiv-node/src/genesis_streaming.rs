@@ -103,9 +103,16 @@ pub struct StreamReader<R> {
     pub bytes: u64,
     previous: Option<([u8; 20], u64)>,
     max_bytes: u64,
+    permanent: bool,
 }
 impl<R: Read> StreamReader<R> {
-    pub fn new(mut reader: R, limits: PrefillLimits) -> Result<Self> {
+    /// A reader for a finite-expiry (version-2) launch.
+    pub fn new(reader: R, limits: PrefillLimits) -> Result<Self> {
+        Self::with_policy(reader, limits, false)
+    }
+    /// A reader under a launch policy: `permanent` (version 4) also admits
+    /// rows whose expiry is the permanent sentinel `u64::MAX`.
+    pub fn with_policy(mut reader: R, limits: PrefillLimits, permanent: bool) -> Result<Self> {
         validate_limits(limits)?;
         let mut header = [0u8; 20];
         reader.read_exact(&mut header).map_err(err)?;
@@ -128,6 +135,7 @@ impl<R: Read> StreamReader<R> {
             bytes: 20,
             previous: None,
             max_bytes: limits.max_canonical_bytes,
+            permanent,
         })
     }
     pub fn prefix_hash(&self) -> B256 {
@@ -158,7 +166,7 @@ impl<R: Read> StreamReader<R> {
         if decoder.remaining() != 0 || encode(&row) != frame {
             return Err("noncanonical prefill frame".into());
         }
-        validate_row(&row)?;
+        validate_row(&row, self.permanent)?;
         match self.previous {
             None if row.create_nonce != 0 => return Err("creator nonce must begin at zero".into()),
             Some((creator, nonce))
@@ -195,7 +203,14 @@ impl<R: Read> StreamReader<R> {
         })
     }
 }
-fn validate_row(row: &PrefillEntity) -> Result<()> {
+fn validate_row(row: &PrefillEntity, permanent: bool) -> Result<()> {
+    if row.expires_at_height == crate::genesis_bundle::PERMANENT_EXPIRY && !permanent {
+        return Err(
+            "permanent prefill row (expiry u64::MAX) requires a permanent-prefill \
+                    base genesis ([prefill] allow_permanent = true)"
+                .into(),
+        );
+    }
     if row.attributes.len() > MAX_USER_ATTRIBUTES as usize
         || row.attributes.windows(2).any(|w| w[0].0 >= w[1].0)
         || row
@@ -206,19 +221,30 @@ fn validate_row(row: &PrefillEntity) -> Result<()> {
         || row.content_type.len() > 128 * 1024
         || row.flags & !3 != 0
         || row.expires_at_height == 0
-        || row.expires_at_height == u64::MAX
     {
         return Err("invalid streaming prefill row".into());
     }
     Ok(())
 }
 pub fn audit_stream(path: &Path, limits: PrefillLimits) -> Result<StreamSummary> {
-    audit_file(&mut File::open(path).map_err(err)?, limits)
+    audit_stream_with(path, limits, false)
 }
-pub(crate) fn audit_file(file: &mut File, limits: PrefillLimits) -> Result<StreamSummary> {
+/// [`audit_stream`] under a launch policy; see [`StreamReader::with_policy`].
+pub fn audit_stream_with(
+    path: &Path,
+    limits: PrefillLimits,
+    permanent: bool,
+) -> Result<StreamSummary> {
+    audit_file(&mut File::open(path).map_err(err)?, limits, permanent)
+}
+pub(crate) fn audit_file(
+    file: &mut File,
+    limits: PrefillLimits,
+    permanent: bool,
+) -> Result<StreamSummary> {
     file.rewind().map_err(err)?;
     let bytes = file.metadata().map_err(err)?.len();
-    let mut reader = StreamReader::new(BufReader::new(file), limits)?;
+    let mut reader = StreamReader::with_policy(BufReader::new(file), limits, permanent)?;
     let mut progress = Progress::new("audit", reader.rows, bytes);
     progress.report(0, reader.bytes, None, false);
     while reader.next_row()?.is_some() {
@@ -247,9 +273,9 @@ impl VerifiedStream {
         let p = g
             .prefill
             .as_ref()
-            .filter(|p| p.version == 2)
+            .filter(|p| p.is_streaming())
             .ok_or("expected streaming prefill v2")?;
-        let summary = audit_file(&mut file, p.limits)?;
+        let summary = audit_file(&mut file, p.limits, p.permanent_prefill())?;
         if summary.rows != p.row_count
             || summary.bytes != p.canonical_bytes
             || summary.hash != p.stream_hash
@@ -279,6 +305,7 @@ pub(crate) fn import_identity(
     limits: PrefillLimits,
     sponsor: [u8; 20],
     summary: &StreamSummary,
+    permanent: bool,
 ) -> B256 {
     let mut base = base.clone();
     base.prefill = None;
@@ -288,11 +315,20 @@ pub(crate) fn import_identity(
     bytes.extend_from_slice(summary.hash.as_slice());
     bytes.extend_from_slice(&summary.rows.to_be_bytes());
     bytes.extend_from_slice(&summary.bytes.to_be_bytes());
-    digest("arkiv/prefill-import/v2", &bytes)
+    // Private scratch built under one policy is never reused for the other.
+    digest(
+        if permanent {
+            "arkiv/prefill-import/v4"
+        } else {
+            "arkiv/prefill-import/v2"
+        },
+        &bytes,
+    )
 }
 // Retain the CLI byte option as a bounded ingestion tuning input. It never
 // selects transaction replay or changes canonical state.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn bulk_build(
     base: &SignedGenesis,
     limits: PrefillLimits,
@@ -303,6 +339,30 @@ fn bulk_build(
     batch_bytes: usize,
     summary: &StreamSummary,
 ) -> Result<(DurableEngine, U256, u64)> {
+    bulk_build_with(
+        base,
+        limits,
+        sponsor,
+        path,
+        work_dir,
+        options,
+        batch_bytes,
+        summary,
+        false,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn bulk_build_with(
+    base: &SignedGenesis,
+    limits: PrefillLimits,
+    sponsor: [u8; 20],
+    path: &Path,
+    work_dir: &Path,
+    options: Options,
+    batch_bytes: usize,
+    summary: &StreamSummary,
+    permanent: bool,
+) -> Result<(DurableEngine, U256, u64)> {
     crate::genesis_bulk::build_file(
         base,
         limits,
@@ -312,6 +372,7 @@ fn bulk_build(
         options,
         batch_bytes,
         summary,
+        permanent,
     )
 }
 
@@ -342,7 +403,7 @@ pub fn prepare_verified_streaming(
     let p = g
         .prefill
         .as_ref()
-        .filter(|p| p.version == 2)
+        .filter(|p| p.is_streaming())
         .ok_or("expected streaming prefill v2")?;
     let (engine, burn, units) = crate::genesis_bulk::build_file(
         g,
@@ -353,6 +414,7 @@ pub fn prepare_verified_streaming(
         crate::genesis_import_resources::import_options(options),
         DEFAULT_BATCH_BYTES,
         &stream.summary,
+        p.permanent_prefill(),
     )?;
     if engine.head_snapshot().state_header() != p.state
         || burn != p.burned_wei
@@ -365,6 +427,9 @@ pub fn prepare_verified_streaming(
 
 /// Build a new portable bundle. A deterministic sibling work directory holds
 /// private bulk work; only a completely validated output is renamed into place.
+/// A base genesis whose own (small) launch is the permanent-prefill contract
+/// (version 3, authored with `[prefill] allow_permanent = true`) yields a
+/// version-4 launch whose rows may be permanent; any other base yields version 2.
 pub fn build_bundle(
     base_path: &Path,
     stream: &Path,
@@ -382,6 +447,7 @@ pub fn build_bundle(
     let mut bytes = Vec::new();
     file.take(65537).read_to_end(&mut bytes).map_err(err)?;
     let mut base: SignedGenesis = decode_exact(&bytes).map_err(err)?;
+    let permanent = base.prefill.as_ref().is_some_and(|p| p.permanent_prefill());
     base.prefill = None;
     // v2 explicitly extends the cell profile; pricing and expiry reservation must
     // already be selected by the caller's native genesis/profile constructor.
@@ -397,7 +463,7 @@ pub fn build_bundle(
         max_canonical_bytes: MAX_CANONICAL_BYTES,
         max_storage_units: MAX_STORAGE_UNITS,
     };
-    let summary = audit_stream(stream, limits)?;
+    let summary = audit_stream_with(stream, limits, permanent)?;
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -408,7 +474,7 @@ pub fn build_bundle(
         .and_then(|n| n.to_str())
         .ok_or("invalid bundle output name")?;
     let work = parent.join(format!(".{name}.stream-work"));
-    let (engine, burn, units) = bulk_build(
+    let (engine, burn, units) = bulk_build_with(
         &base,
         limits,
         sponsor,
@@ -417,9 +483,10 @@ pub fn build_bundle(
         crate::genesis_import_resources::import_options(Options::default()),
         batch_bytes,
         &summary,
+        permanent,
     )?;
     let mut launch = PrefillLaunch {
-        version: 2,
+        version: PrefillLaunch::version_for(true, permanent),
         limits,
         sponsor,
         stream_hash: summary.hash,
@@ -451,7 +518,7 @@ pub fn build_bundle(
         )
         .map_err(err)?;
         target.sync_all().map_err(err)?;
-        if audit_stream(&stage.join("prefill.bin"), limits)? != summary {
+        if audit_stream_with(&stage.join("prefill.bin"), limits, permanent)? != summary {
             return Err("prefill changed during bundle publication".into());
         }
         write_new(
@@ -491,9 +558,12 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 pub fn summary_report(g: &SignedGenesis) -> Result<serde_json::Value> {
     let p = g.prefill.as_ref().ok_or("missing prefill")?;
-    Ok(
-        serde_json::json!({"version":2,"genesisHash":g.hash().to_string(),"stateRoot":p.state.root().to_string(),"recipeHash":p.recipe_hash.to_string(),"streamHash":p.stream_hash.to_string(),"rowCount":p.row_count.to_string(),"canonicalBytes":p.canonical_bytes.to_string(),"storageUnits":p.storage_units.to_string(),"burnedWei":p.burned_wei.to_string(),"sponsor":format!("0x{}",p.sponsor.iter().map(|b|format!("{b:02x}")).collect::<String>())}),
-    )
+    let mut report = serde_json::json!({"version":p.version,"genesisHash":g.hash().to_string(),"stateRoot":p.state.root().to_string(),"recipeHash":p.recipe_hash.to_string(),"streamHash":p.stream_hash.to_string(),"rowCount":p.row_count.to_string(),"canonicalBytes":p.canonical_bytes.to_string(),"storageUnits":p.storage_units.to_string(),"burnedWei":p.burned_wei.to_string(),"sponsor":format!("0x{}",p.sponsor.iter().map(|b|format!("{b:02x}")).collect::<String>())});
+    // Absent for finite launches, whose reports are unchanged.
+    if p.permanent_prefill() {
+        report["permanentPrefill"] = serde_json::json!(true);
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -588,6 +658,271 @@ mod tests {
         g.prefill = Some(launch);
         g.validate().unwrap();
         g
+    }
+    /// Every fourth row finite (one per height), the rest permanent.
+    fn mixed(n: u64) -> PrefillEntity {
+        let mut r = row(n);
+        r.expires_at_height = if n.is_multiple_of(4) {
+            100 + n
+        } else {
+            crate::genesis_bundle::PERMANENT_EXPIRY
+        };
+        r
+    }
+    /// A version-4 launch whose state, burn and units come from the
+    /// independent small (version-3) builder, which replays every row through
+    /// live entity execution.
+    fn signed_permanent_stream(base: SignedGenesis, rows: &[PrefillEntity]) -> SignedGenesis {
+        let mut g = crate::genesis_bundle::build_genesis_with(
+            base,
+            PrefillLimits {
+                max_entities: 256,
+                max_canonical_bytes: crate::genesis_bundle::MAX_CANONICAL_BYTES,
+                max_storage_units: crate::genesis_bundle::MAX_STORAGE_UNITS,
+            },
+            [2; 20],
+            rows,
+            true,
+        )
+        .unwrap();
+        let mut launch = g.prefill.take().unwrap();
+        assert_eq!(launch.version, 3);
+        let bytes = stream(rows);
+        launch.version = 4;
+        launch.limits = limits();
+        launch.stream_hash = digest(STREAM_DOMAIN, &bytes);
+        launch.canonical_bytes = bytes.len() as u64;
+        launch.recipe_hash = recipe_hash(&g, &launch);
+        g.prefill = Some(launch);
+        g.validate().unwrap();
+        g
+    }
+    #[test]
+    fn reader_admits_permanent_rows_only_under_the_permanent_policy() {
+        let rows = [mixed(0), mixed(1)];
+        let bytes = stream(&rows);
+        let read = |permanent| -> Result<StreamSummary> {
+            let mut r = StreamReader::with_policy(bytes.as_slice(), limits(), permanent)?;
+            while r.next_row()?.is_some() {}
+            r.finish()
+        };
+        let error = read(false).unwrap_err();
+        assert!(error.contains("permanent-prefill"), "{error}");
+        assert!(
+            StreamReader::new(bytes.as_slice(), limits())
+                .unwrap()
+                .next_row()
+                .is_ok()
+        );
+        assert_eq!(read(true).unwrap().hash, digest(STREAM_DOMAIN, &bytes));
+        let mut zero = mixed(0);
+        zero.expires_at_height = 0;
+        let bytes = stream(&[zero]);
+        for permanent in [false, true] {
+            let mut r = StreamReader::with_policy(bytes.as_slice(), limits(), permanent).unwrap();
+            assert!(r.next_row().is_err());
+        }
+    }
+    #[test]
+    fn permanent_bulk_matches_v3_oracle_and_never_schedules_permanent_rows() {
+        use arkiv_db::{Budget, Projection, RecordKey};
+        let tmp = Temp::new();
+        // One expiry per height: 30 permanent rows would overflow any height
+        // if they were scheduled; the 10 finite rows use distinct heights.
+        let mut capped = base();
+        capped.genesis.params.expiry_per_block = 1;
+        let rows: Vec<_> = (0..40).map(mixed).collect();
+        let path = tmp.0.join("prefill.bin");
+        fs::write(&path, stream(&rows)).unwrap();
+        let g = signed_permanent_stream(capped.clone(), &rows);
+        let launch = g.prefill.clone().unwrap();
+        assert!(launch.is_streaming() && launch.permanent_prefill());
+        let engine = prepare_streaming(&g, &path, &tmp.0.join("work"), Options::default()).unwrap();
+        // prepare_streaming also requires the oracle's burn and storage units.
+        assert_eq!(engine.head_snapshot().state_header(), launch.state);
+        let snapshot = engine.head_snapshot();
+        let (mut units, mut burn) = (0u64, U256::ZERO);
+        for r in &rows {
+            let key = crate::arkiv::derive_entity_key(
+                g.genesis.chain_id,
+                &r.creator,
+                r.create_nonce,
+                r.salt,
+            );
+            let record = snapshot
+                .try_get_record(
+                    crate::arkiv::entity_namespace(),
+                    &RecordKey::new(&key).unwrap(),
+                    &Projection::ALL,
+                    Budget::unlimited(),
+                )
+                .unwrap()
+                .unwrap()
+                .value
+                .unwrap();
+            assert_eq!(
+                crate::arkiv::project(&record).unwrap().expires_at,
+                r.expires_at_height
+            );
+            let row_units = crate::gas::storage_units(&record.cells).unwrap().total;
+            units += row_units;
+            if r.expires_at_height != crate::genesis_bundle::PERMANENT_EXPIRY {
+                let gas = crate::gas::rent(0, row_units, None, Some(r.expires_at_height), 0)
+                    .unwrap()
+                    .gas;
+                burn += accounts::fee(gas);
+                for key in [
+                    crate::exec::total_key(r.expires_at_height),
+                    crate::exec::due_key(r.expires_at_height, crate::arkiv::entity_namespace()),
+                ] {
+                    assert_eq!(
+                        snapshot.try_host_get(&key).unwrap(),
+                        Some(1u64.to_be_bytes().to_vec())
+                    );
+                }
+            }
+        }
+        assert_eq!((units, burn), (launch.storage_units, launch.burned_wei));
+        assert!(burn > U256::ZERO);
+        for key in [
+            crate::exec::total_key(u64::MAX),
+            crate::exec::due_key(u64::MAX, crate::arkiv::entity_namespace()),
+        ] {
+            assert_eq!(snapshot.try_host_get(&key).unwrap(), None);
+        }
+        // The same stream is not admissible under the finite policy.
+        let error = bulk_build(
+            &capped,
+            limits(),
+            [2; 20],
+            &path,
+            &tmp.0.join("finite"),
+            Options::default(),
+            4096,
+            &summary_of(&path),
+        )
+        .unwrap_err();
+        assert!(error.contains("permanent"), "{error}");
+        let mut finite = g.clone();
+        let mut l = finite.prefill.take().unwrap();
+        l.version = 2;
+        l.recipe_hash = recipe_hash(&finite, &l);
+        finite.prefill = Some(l);
+        assert!(verify_stream_file(&finite, &path).is_err());
+        // An all-permanent prefill charges nothing and materializes no burn.
+        let rows: Vec<_> = (0..3)
+            .map(|n| PrefillEntity {
+                expires_at_height: crate::genesis_bundle::PERMANENT_EXPIRY,
+                ..row(n)
+            })
+            .collect();
+        let path = tmp.0.join("all.bin");
+        fs::write(&path, stream(&rows)).unwrap();
+        let g = signed_permanent_stream(capped, &rows);
+        assert_eq!(g.prefill.as_ref().unwrap().burned_wei, U256::ZERO);
+        let engine = prepare_streaming(&g, &path, &tmp.0.join("all"), Options::default()).unwrap();
+        assert_eq!(
+            engine
+                .head_snapshot()
+                .try_host_get(&accounts::BURN_KEY)
+                .unwrap(),
+            None
+        );
+    }
+    /// The audited summary of a file under the permanent policy.
+    fn summary_of(path: &Path) -> StreamSummary {
+        audit_stream_with(path, limits(), true).unwrap()
+    }
+    #[test]
+    fn build_bundle_inherits_the_policy_from_its_base_genesis() {
+        let tmp = Temp::new();
+        let small = PrefillLimits {
+            max_entities: 256,
+            max_canonical_bytes: crate::genesis_bundle::MAX_CANONICAL_BYTES,
+            max_storage_units: crate::genesis_bundle::MAX_STORAGE_UNITS,
+        };
+        let base_file = |name: &str, permanent| {
+            let g =
+                crate::genesis_bundle::build_genesis_with(base(), small, [2; 20], &[], permanent)
+                    .unwrap();
+            let path = tmp.0.join(name);
+            fs::write(&path, encode(&g)).unwrap();
+            path
+        };
+        let finite_base = base_file("finite-base.bin", false);
+        let permanent_base = base_file("permanent-base.bin", true);
+        let mixed_rows: Vec<_> = (0..8).map(mixed).collect();
+        let finite_rows: Vec<_> = (0..8).map(row).collect();
+        let mixed_path = tmp.0.join("mixed.bin");
+        let finite_path = tmp.0.join("finite.bin");
+        fs::write(&mixed_path, stream(&mixed_rows)).unwrap();
+        fs::write(&finite_path, stream(&finite_rows)).unwrap();
+        let open = |name: &str| -> SignedGenesis {
+            decode_exact(&fs::read(tmp.0.join(name).join("genesis.bin")).unwrap()).unwrap()
+        };
+        // A finite base keeps version 2 and rejects permanent rows clearly.
+        let error = build_bundle(
+            &finite_base,
+            &mixed_path,
+            &tmp.0.join("rejected"),
+            [2; 20],
+            4096,
+        )
+        .unwrap_err();
+        assert!(error.contains("allow_permanent"), "{error}");
+        assert!(!tmp.0.join("rejected").exists());
+        let report =
+            build_bundle(&finite_base, &finite_path, &tmp.0.join("v2"), [2; 20], 4096).unwrap();
+        assert_eq!(report["version"], 2);
+        assert!(report.get("permanentPrefill").is_none());
+        // Pinned from `genesis stream-build` of the pre-permanence binary
+        // (9af427f) on these same base and stream bytes: version 2 is unchanged.
+        assert_eq!(
+            (
+                report["genesisHash"].as_str(),
+                report["stateRoot"].as_str(),
+                report["burnedWei"].as_str(),
+                report["storageUnits"].as_str()
+            ),
+            (
+                Some("0xc0795b49219ed0402b55c9336d910c428590040fdc6a8aed3bd12ada79018c8a"),
+                Some("0x10e9279a1cae020d9a9970510bdad08a6c32bbe2ca4a904880cfc3b73d7b2f80"),
+                Some("656000000000"),
+                Some("14056")
+            )
+        );
+        assert_eq!(open("v2").prefill.unwrap().version, 2);
+        // A permanent base yields version 4, for mixed or finite rows.
+        for (name, path) in [("v4", &mixed_path), ("v4-finite", &finite_path)] {
+            let report =
+                build_bundle(&permanent_base, path, &tmp.0.join(name), [2; 20], 4096).unwrap();
+            assert_eq!(
+                (
+                    report["version"].clone(),
+                    report["permanentPrefill"].clone()
+                ),
+                (serde_json::json!(4), serde_json::json!(true))
+            );
+            let g = open(name);
+            assert_eq!(g.prefill.as_ref().unwrap().version, 4);
+            let bundled = tmp.0.join(name).join("prefill.bin");
+            drop(
+                prepare_streaming(
+                    &g,
+                    &bundled,
+                    &tmp.0.join(format!("{name}-work")),
+                    Options::default(),
+                )
+                .unwrap(),
+            );
+        }
+        // Same finite rows: the policy changes chain identity, not state.
+        let (v2, v4) = (open("v2"), open("v4-finite"));
+        assert_eq!(
+            v2.prefill.as_ref().unwrap().state,
+            v4.prefill.as_ref().unwrap().state
+        );
+        assert_ne!(v2.hash(), v4.hash());
     }
     #[test]
     fn verified_descriptor_survives_path_replacement_and_standalone_verify_reaudits() {

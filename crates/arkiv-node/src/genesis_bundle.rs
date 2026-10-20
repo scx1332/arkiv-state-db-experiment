@@ -14,6 +14,10 @@ pub const MAX_CANONICAL_BYTES: u64 = 1024 * 1024;
 pub const MAX_STORAGE_UNITS: u64 = 8 * 1024 * 1024;
 pub const STREAM_DOMAIN: &str = "arkiv/prefill-stream/v1";
 pub const RECIPE_DOMAIN: &str = "arkiv/genesis-recipe/v1";
+/// The prefill row expiry that never expires, the same `u64::MAX` sentinel the
+/// executor stores for a permanent `$expiresAt` ([`crate::Expiry::PERMANENT`]).
+/// Only a permanent-prefill launch ([`PrefillLaunch::permanent_prefill`]) admits it.
+pub const PERMANENT_EXPIRY: u64 = u64::MAX;
 type Result<T> = std::result::Result<T, String>;
 fn invalid(reason: &'static str) -> DecodeError {
     DecodeError::Invalid {
@@ -137,7 +141,7 @@ impl PrefillEntity {
         })
     }
 }
-fn canonical_entities(entities: &[PrefillEntity]) -> Result<Vec<PrefillEntity>> {
+fn canonical_entities(entities: &[PrefillEntity], permanent: bool) -> Result<Vec<PrefillEntity>> {
     if entities.len() as u64 > MAX_ENTITIES {
         return Err("too many prefill entities".into());
     }
@@ -198,14 +202,22 @@ fn canonical_entities(entities: &[PrefillEntity]) -> Result<Vec<PrefillEntity>> 
         {
             return Err("prefill value exceeds 128 KiB".into());
         }
-        if row.flags & !3 != 0 || row.expires_at_height == 0 || row.expires_at_height == u64::MAX {
+        if row.flags & !3 != 0
+            || row.expires_at_height == 0
+            || (row.expires_at_height == PERMANENT_EXPIRY && !permanent)
+        {
             return Err("prefill requires valid flags and finite positive expiry".into());
         }
     }
     Ok(rows)
 }
 pub fn encode_stream(entities: &[PrefillEntity]) -> Result<Vec<u8>> {
-    let rows = canonical_entities(entities)?;
+    encode_stream_with(entities, false)
+}
+/// [`encode_stream`] under a launch policy: `permanent` also admits
+/// [`PERMANENT_EXPIRY`] rows. The byte format is the same.
+pub fn encode_stream_with(entities: &[PrefillEntity], permanent: bool) -> Result<Vec<u8>> {
+    let rows = canonical_entities(entities, permanent)?;
     let mut e = Encoder::new();
     e.fixed(b"ARKPFL01");
     e.u32(1);
@@ -220,6 +232,10 @@ pub fn encode_stream(entities: &[PrefillEntity]) -> Result<Vec<u8>> {
     Ok(e.into_bytes())
 }
 pub fn decode_stream(bytes: &[u8]) -> Result<Vec<PrefillEntity>> {
+    decode_stream_with(bytes, false)
+}
+/// [`decode_stream`] under a launch policy; see [`encode_stream_with`].
+pub fn decode_stream_with(bytes: &[u8], permanent: bool) -> Result<Vec<PrefillEntity>> {
     if bytes.len() as u64 > MAX_CANONICAL_BYTES {
         return Err("prefill stream exceeds 1 MiB".into());
     }
@@ -242,7 +258,7 @@ pub fn decode_stream(bytes: &[u8]) -> Result<Vec<PrefillEntity>> {
         Ok(rows)
     };
     let rows = parse().map_err(err)?;
-    if encode_stream(&rows)? != bytes {
+    if encode_stream_with(&rows, permanent)? != bytes {
         return Err("noncanonical entity stream".into());
     }
     Ok(rows)
@@ -251,6 +267,22 @@ pub fn decode_stream(bytes: &[u8]) -> Result<Vec<PrefillEntity>> {
 /// Wire field order: version, limits, sponsor, stream hash/count/bytes, recipe hash,
 /// initial StateHeader, initial burn as u256, logical storage units. Version 1 fixes
 /// namespace=entities/ordinal1, builder=1 and sponsored finite rent policy=1.
+///
+/// | version | stream                         | rows admitted                 |
+/// |---------|--------------------------------|-------------------------------|
+/// | 1       | small `ARKPFL01` (256 rows)    | finite expiry only            |
+/// | 2       | file-backed `ARKPFL02`         | finite expiry only            |
+/// | 3       | small `ARKPFL01` (256 rows)    | finite or [`PERMANENT_EXPIRY`] |
+/// | 4       | file-backed `ARKPFL02`         | finite or [`PERMANENT_EXPIRY`] |
+///
+/// Versions 3 and 4 are the permanent-prefill contract: finite rows are built,
+/// scheduled and charged exactly as in versions 1 and 2; a permanent row is
+/// created with `$expiresAt = u64::MAX`, never enters the expiry schedule (so
+/// the per-height expiry capacity does not apply to it) and prepays no rent,
+/// because rent prices a finite lifetime. Its storage units still count toward
+/// `storage_units` and the declared limit. The layout is that of the
+/// corresponding finite version; only the version and recipe domain differ, so
+/// the chain identity commits to the policy. Live execution is unchanged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrefillLaunch {
     pub version: u32,
@@ -264,13 +296,47 @@ pub struct PrefillLaunch {
     pub burned_wei: U256,
     pub storage_units: u64,
 }
+/// `(streaming, permanent)` for a supported launch version.
+fn launch_layout(version: u32) -> Option<(bool, bool)> {
+    match version {
+        1 => Some((false, false)),
+        2 => Some((true, false)),
+        3 => Some((false, true)),
+        4 => Some((true, true)),
+        _ => None,
+    }
+}
+fn validate_launch_limits(streaming: bool, limits: PrefillLimits) -> Result<()> {
+    if streaming {
+        crate::genesis_streaming::validate_limits(limits)
+    } else {
+        limits.validate()
+    }
+}
 impl PrefillLaunch {
-    pub fn validate(&self, g: &SignedGenesis) -> Result<()> {
-        match self.version {
-            1 => self.limits.validate()?,
-            2 => crate::genesis_streaming::validate_limits(self.limits)?,
-            _ => return Err("unsupported prefill version".into()),
+    /// The launch version for a stream layout and permanence policy.
+    pub const fn version_for(streaming: bool, permanent: bool) -> u32 {
+        match (streaming, permanent) {
+            (false, false) => 1,
+            (true, false) => 2,
+            (false, true) => 3,
+            (true, true) => 4,
         }
+    }
+    /// A file-backed `ARKPFL02` launch (versions 2 and 4).
+    pub fn is_streaming(&self) -> bool {
+        launch_layout(self.version).is_some_and(|(streaming, _)| streaming)
+    }
+    /// The permanent-prefill contract (versions 3 and 4): rows may carry
+    /// [`PERMANENT_EXPIRY`].
+    pub fn permanent_prefill(&self) -> bool {
+        launch_layout(self.version).is_some_and(|(_, permanent)| permanent)
+    }
+    pub fn validate(&self, g: &SignedGenesis) -> Result<()> {
+        let Some((streaming, _)) = launch_layout(self.version) else {
+            return Err("unsupported prefill version".into());
+        };
+        validate_launch_limits(streaming, self.limits)?;
         if self.row_count > self.limits.max_entities
             || self.canonical_bytes > self.limits.max_canonical_bytes
             || self.canonical_bytes < 20
@@ -306,19 +372,15 @@ impl Decode for PrefillLaunch {
         4 + 24 + 20 + 32 + 8 + 8 + 32 + StateHeader::MIN_ENCODED_LEN + 32 + 8;
     fn decode_from(d: &mut Decoder<'_>) -> std::result::Result<Self, DecodeError> {
         let version = d.u32()?;
-        if version != 1 && version != 2 {
+        let Some((streaming, _)) = launch_layout(version) else {
             return Err(invalid("launch version"));
-        }
+        };
         let limits = PrefillLimits {
             max_entities: d.u64()?,
             max_canonical_bytes: d.u64()?,
             max_storage_units: d.u64()?,
         };
-        if version == 1 {
-            limits.validate().map_err(|_| invalid("limits"))?;
-        } else {
-            crate::genesis_streaming::validate_limits(limits).map_err(|_| invalid("limits"))?;
-        }
+        validate_launch_limits(streaming, limits).map_err(|_| invalid("limits"))?;
         Ok(Self {
             version,
             limits,
@@ -349,13 +411,33 @@ pub fn recipe_hash(g: &SignedGenesis, p: &PrefillLaunch) -> B256 {
     e.u64(p.row_count);
     e.u64(p.canonical_bytes);
     digest(
-        if p.version == 1 {
-            RECIPE_DOMAIN
-        } else {
-            "arkiv/genesis-recipe/v2"
+        match p.version {
+            1 => RECIPE_DOMAIN,
+            2 => "arkiv/genesis-recipe/v2",
+            3 => "arkiv/genesis-recipe/v3",
+            4 => "arkiv/genesis-recipe/v4",
+            // Never valid: decoding and validation reject other versions first.
+            _ => "arkiv/genesis-recipe/unsupported",
         },
         &e.into_bytes(),
     )
+}
+/// Genesis rent gas of one prefill row of `units` storage units expiring at
+/// `expires_at`, created at height 0. A finite row prepays its whole lifetime
+/// with [`crate::gas::rent`]. A [`PERMANENT_EXPIRY`] row is admitted only under
+/// a permanent-prefill launch and has no time-based rent: a finite prepayment
+/// cannot price unbounded retention, and the launch is explicitly sponsored.
+pub(crate) fn prefill_rent_gas(units: u64, expires_at: u64, permanent: bool) -> Result<u64> {
+    if expires_at == PERMANENT_EXPIRY {
+        return if permanent {
+            Ok(0)
+        } else {
+            Err("permanent prefill rows require a permanent-prefill launch".into())
+        };
+    }
+    crate::gas::rent(0, units, None, Some(expires_at), 0)
+        .map(|quote| quote.gas)
+        .map_err(err)
 }
 struct Constructed {
     candidate: SealedCandidate,
@@ -368,9 +450,10 @@ fn construct(
     limits: PrefillLimits,
     sponsor: [u8; 20],
     stream: &[u8],
+    permanent: bool,
 ) -> Result<Constructed> {
     limits.validate()?;
-    let rows = decode_stream(stream)?;
+    let rows = decode_stream_with(stream, permanent)?;
     if rows.len() as u64 > limits.max_entities || stream.len() as u64 > limits.max_canonical_bytes {
         return Err("declared prefill limit exceeded".into());
     }
@@ -422,6 +505,7 @@ fn construct(
             chain_id: g.genesis.chain_id,
             max_lifetime: g.genesis.params.max_lifetime,
             expiry_per_block: g.genesis.params.expiry_per_block,
+            allow_permanent_create: permanent,
         };
         if !matches!(
             arkiv::execute_operation(
@@ -454,9 +538,7 @@ fn construct(
         if units > limits.max_storage_units {
             return Err("prefill storage units limit exceeded".into());
         }
-        let rent = crate::gas::rent(0, row_units, None, Some(row.expires_at_height), 0)
-            .map_err(err)?
-            .gas;
+        let rent = prefill_rent_gas(row_units, row.expires_at_height, permanent)?;
         burn = burn
             .checked_add(accounts::fee(rent))
             .ok_or("prefill rent overflow")?;
@@ -487,19 +569,30 @@ fn construct(
     })
 }
 pub fn build_genesis(
+    base: SignedGenesis,
+    limits: PrefillLimits,
+    sponsor: [u8; 20],
+    entities: &[PrefillEntity],
+) -> Result<SignedGenesis> {
+    build_genesis_with(base, limits, sponsor, entities, false)
+}
+/// [`build_genesis`] under a launch policy: `permanent` builds a version-3
+/// permanent-prefill launch, which also admits [`PERMANENT_EXPIRY`] rows.
+pub fn build_genesis_with(
     mut base: SignedGenesis,
     limits: PrefillLimits,
     sponsor: [u8; 20],
     entities: &[PrefillEntity],
+    permanent: bool,
 ) -> Result<SignedGenesis> {
     base.prefill = None;
     if base.genesis.pricing != crate::gas::schedule() {
         return Err("prefill requires pinned GLM schedule".into());
     }
-    let stream = encode_stream(entities)?;
-    let built = construct(&base, limits, sponsor, &stream)?;
+    let stream = encode_stream_with(entities, permanent)?;
+    let built = construct(&base, limits, sponsor, &stream, permanent)?;
     let mut p = PrefillLaunch {
-        version: 1,
+        version: PrefillLaunch::version_for(false, permanent),
         limits,
         sponsor,
         stream_hash: digest(STREAM_DOMAIN, &stream),
@@ -518,17 +611,17 @@ pub fn build_genesis(
 pub fn verified_candidate(g: &SignedGenesis, stream: &[u8]) -> Result<SealedCandidate> {
     g.validate().map_err(err)?;
     let p = g.prefill.as_ref().ok_or("genesis has no prefill profile")?;
-    if p.version != 1 {
+    if p.is_streaming() {
         return Err("streaming prefill requires file-backed verification".into());
     }
     if stream.len() as u64 != p.canonical_bytes || digest(STREAM_DOMAIN, stream) != p.stream_hash {
         return Err("prefill stream hash/length mismatch".into());
     }
-    let rows = decode_stream(stream)?;
+    let rows = decode_stream_with(stream, p.permanent_prefill())?;
     if rows.len() as u64 != p.row_count {
         return Err("prefill row count mismatch".into());
     }
-    let built = construct(g, p.limits, p.sponsor, stream)?;
+    let built = construct(g, p.limits, p.sponsor, stream, p.permanent_prefill())?;
     if built.candidate.state_header() != p.state
         || built.burn != p.burned_wei
         || built.units != p.storage_units
@@ -545,10 +638,52 @@ pub fn report(g: &SignedGenesis, stream: &[u8]) -> serde_json::Value {
     let Some(p) = &g.prefill else {
         return serde_json::json!({"error":"not a prefill genesis"});
     };
-    let built = match construct(g, p.limits, p.sponsor, stream) {
+    let built = match construct(g, p.limits, p.sponsor, stream, p.permanent_prefill()) {
         Ok(v) => v,
         Err(e) => return serde_json::json!({"error":e}),
     };
     let a = &g.accounts;
-    serde_json::json!({"genesisHash":hex(g.hash().as_slice()),"stateRoot":hex(p.state.root().as_slice()),"recipeHash":hex(p.recipe_hash.as_slice()),"streamHash":hex(p.stream_hash.as_slice()),"rowCount":p.row_count.to_string(),"canonicalBytes":p.canonical_bytes.to_string(),"storageUnits":p.storage_units.to_string(),"burnedWei":p.burned_wei.to_string(),"sponsor":hex(&p.sponsor),"sponsorBalanceWei":(a.initial_balance(OwnerId::new(p.sponsor))-p.burned_wei).to_string(),"initialSupplyWei":a.initial_supply().expect("valid supply").to_string(),"entities":built.rows})
+    let mut report = serde_json::json!({"genesisHash":hex(g.hash().as_slice()),"stateRoot":hex(p.state.root().as_slice()),"recipeHash":hex(p.recipe_hash.as_slice()),"streamHash":hex(p.stream_hash.as_slice()),"rowCount":p.row_count.to_string(),"canonicalBytes":p.canonical_bytes.to_string(),"storageUnits":p.storage_units.to_string(),"burnedWei":p.burned_wei.to_string(),"sponsor":hex(&p.sponsor),"sponsorBalanceWei":(a.initial_balance(OwnerId::new(p.sponsor))-p.burned_wei).to_string(),"initialSupplyWei":a.initial_supply().expect("valid supply").to_string(),"entities":built.rows});
+    // Present only for the permanent-prefill contract, so finite reports and
+    // the locks that record them are unchanged.
+    if p.permanent_prefill() {
+        report["permanentPrefill"] = serde_json::json!(true);
+        report["prefillVersion"] = serde_json::json!(p.version);
+    }
+    report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn permanent_rows_pay_no_time_rent_only_under_the_permanent_policy() {
+        for units in [1, 512, 9_000_000] {
+            assert_eq!(prefill_rent_gas(units, PERMANENT_EXPIRY, true).unwrap(), 0);
+            assert!(prefill_rent_gas(units, PERMANENT_EXPIRY, false).is_err());
+            for expiry in [1, 6_307_200, 1_000_000_000_000] {
+                let finite = crate::gas::rent(0, units, None, Some(expiry), 0)
+                    .unwrap()
+                    .gas;
+                // A finite row is charged identically under either policy.
+                assert_eq!(prefill_rent_gas(units, expiry, false).unwrap(), finite);
+                assert_eq!(prefill_rent_gas(units, expiry, true).unwrap(), finite);
+            }
+        }
+        assert!(prefill_rent_gas(1, 0, true).is_err());
+    }
+    #[test]
+    fn launch_versions_select_layout_and_permanence() {
+        for (version, streaming, permanent) in [
+            (1, false, false),
+            (2, true, false),
+            (3, false, true),
+            (4, true, true),
+        ] {
+            assert_eq!(PrefillLaunch::version_for(streaming, permanent), version);
+            assert_eq!(launch_layout(version), Some((streaming, permanent)));
+        }
+        assert_eq!(launch_layout(0), None);
+        assert_eq!(launch_layout(5), None);
+    }
 }

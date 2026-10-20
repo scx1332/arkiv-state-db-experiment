@@ -1,0 +1,43 @@
+# Base genesis for an unlimited (never-expiring) Sourcify prefill
+# (sourcify-prefill.py --expiry-policy unlimited). Same chain ID, allocation,
+# block period and sponsor as the far-future base; the standard pinned profile
+# suffices because permanent rows are not bounded by max_lifetime. The only new
+# rule is [prefill] allow_permanent: this base compiles to a version-3
+# (permanent-prefill) launch, and genesis stream-build turns it into version 4,
+# whose rows may carry the u64::MAX never-expires sentinel. Name and run ID are new.
+schema = "arkiv-genesis-bundle-v1"
+protocol = "arkiv-launch-prefill-v1"
+name = "Sourcify unlimited prefill"
+
+[profile]
+preset = "arkiv-entity-v2/glm-v2@1"
+
+[chain]
+id = "7706815"
+run_id = "0x00000000000000000000000077068153"
+start_time = "2026-10-20T00:00:00Z"
+block_period_ms = "2000"
+proposer = "@proposer"
+
+[allocations]
+# Permanent rows pay no genesis rent; the allocation matches the far-future base.
+expected_initial_supply_wei = "1000000000000000000000000000000"
+
+[[allocations.entry]]
+label = "proposer"
+address = "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+balance_wei = "1000000000000000000000000000000"
+
+[prefill]
+builder = "arkiv-prefill-v1"
+namespace = "entities"
+rent_policy = "sponsored-rent-v1"
+sponsor = "@proposer"
+# Admit expires_at_height = u64::MAX (never expires): no expiry scheduling and
+# no time-based rent for those rows. Finite rows keep sponsored rent.
+allow_permanent = true
+
+[prefill.limits]
+max_entities = "256"
+max_canonical_bytes = "1048576"
+max_storage_units = "8388608"

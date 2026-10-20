@@ -184,6 +184,12 @@ fn snapshot(header: &crate::Header) -> Json {
 }
 pub fn status(node: &Node) -> Json {
     let genesis = node.genesis();
+    // Permanent entities exist only through a permanent-prefill genesis
+    // (launch versions 3 and 4); live transactions still cannot create them.
+    let permanent = genesis
+        .prefill
+        .as_ref()
+        .is_some_and(|p| p.permanent_prefill());
     let mut capabilities = crate::simulator::profile::capabilities(&genesis.genesis.limits);
     capabilities["gas"] = json!({
         "profile":crate::signed::protocol::GAS_PROFILE, "scheduleId":crate::gas::SCHEDULE_ID,
@@ -196,7 +202,7 @@ pub fn status(node: &Node) -> Json {
         "feePolicy":"burn", "accountProofProfile":"glm-account-v1",
         "rentPeriodBlocks":crate::gas::RENT_PERIOD_BLOCKS.to_string(),
         "rentGasPerStorageUnitPeriod":crate::gas::RENT_GAS_PER_UNIT_PERIOD.to_string(),
-        "permanentEntitiesSupported":false, "refunds":false, "storageRefunds":false,
+        "permanentEntitiesSupported":permanent, "refunds":false, "storageRefunds":false,
         "unusedGasRefunds":true,
         "scope":"live-state logical occupancy; archive history excluded"
     });
@@ -211,6 +217,22 @@ pub fn status(node: &Node) -> Json {
         "unsupported":["permanent-entities","arbitrary-evm","contract-creation","nonempty-access-lists","ethereum-mpt-roots"],
         "feePolicy":"fixed-one-gwei; signed-prices-are-ceilings; no-priority-payment"
     });
+    if permanent {
+        // Present only on permanent-prefill chains; finite status is unchanged.
+        capabilities["gas"]["permanentEntities"] = json!({
+            "source":"genesis-prefill", "expiresAt":u64::MAX.to_string(),
+            "genesisRent":"none", "expirySweep":false,
+            "liveCreate":false, "liveExtendToPermanent":false,
+            "liveUpdate":"rejected:PermanentStorageUnsupported", "liveDelete":true
+        });
+        if let Some(unsupported) = capabilities["sdkRpcProfile"]["unsupported"].as_array_mut() {
+            for item in unsupported {
+                if item == "permanent-entities" {
+                    *item = json!("permanent-entity-writes");
+                }
+            }
+        }
+    }
     capabilities["genesisPrefill"] = json!(genesis.prefill.is_some());
     capabilities["signatures"] = json!(true);
     capabilities["proofTrust"] = json!("pinned-single-proposer-secp256k1");

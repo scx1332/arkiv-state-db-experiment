@@ -49,7 +49,9 @@ not be mistaken for completed bulk state.
 Final installation may still copy reachable objects into the headless node
 store in bounded batches. Removing that copy requires separate treatment of
 node identity and atomic metadata publication; bulk construction alone does not
-claim to eliminate it.
+claim to eliminate it. Bulk construction itself now runs once per launch:
+`stream-build --state-out` hands its completed store to `producer
+--prebuilt-state` (see [Build once](streaming-genesis-v2.md#build-once-prebuilt-state)).
 
 ## Validation and measurements
 

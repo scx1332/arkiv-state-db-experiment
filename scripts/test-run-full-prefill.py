@@ -109,7 +109,8 @@ class RunnerTests(unittest.TestCase):
             with patch.object(module.time, 'sleep', lambda _seconds: None):
                 runner = module.Runner(argparse.Namespace(
                     out=out, converter=converter, source=root, reserve_gib=0, expiry_policy='unlimited',
-                    max_expiry=None, bin=builder, base=root / 'base', sponsor='fixture', key=root / 'key'))
+                    max_expiry=None, bin=builder, base=root / 'base', sponsor='fixture', key=root / 'key',
+                    rebuild_genesis_in_producer=False))
                 with self.assertRaisesRegex(RuntimeError, 'does not match the conversion report'):
                     runner.run()
             self.assertEqual([phase['name'] for phase in runner.status['phases']], ['convert', 'stream-build'])
@@ -132,6 +133,88 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(observed, ['ready'])
             self.assertEqual(runner.child.returncode, -signal.SIGTERM)
             self.assertIn('readySeconds', runner.status['phases'][0])
+
+    def run_with_fake_bin(self, root, *extra):
+        """Convert and stream-build succeed; the producer exits so argv can be checked."""
+        converter = root / 'converter.py'
+        converter.write_text('import sys\nsys.exit(0)\n')
+        calls = root / 'calls.jsonl'
+        fake = root / 'arkiv-proposer'
+        fake.write_text(f"""#!{sys.executable}
+import json, sys
+from pathlib import Path
+argv = sys.argv[1:]
+with open({str(calls)!r}, 'a') as log:
+    log.write(json.dumps(argv) + '\\n')
+if argv[:2] == ['genesis', 'stream-build']:
+    out = Path(argv[argv.index('--out') + 1])
+    out.mkdir()
+    (out / 'report.json').write_text(json.dumps({{'genesisHash': '0x01', 'stateRoot': '0x02'}}))
+    if '--state-out' in argv:
+        Path(argv[argv.index('--state-out') + 1]).mkdir()
+    sys.exit(0)
+sys.exit(9)
+""")
+        fake.chmod(0o755)
+        out = root / 'run'
+        result = subprocess.run([
+            sys.executable, str(Path(module.__file__)), '--bin', str(fake),
+            '--converter', str(converter), '--source', str(root), '--base', str(root / 'base.bin'),
+            '--key', str(root / 'key'), '--out', str(out), '--sponsor', '0x01', *extra],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        status = json.loads((out / 'status.json').read_text())
+        self.assertEqual([p['name'] for p in status['phases']], ['convert', 'stream-build', 'producer'])
+        self.assertEqual(status['phases'][2]['exitCode'], 9)
+        build, producer = [json.loads(line) for line in calls.read_text().splitlines()]
+        return out, status, build, producer
+
+    def test_build_once_hands_built_state_to_producer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out, status, build, producer = self.run_with_fake_bin(Path(directory))
+            state = str(out / 'genesis-state')
+            self.assertEqual(status['genesisBuild'], 'once')
+            self.assertEqual(build[build.index('--state-out') + 1], state)
+            self.assertEqual(producer[0], 'producer')
+            self.assertEqual(producer[producer.index('--prebuilt-state') + 1], state)
+            self.assertEqual(producer[producer.index('--bundle') + 1], str(out / 'bundle'))
+
+    def test_producer_rebuild_remains_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, status, build, producer = self.run_with_fake_bin(
+                Path(directory), '--rebuild-genesis-in-producer')
+            self.assertEqual(status['genesisBuild'], 'producer-rebuild')
+            self.assertNotIn('--state-out', build)
+            self.assertNotIn('--prebuilt-state', producer)
+
+    def test_readiness_requires_bundle_head_and_prebuilt_install_without_rebuild(self):
+        expected = {'genesisHash': '0xaa', 'stateRoot': '0xbb'}
+        good = {'head': {'height': '0', 'hash': '0xaa', 'stateRoot': '0xbb'}}
+        self.assertIs(module.verify_ready(good, expected), good)
+        for head in ({'height': '1', 'hash': '0xaa', 'stateRoot': '0xbb'},
+                     {'height': '0', 'hash': '0xab', 'stateRoot': '0xbb'},
+                     {'height': '0', 'hash': '0xaa', 'stateRoot': '0xbc'}):
+            with self.assertRaisesRegex(RuntimeError, 'does not match'):
+                module.verify_ready({'head': head}, expected)
+        install = '{"event":"prefill_prebuilt_install","result":"%s"}'
+        audit = '{"event":"prefill_progress","stage":"audit","rows":0,"complete":false}'
+        rebuild = '{"event":"prefill_progress","stage":"bulk_normalize","rows":0,"complete":false}'
+        phase = '{"count":0,"event":"prefill_bulk_phase","phase":"keys"}'
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / 'producer.log'
+            for lines, accepted in (([audit, install % 'moved', audit, 'not json', 'arkiv-proposer: started'], True),
+                                    ([install % 'copied'], True),
+                                    ([audit], False),
+                                    ([install % 'existing'], False),
+                                    ([install % 'moved', install % 'moved'], False),
+                                    ([install % 'moved', rebuild], False),
+                                    ([install % 'moved', phase], False)):
+                log.write_text('\n'.join(lines) + '\n')
+                if accepted:
+                    self.assertIs(module.verify_ready(good, expected, log), good)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, 'prebuilt genesis state'):
+                        module.verify_ready(good, expected, log)
 
     def test_existing_output_is_never_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:

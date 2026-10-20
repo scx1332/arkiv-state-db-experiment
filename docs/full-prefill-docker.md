@@ -39,6 +39,8 @@ checks extracted file hashes and the expected full inventory, and then invokes
 `--contract-limit`, builds a v2 genesis bundle, and starts a fresh producer. It
 checks height zero, genesis hash and state root before recording readiness.
 A successful producer stays alive with automatic block production paused.
+This run was launched with the runner snapshot from before the build-once change
+(below), so its producer rebuilds the genesis state from the stream.
 
 The source adapter, schema, payload bounds, funding and full-data capacity remain
 subject to validation during the actual run. Failure preserves evidence for
@@ -81,7 +83,9 @@ Persistent evidence below the job directory:
 - `prefill/status.json`: active phase, exit/failure, metrics and verified readiness.
 - `prefill/convert.log`, `stream-build.log`, `producer.log`: individual phase logs.
 - `prefill/*-samples.jsonl`: process RSS/I/O and cgroup memory samples.
-- `prefill/converted`, `bundle`, `node`: published artifacts as phases complete.
+- `prefill/converted`, `bundle`, `genesis-state`, `node`: published artifacts as
+  phases complete. `genesis-state` exists only between `stream-build` and producer
+  installation.
 
 A Docker OOM or SIGKILL may leave the last status marked running: the container
 exit/OOM state is authoritative in that case. Docker stdout is rotated to three
@@ -90,11 +94,35 @@ with `sudo docker stop -t 60 arkiv-experiment-full-7m-20261019` so the runner ca
 forward the signal and save status. Do not delete or restart the run as a repair
 step before inspecting its failure evidence.
 
+## Build-once runner
+
+The runner now builds the genesis state database once. `stream-build` receives
+`--state-out <out>/genesis-state`, and the producer receives
+`--prebuilt-state <out>/genesis-state`. The producer renames the verified store
+into `node/prefill-work` and installs it without normalization or index
+construction; see [Build once](streaming-genesis-v2.md#build-once-prebuilt-state).
+On the October 19 full run that removes about 7.2 h of producer work
+(5,499 s normalization plus 20,441 s indexes in `stream-build`, both repeated by
+the producer), leaving the stream audits and the final installation copy.
+`status.json` records `genesisBuild: once`. Readiness still requires height
+zero and the bundle's genesis hash and state root. It now also requires that
+`producer.log` reports exactly one `prefill_prebuilt_install` (`moved` or
+`copied`) and no normalization or index phase. `--rebuild-genesis-in-producer`
+restores the earlier independent producer rebuild.
+
+With the runner's single job directory the handoff is a rename, so disk peak is
+unchanged. The store that `stream-build` previously deleted now waits in
+`genesis-state` until the producer moves it, and the producer deletes it after
+installation as before. A producer on another filesystem would copy it instead,
+keeping the source until it is removed.
+
 ## Runner validation
 
 `python3 scripts/test-run-full-prefill.py` covers a conversion failure stopping
-later phases, a verified producer staying alive until SIGTERM, and rejection of
-an existing output directory. The image was also checked for Ethereum Keccak,
+later phases, a verified producer staying alive until SIGTERM, rejection of
+an existing output directory, the build-once handoff flags, the
+`--rebuild-genesis-in-producer` fallback, and readiness rejection of a wrong
+head or an unconsumed prebuilt state. The image was also checked for Ethereum Keccak,
 converter dependencies and compatibility with the pinned producer binary.
 `python3 scripts/test-full-prefill-bootstrap.py` covers interrupted range
 resumption, early EOF, completed archive reuse, completed partial promotion,

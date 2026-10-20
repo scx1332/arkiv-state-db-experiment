@@ -437,9 +437,30 @@ pub fn build_bundle(
     sponsor: [u8; 20],
     batch_bytes: usize,
 ) -> Result<serde_json::Value> {
+    build_bundle_with_state(base_path, stream, output, None, sponsor, batch_bytes)
+}
+
+/// [`build_bundle`], optionally keeping the completed private bulk store as a
+/// prebuilt state directory for one producer (`producer --prebuilt-state`), so
+/// the producer does not construct the same state again. The bundle itself is
+/// unchanged. `state_out` must not exist, and its existing parent must be
+/// reachable by rename from the bundle's work directory (same filesystem and
+/// mount); both are checked before any work. The state is bound to the
+/// genesis before the bundle is published and renamed into place after it.
+pub fn build_bundle_with_state(
+    base_path: &Path,
+    stream: &Path,
+    output: &Path,
+    state_out: Option<&Path>,
+    sponsor: [u8; 20],
+    batch_bytes: usize,
+) -> Result<serde_json::Value> {
     if output.exists() {
         return Err("bundle destination already exists".into());
     }
+    let state_target = state_out
+        .map(|path| crate::genesis_prebuilt::check_destination(path, output))
+        .transpose()?;
     let file = File::open(base_path).map_err(err)?;
     if file.metadata().map_err(err)?.len() > 65536 {
         return Err("base genesis exceeds 64 KiB".into());
@@ -498,9 +519,14 @@ pub fn build_bundle(
         storage_units: units,
     };
     launch.recipe_hash = recipe_hash(&base, &launch);
+    // Close the store cleanly before any handoff; only its header is needed.
+    drop(engine);
     base.prefill = Some(launch);
     base.validate().map_err(err)?;
     let report = summary_report(&base)?;
+    if state_target.is_some() {
+        crate::genesis_prebuilt::bind(&base, &work)?;
+    }
     let stage = parent.join(format!(".{name}.publish-{}", std::process::id()));
     fs::create_dir(&stage).map_err(err)?;
     let result: Result<()> = (|| {
@@ -541,7 +567,11 @@ pub fn build_bundle(
         let _ = fs::remove_dir_all(&stage);
     }
     result?;
-    drop(engine);
+    if let Some(target) = &state_target {
+        // The completed store remains in the work directory if this fails.
+        crate::genesis_prebuilt::publish(&base, &work, target)
+            .map_err(|e| format!("bundle published; {e}"))?;
+    }
     fs::remove_dir_all(&work)
         .map_err(|e| format!("bundle published; staging cleanup failed: {e}"))?;
     File::open(parent).map_err(err)?.sync_all().map_err(err)?;

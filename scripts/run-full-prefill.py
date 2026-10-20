@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Run a fresh complete-source prefill, then keep the verified producer alive.
 
+The genesis state database is built once: stream-build keeps its verified
+private state (--state-out) and the producer installs it (--prebuilt-state)
+instead of rebuilding it from the stream. --rebuild-genesis-in-producer restores
+the older independent producer rebuild.
+
 Intended for a detached container with memory and swap limits. No retries or
 resume: each invocation needs a new output directory. Status and logs survive
 container exit when the output directory is bind-mounted.
@@ -49,6 +54,39 @@ def metrics(pid):
     except (OSError, ValueError, StopIteration):
         pass
     return result
+
+
+REBUILD_STAGES = ('bulk_normalize', 'bulk_indexes')
+
+
+def verify_ready(status, expected, producer_log=None):
+    """Raise unless the producer serves exactly the bundle's height-zero genesis.
+
+    With producer_log (build-once mode), also require that the fresh producer
+    installed the prebuilt state exactly once and never rebuilt it.
+    """
+    head = status['head']
+    if (head['height'] != '0' or head['hash'] != expected['genesisHash']
+            or head['stateRoot'] != expected['stateRoot']):
+        raise RuntimeError('Producer readiness state does not match the genesis bundle')
+    if producer_log is not None:
+        installs, rebuilt = [], False
+        with open(producer_log, errors='replace') as log:
+            for line in log:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if event.get('event') == 'prefill_prebuilt_install':
+                    installs.append(event.get('result'))
+                elif (event.get('event') == 'prefill_bulk_phase'
+                      or (event.get('event') == 'prefill_progress' and event.get('stage') in REBUILD_STAGES)):
+                    rebuilt = True
+        if rebuilt or installs not in (['moved'], ['copied']):
+            raise RuntimeError('Producer did not start from the prebuilt genesis state')
+    return status
 
 
 def free_port():
@@ -123,6 +161,9 @@ class Runner:
     def run(self):
         a = self.args
         converted, bundle = a.out / 'converted', a.out / 'bundle'
+        # Same filesystem as the bundle and node directories: both handoffs are renames.
+        prebuilt = None if a.rebuild_genesis_in_producer else a.out / 'genesis-state'
+        self.status['genesisBuild'] = 'producer-rebuild' if prebuilt is None else 'once'
         # The default policy keeps the original converter command line.
         expiry = [] if a.expiry_policy == 'dependency-safe' else ['--expiry-policy', a.expiry_policy]
         if a.max_expiry is not None:
@@ -130,9 +171,10 @@ class Runner:
         self.phase('convert', [sys.executable, str(a.converter), 'convert', '--bundle',
                                str(a.source), '--out', str(converted), '--reserve-gib', str(a.reserve_gib),
                                *expiry])
+        handoff = [] if prebuilt is None else ['--state-out', str(prebuilt)]
         self.phase('stream-build', [str(a.bin), 'genesis', 'stream-build', str(a.base),
                                     '--prefill', str(converted / 'prefill.bin'), '--out', str(bundle),
-                                    '--sponsor', a.sponsor])
+                                    '--sponsor', a.sponsor, *handoff])
         expected = json.loads((bundle / 'report.json').read_text())
         permanent = a.expiry_policy == 'unlimited'
         if permanent:
@@ -156,18 +198,17 @@ class Runner:
                     status = json.load(response)
             except (urllib.error.URLError, TimeoutError, ConnectionError):
                 return None
-            head = status['head']
-            if (head['height'] != '0' or head['hash'] != expected['genesisHash']
-                    or head['stateRoot'] != expected['stateRoot']):
-                raise RuntimeError('Producer readiness state does not match the genesis bundle')
+            status = verify_ready(status, expected, None if prebuilt is None else self.args.out / 'producer.log')
             if permanent and status['capabilities']['gas'].get('permanentEntitiesSupported') is not True:
                 raise RuntimeError('Producer does not report permanent genesis entities')
             return status
 
+        handoff = [] if prebuilt is None else ['--prebuilt-state', str(prebuilt)]
         self.phase('producer', [str(a.bin), 'producer', '--run-dir', str(a.out / 'node'),
                                 '--bundle', str(bundle), '--key-file', str(a.key),
                                 '--listen', f'127.0.0.1:{public}',
-                                '--private-listen', f'127.0.0.1:{private}'], env=env, ready=ready)
+                                '--private-listen', f'127.0.0.1:{private}', *handoff],
+                   env=env, ready=ready)
 
 
 def main():
@@ -181,6 +222,8 @@ def main():
     parser.add_argument('--expiry-policy', choices=('dependency-safe', 'far-future', 'unlimited'),
                         default='dependency-safe')
     parser.add_argument('--max-expiry', type=int)
+    parser.add_argument('--rebuild-genesis-in-producer', action='store_true',
+                        help='do not hand the built state to the producer; it rebuilds it from the stream')
     args = parser.parse_args()
     if args.expiry_policy == 'unlimited' and args.max_expiry is not None:
         parser.error('--max-expiry does not apply to --expiry-policy unlimited')

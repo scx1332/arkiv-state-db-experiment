@@ -25,6 +25,21 @@ arkiv-proposer producer --bundle /data/bundle --run-dir /data/producer \
   --key-file /private/proposer.key --listen 127.0.0.1:9500
 ```
 
+To build the genesis state only once, keep the bundle builder's verified state
+and hand it to the producer. The bundle is byte-identical either way:
+
+```sh
+arkiv-proposer genesis stream-build /data/base/genesis.bin \
+  --prefill /data/converted/prefill.bin --out /data/bundle \
+  --sponsor 0xYOUR_FUNDED_SPONSOR --state-out /data/genesis-state
+arkiv-proposer producer --bundle /data/bundle --prebuilt-state /data/genesis-state \
+  --run-dir /data/producer --key-file /private/proposer.key --listen 127.0.0.1:9500
+```
+
+The producer then skips normalization and index construction; see
+[Build once](#build-once-prebuilt-state). Without `--prebuilt-state` it rebuilds
+the state from the stream as before.
+
 Use the normal signed-node flags for the bearer-protected private listener,
 full replication and explicitly pinned full/light identities. The producer
 starts paused unless `--start running` is given. Do not reuse fixture keys for a
@@ -120,6 +135,110 @@ content changes during the final copy. Public standalone verification continues
 to audit its input on every call. These checks replace the former immediate
 duplicate local-file audit and the audit at replay entry; no filename or
 timestamp is accepted as proof of file contents.
+
+## Build once (prebuilt state)
+
+Bundle authoring already constructs the complete genesis state database to
+derive the signed state commitment. Without a handoff, the producer audits the
+same stream and constructs the same database again: on the full Ethereum run,
+`stream-build` took 7 h 29 m and the producer repeats its roughly 7.2 h of
+normalization and index construction before installation even starts.
+
+`stream-build --state-out DIR` keeps the completed private bulk directory
+instead of deleting it. Before the stream audit begins, it checks that `DIR`
+does not exist, that its parent exists, and that it does not overlap the bundle
+or its work directory. It also probes a real rename from the work directory's
+parent into `DIR`'s parent, so separate mounts are refused within seconds. After
+construction, a synced `prebuilt.json` binds the store to the bundle's genesis hash,
+state root, stream hash, row count and import identity. The bundle is published
+next, then the state directory is renamed into place with no-replace semantics.
+If that last rename fails, the bundle is valid and the error names the bound
+store left at `.<bundle>.stream-work/bulk-v1`. That directory is itself a valid
+prebuilt state directory: move it or pass it to `--prebuilt-state`, or delete it
+and let the producer rebuild.
+
+`producer --bundle B --prebuilt-state DIR` is accepted only by a producer with a
+streaming bundle. While holding the node database lock, a fresh node checks that
+`DIR` is a real directory with the expected import identity, manifest and
+completed store files. A mismatched or incomplete store is refused before
+anything moves. The store is then renamed into `prefill-work/bulk-v1`, or on
+another filesystem copied into an unselected directory, synced and renamed. The
+rename consumes `DIR`; a copy leaves it. An interrupted copy is discarded and
+repeated, and a restart after the rename reuses the selected store. Once the
+node has a head, the option is ignored. If reuse or installation rejects the
+selected store (for example `StorageCorrupt` or a receipt mismatch), every restart
+fails the same way until the run directory's `prefill-work` is deleted. The
+headless `node.redb` may stay. Its copied objects are content-addressed and are
+only published by a later successful installation.
+
+From there the producer takes its existing completed-state restart path, so the
+checks before serving are unchanged:
+
+1. The canonical stream is audited three times as before (bundle, local copy,
+   retained file after installation), plus once when reusing the completed store.
+2. The store's import identity binds the base genesis, limits, sponsor and stream
+   summary. Its checksummed receipt must match the row count and admit the storage
+   units and rent. The engine genesis must match the expected deployment, limits
+   and pricing.
+3. The store's committed state header, rent and storage units must equal the signed
+   genesis commitment.
+4. Installation copies every object reachable from that root into the headless
+   node database. Every load checks `keccak256(bytes) == id`, map entry counts,
+   row admission limits and host value bounds. Only then is the height-zero
+   manifest, identity and certificate packet published. A tampered object fails
+   with `StorageCorrupt` and no head is ever published.
+
+What the producer no longer does is derive the state from the stream a second
+time with the same binary on the same input. That rebuild was a determinism
+self-check within the operator's own trust domain, the domain that also produced
+the commitment, rather than an independent verification. **Use only a state
+directory from your own `stream-build --state-out` run for exactly this bundle.**
+Its identity and receipt digests are unkeyed: they catch mix-ups and corruption
+of the store, but not a forger who also controls `genesis.bin`. Independent
+derivation remains with full followers, `genesis stream-verify`, and any producer
+started without `--prebuilt-state`. The prebuilt directory is private local
+state. Never distribute it as part of a bundle, and never give it to a follower;
+the follower roles refuse the option.
+
+### Build-once measurements, 2026-10-20
+
+These are single sequential runs of one release binary on the shared host, at
+`nice 19`/idle I/O priority while the full Ethereum producer was running beside
+them. There was no cgroup cap; the free-space reserve was 80 GiB. They are not
+repeated controlled trials.
+
+The 263-entity Sourcify fixture went through `scripts/run-full-prefill.py`
+(convert, stream-build, producer ready) twice: in default build-once mode and
+with `--rebuild-genesis-in-producer`. Both produced identical bundle reports and
+heads, with genesis `0x12832bb2…2281` and state root `0x7dd55378…ac27`. All 263
+entities, and the 16 `kind = str('verified_contract')` keys, read back through
+`arkiv_query` identically. The build-once producer logged one `moved` install and
+no normalization or index phase.
+
+On the matched 100k stream (445,600 entities, 1,853,670,399 bytes, base and
+sponsor as in [the scaling report](bulk-prefill-scaling.md)):
+
+| Phase | Producer rebuild | Build once |
+| --- | ---: | ---: |
+| `stream-build` wall time | 406.8 s | 407.3 s |
+| Producer ready | 697.2 s | **325.4 s** |
+| Producer stream audits | 3 × ~18 s | 4 × ~17.5 s |
+| Producer normalization | 108.8 s | none |
+| Producer index construction | 252.8 s | none |
+| Installation interval | 277.9 s | 251.4 s |
+| Producer kernel `write_bytes` | 67.7 GB | 30.6 GB |
+| End to end (build + ready) | 1,104.0 s | 732.7 s |
+
+Both producers reached the historical 100k commitment: state root
+`0x8074f966…aec0`, genesis `0xa1182828…793f`. The kept state directory used
+5.1 GB, and the sampled peak of the node directory was 12.06 GB in both modes.
+
+At full scale (15,298,744 entities), build once removes the producer's repeat of
+5,499 s normalization and 20,441 s index construction. It adds one reuse audit
+of about 480 s, so the projected saving is about **7.1 h**. The producer still
+performs four stream audits (about 32 min at 48.2 GB) and the final installation
+copy. That copy is now the dominant producer cost; at 100k it was 77% of
+build-once readiness.
 
 ## Resource policy
 

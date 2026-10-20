@@ -34,6 +34,7 @@ pub mod genesis_authoring;
 mod genesis_bulk;
 pub mod genesis_bundle;
 mod genesis_import_resources;
+pub mod genesis_prebuilt;
 pub mod genesis_streaming;
 pub mod identity;
 pub mod params;

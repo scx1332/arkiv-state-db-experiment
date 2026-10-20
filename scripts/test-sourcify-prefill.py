@@ -519,6 +519,113 @@ class ConversionTests(unittest.TestCase):
         with self.assertRaises(p.Invalid):
             p.decode_payload(row)
 
+    def test_far_future_skips_graph_and_fills_heights_in_emission_order(self):
+        source, out = self.root / "source", self.root / "out"
+        rows = [entity(str(i), CREATOR if i % 3 else "0x" + "34" * 20) for i in range(37)]
+        bundle(source, rows)
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("far-future conversion must not build or order a dependency graph")
+        original = (p.dependencies, p.assign_expiry)
+        p.dependencies = p.assign_expiry = forbidden
+        try:
+            result = p.run(options(source, out, "--expiry-policy", "far-future"))
+        finally:
+            p.dependencies, p.assign_expiry = original
+        far = p.FAR_FUTURE_EXPIRY
+        self.assertEqual((result["expiryPolicy"], result["dependencyEdges"]), ("far-future-uniform-v1", None))
+        self.assertEqual((result["minimumExpiryHeight"], result["maximumExpiryHeight"]), (far - 36 // 16, far))
+        self.assertIn("no-semantic-payload-validation", result["validationScope"])
+        decoded = list(frames(out / "prefill.bin"))
+        self.assertEqual([row["expiry"] for row in decoded], [far - 2 + i // 16 for i in range(37)])
+        self.assertLessEqual(max(collections.Counter(row["expiry"] for row in decoded).values()), p.EXPIRY_CAP)
+        self.assertEqual([(row["creator"].hex(), row["nonce"]) for row in decoded],
+                         sorted((row["creator"].hex(), row["nonce"]) for row in decoded))
+        keys = [json.loads(line) for line in (out / "keys.jsonl").read_bytes().splitlines()]
+        self.assertEqual([int(k["expiresAtHeight"]) for k in keys], [row["expiry"] for row in decoded])
+        for k in keys:
+            rent = (int(k["storageUnits"]) * int(k["expiresAtHeight"]) * 8 + 17279) // 17280 * 1000000000
+            self.assertEqual(int(k["rentWei"]), rent)
+        self.assertEqual(int(result["rentWei"]), sum(int(k["rentWei"]) for k in keys))
+        # Same rows, same keys/order: only expiry heights and rent differ.
+        finite = p.run(options(source, self.root / "finite"))
+        self.assertEqual([(r["creator"], r["nonce"], r["payload"], r["attrs"]) for r in frames(self.root / "finite/prefill.bin")],
+                         [(r["creator"], r["nonce"], r["payload"], r["attrs"]) for r in decoded])
+        self.assertGreater(int(result["rentWei"]), int(finite["rentWei"]) * 100000)
+
+    def test_far_future_keeps_wire_and_key_checks_without_semantic_validation(self):
+        tampered = entity("hello")
+        tampered["size"] = "i32:6"
+        source = self.root / "semantic"
+        bundle(source, [tampered])
+        with self.assertRaisesRegex(p.Invalid, "semantic staging identity"):
+            p.run(options(source, self.root / "finite"))
+        # Documented trade-off: semantic payload identity is not re-derived.
+        self.assertEqual(p.run(options(source, self.root / "far", "--expiry-policy", "far-future"))["entities"], 1)
+        corrupt = entity("hello")
+        corrupt["$payload"] = base64.b64encode(b"wrong").decode()
+        source = self.root / "corrupt"
+        bundle(source, [corrupt])
+        with self.assertRaisesRegex(p.Invalid, "payload checksum"):
+            p.run(options(source, self.root / "corrupt-out", "--expiry-policy", "far-future"))
+        contract, sourcefile, _compilation, code = uploaded_fixture()
+        source = self.root / "dangling"
+        helper_bundle(source, [contract, sourcefile, code])
+        with self.assertRaisesRegex(p.Invalid, "missing reference while encoding"):
+            p.run(options(source, self.root / "dangling-out", "--expiry-policy", "far-future"))
+        self.assertFalse((self.root / "dangling-out").exists())
+        # Inventory emits nothing, so it must not claim key references were resolved.
+        args = options(source, self.root / "dangling-inventory", "--expiry-policy", "far-future")
+        args.command = "inventory"
+        self.assertEqual(p.run(args)["validationScope"],
+                         "all-source-checksums-wire-inventory/no-semantic-payload-validation")
+
+    def test_far_future_contract_limit_keeps_complete_closure(self):
+        rows = uploaded_fixture()
+        source = self.root / "imported"
+        imported_bundle(source, [entity("unused")] + rows)
+        result = p.run(options(source, self.root / "out", "--contract-limit", "1", "--expiry-policy", "far-future"))
+        self.assertEqual((result["entities"], result["sourceEntities"], result["dependencyEdges"]), (4, 5, 4))
+        self.assertEqual(result["expiryPolicy"], "far-future-uniform-v1")
+        self.assertIn("selected-closure-semantic-validation", result["validationScope"])
+        self.assertEqual({f["expiry"] for f in frames(self.root / "out/prefill.bin")}, {p.FAR_FUTURE_EXPIRY})
+        source = self.root / "missing"
+        imported_bundle(source, [entity("unused")] + rows[:-1])
+        with self.assertRaisesRegex(p.Invalid, "missing code payload dependency"):
+            p.run(options(source, self.root / "missing-out", "--contract-limit", "1", "--expiry-policy", "far-future"))
+
+    def test_expiry_policy_bounds_and_capacity(self):
+        source = self.root / "source"
+        bundle(source, [entity(str(i)) for i in range(17)])
+        for name, extra, message in (
+                ("finite-ceiling", ("--max-expiry", str(p.MAX_EXPIRY + 1)), "maximum expiry"),
+                ("far-ceiling", ("--expiry-policy", "far-future", "--max-expiry", str(p.FAR_FUTURE_EXPIRY_LIMIT + 1)), "maximum expiry"),
+                ("far-capacity", ("--expiry-policy", "far-future", "--min-expiry", "100", "--max-expiry", "100"), "capacity")):
+            with self.assertRaisesRegex(p.Invalid, message):
+                p.run(options(source, self.root / name, *extra))
+        result = p.run(options(source, self.root / "far-edge", "--expiry-policy", "far-future",
+                               "--min-expiry", "99", "--max-expiry", "100"))
+        self.assertEqual((result["minimumExpiryHeight"], result["maximumExpiryHeight"]), (99, 100))
+        top = p.run(options(source, self.root / "far-top", "--expiry-policy", "far-future",
+                            "--max-expiry", str(p.FAR_FUTURE_EXPIRY_LIMIT)))
+        self.assertEqual(max(f["expiry"] for f in frames(self.root / "far-top/prefill.bin")), p.FAR_FUTURE_EXPIRY_LIMIT)
+        self.assertLess(max(int(json.loads(k)["rentWei"]) // 1000000000
+                            for k in (self.root / "far-top/keys.jsonl").read_bytes().splitlines()), 1 << 64)
+        self.assertEqual(top["entities"], 17)
+
+    @unittest.skipUnless(os.environ.get("SOURCIFY_SMOKE_BUNDLE"), "set SOURCIFY_SMOKE_BUNDLE for real dataset integration")
+    def test_real_263_entity_bundle_far_future(self):
+        source, out = Path(os.environ["SOURCIFY_SMOKE_BUNDLE"]), self.root / "real-far"
+        result = p.run(options(source, out, "--cache-mib", "1", "--expiry-policy", "far-future"))
+        self.assertEqual((result["entities"], result["maxUserAttributes"], result["dependencyEdges"]), (263, 29, None))
+        self.assertEqual((result["minimumExpiryHeight"], result["maximumExpiryHeight"]),
+                         (p.FAR_FUTURE_EXPIRY - 262 // 16, p.FAR_FUTURE_EXPIRY))
+        self.assertEqual((result["streamHash"], result["rentWei"]),
+                         ("0xd6d893668d463a3f944792caa69af23db779e4d5ba0e7ce66dfcf6891eb08042", "715027777772040000000000"))
+        finite = self.root / "real-finite"
+        p.run(options(source, finite, "--cache-mib", "1"))
+        same = lambda path: [(r["creator"], r["nonce"], r["payload"], r["attrs"]) for r in frames(path / "prefill.bin")]
+        self.assertEqual(same(out), same(finite))
+
     @unittest.skipUnless(os.environ.get("SOURCIFY_SMOKE_BUNDLE"), "set SOURCIFY_SMOKE_BUNDLE for real dataset integration")
     def test_real_263_entity_bundle_preserves_payloads_and_rewrites_references(self):
         source, out = Path(os.environ["SOURCIFY_SMOKE_BUNDLE"]), self.root / "real"

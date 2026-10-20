@@ -123,8 +123,13 @@ class Runner:
     def run(self):
         a = self.args
         converted, bundle = a.out / 'converted', a.out / 'bundle'
+        # The default policy keeps the original converter command line.
+        expiry = [] if a.expiry_policy == 'dependency-safe' else ['--expiry-policy', a.expiry_policy]
+        if a.max_expiry is not None:
+            expiry += ['--max-expiry', str(a.max_expiry)]
         self.phase('convert', [sys.executable, str(a.converter), 'convert', '--bundle',
-                               str(a.source), '--out', str(converted), '--reserve-gib', str(a.reserve_gib)])
+                               str(a.source), '--out', str(converted), '--reserve-gib', str(a.reserve_gib),
+                               *expiry])
         self.phase('stream-build', [str(a.bin), 'genesis', 'stream-build', str(a.base),
                                     '--prefill', str(converted / 'prefill.bin'), '--out', str(bundle),
                                     '--sponsor', a.sponsor])
@@ -159,6 +164,9 @@ def main():
         parser.add_argument('--' + name, type=lambda value: Path(value).resolve(), required=True)
     parser.add_argument('--sponsor', required=True)
     parser.add_argument('--reserve-gib', type=int, default=80)
+    # far-future needs a base genesis whose max_lifetime is at least --max-expiry.
+    parser.add_argument('--expiry-policy', choices=('dependency-safe', 'far-future'), default='dependency-safe')
+    parser.add_argument('--max-expiry', type=int)
     args = parser.parse_args()
     if args.reserve_gib < 0:
         parser.error('--reserve-gib must be nonnegative')

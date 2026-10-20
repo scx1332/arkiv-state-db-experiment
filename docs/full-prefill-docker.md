@@ -101,3 +101,54 @@ resumption, early EOF, completed archive reuse, completed partial promotion,
 invalid range/status/length/ETag responses, checksum failures, source identity
 pins and exhausted retry budgets. These checks are not evidence that the full
 dataset has imported.
+
+## Far-future expiry rerun
+
+The run above uses the default `dependency-safe` expiry policy: finite heights
+up to 6,307,200 (146 days at its 2-second blocks), ordered by a single-threaded
+dependency graph. A rerun with `--expiry-policy far-future` gives every entity a
+height near 10^12 and skips the graph. See
+[Sourcify prefill conversion](sourcify-prefill-converter.md#far-future-expiry---expiry-policy-far-future).
+It needs a new base genesis whose profile admits that lifetime. That is
+[examples/far-future-prefill](examples/far-future-prefill): the original base
+with `max_lifetime = 1000000000000` and a new run ID. No node binary change is
+required.
+
+```sh
+OLD=/home/ubuntu/arkiv-network/operations/runs/full-prefill-20261019
+RUN=/home/ubuntu/arkiv-network/operations/runs/full-prefill-far-future-YYYYMMDD
+REPO=/path/to/this/checkout
+mkdir -p "$RUN/snapshot" "$RUN/genesis-src"
+cp "$REPO"/docs/examples/far-future-prefill/{chain.toml,far-future-glm-v2.toml} "$RUN/genesis-src/"
+cd "$RUN/genesis-src"
+"$OLD/snapshot/arkiv-proposer" genesis lock chain.toml
+"$OLD/snapshot/arkiv-proposer" genesis build chain.toml --out base --locked
+"$OLD/snapshot/arkiv-proposer" genesis verify base
+cp "$OLD/snapshot/arkiv-proposer" "$RUN/genesis-src/base/genesis.bin" "$RUN/snapshot/"
+cp "$REPO"/scripts/{sourcify-prefill.py,run-full-prefill.py} "$RUN/snapshot/"
+install -m 600 "$OLD/snapshot/fixture.key" "$RUN/snapshot/fixture.key"
+
+sudo docker run -d --name arkiv-experiment-full-far-future-YYYYMMDD \
+  --user 1000:1000 --read-only --tmpfs /tmp:rw,size=64m \
+  --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 \
+  --memory 48g --memory-swap 48g --restart no \
+  --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
+  --mount type=bind,src="$RUN/snapshot",dst=/snapshot,readonly \
+  --mount type=bind,src="$OLD/source",dst=/source,readonly \
+  --mount type=bind,src="$RUN",dst=/run/job \
+  --entrypoint python3 \
+  sha256:c13a2545a1a3b6169cdfff41abf14336db78e9f1ddc7d1d44ca87ea608217951 \
+  -u /snapshot/run-full-prefill.py --bin /snapshot/arkiv-proposer \
+  --converter /snapshot/sourcify-prefill.py --source /source \
+  --base /snapshot/genesis.bin --key /snapshot/fixture.key --out /run/job/prefill \
+  --sponsor 0x1a642f0e3c3af545e7acbd38b07251b3990914f1 --reserve-gib 80 \
+  --expiry-policy far-future --max-expiry 1000000000000
+```
+
+This reuses the first run's extracted source read-only, with no download or
+credentials mount. The converter still checks `SHA256SUMS`, both manifests, and
+every part's SHA-256 and length before it publishes anything. Full-dataset rent
+at 10^12 is estimated at about 5.2e28 wei from a 24,000-row sample (7,315
+storage units per row), about 5% of the 10^30 wei sponsor allocation. Do not run
+it beside another full prefill: each needs the disk headroom and memory limit
+alone.

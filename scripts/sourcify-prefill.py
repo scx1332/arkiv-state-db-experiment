@@ -10,6 +10,19 @@ complete dependency closure. All source checksums and wire inventory are checked
 semantic payload validation applies to that closure. Source ordinals are retained,
 but selected creator nonces are reassigned, so nested subsets need not share the
 same derived destination keys.
+
+--expiry-policy far-future gives every entity a finite far-future expiry: the
+heights ending at --max-expiry (default 10**12), filled in emission order with
+at most 16 entities per height. No entity can expire within any realistic chain
+horizon, so the dependency graph and dependency-safe expiry ordering are
+skipped. The signed GLM protocol rejects the u64::MAX permanent sentinel, so
+this is the closest admissible form; the base genesis max_lifetime must be at
+least --max-expiry and the sponsor must fund the proportionally larger rent.
+Without --contract-limit this also skips semantic payload validation (staging
+identity, content hashes, payload schemas and payload hash references); source
+checksums and per-row wire validation remain enforced, and convert still
+requires every typed key reference to resolve. The base genesis must also keep
+expiry_per_block >= 16.
 """
 
 import argparse
@@ -38,6 +51,11 @@ PAYLOAD_CAP = 122880
 FRAME_CAP = 8 << 20
 ATTR_CAP = 55
 MAX_EXPIRY = 6307200
+# A finite far-future horizon: 10**12 blocks is ~63,000 years at 2 s blocks.
+FAR_FUTURE_EXPIRY = 10 ** 12
+# At most 64 cells of 128 KiB keep a row below 9 million storage units, so its
+# rent gas ceil(units * expiry * 8 / 17280) fits u64 for any expiry <= 10**15.
+FAR_FUTURE_EXPIRY_LIMIT = 10 ** 15
 EXPIRY_CAP = 16
 STREAM_DOMAIN = b"arkiv/prefill-stream/v2"
 KINDS = {"sourcefile", "code", "blob", "compilation", "verified_contract"}
@@ -718,7 +736,12 @@ def assign_expiry(db, count, maximum):
     return minimum
 
 
-def emit(db, count, out_dir, args):
+def uniform_minimum(count, maximum):
+    """First occupied height when count rows fill EXPIRY_CAP slots ending at maximum."""
+    return maximum - ((count - 1) // EXPIRY_CAP) if count else maximum
+
+
+def emit(db, count, out_dir, args, far_future_minimum=None):
     digest = keccak(bytes([len(STREAM_DOMAIN)]) + STREAM_DOMAIN)
     sha = hashlib.sha256()
     total_bytes = units = rent = 0
@@ -736,6 +759,10 @@ def emit(db, count, out_dir, args):
         write(b"ARKPFL02" + struct.pack(">IQ", 2, count))
         for i, (seq, creator, nonce, key, old_key, sid, expiry, line) in enumerate(db.execute(
                 "SELECT seq,creator,nonce,new_key,old_key,sid,expiry,raw FROM entities ORDER BY creator,nonce")):
+            if far_future_minimum is not None:
+                # Emission order fills each height with at most EXPIRY_CAP rows.
+                expiry = far_future_minimum + i // EXPIRY_CAP
+            require(type(expiry) is int and 1 <= expiry <= args.max_expiry, "entity has no admissible expiry")
             row = parse_json(line)
             payload, _ = decode_payload(row)
             ctype = row["$contentType"].encode()
@@ -801,8 +828,13 @@ def publish(stage, destination):
 
 def run(args):
     number(args.chain_id, 1, (1 << 64) - 1, "chain ID")
-    number(args.min_expiry, 1, MAX_EXPIRY, "minimum expiry")
-    number(args.max_expiry, args.min_expiry, MAX_EXPIRY, "maximum expiry")
+    far_future = args.expiry_policy == "far-future"
+    require(args.expiry_policy in ("dependency-safe", "far-future"), "unsupported expiry policy")
+    if args.max_expiry is None:
+        args.max_expiry = FAR_FUTURE_EXPIRY if far_future else MAX_EXPIRY
+    ceiling = FAR_FUTURE_EXPIRY_LIMIT if far_future else MAX_EXPIRY
+    number(args.min_expiry, 1, ceiling, "minimum expiry")
+    number(args.max_expiry, args.min_expiry, ceiling, "maximum expiry")
     number(args.cache_mib, 1, 1024, "SQLite cache MiB")
     number(args.max_logical_payload_mib, 1, 256, "logical payload MiB")
     number(args.reserve_gib, 0, 1 << 20, "disk reserve GiB")
@@ -825,23 +857,37 @@ def run(args):
         db = database(scratch / "index.sqlite", args.cache_mib)
         try:
             inventory = ingest(root, parts, report, db, args, scratch)
-            dependencies(db, args, scratch, report["adapter"])
+            # A --contract-limit closure is discovered through dependency edges,
+            # so it keeps the graph and its semantic validation in every policy.
+            graph = not far_future or bool(args.contract_limit)
+            if graph:
+                dependencies(db, args, scratch, report["adapter"])
             if args.contract_limit:
                 inventory = select_inventory(db, args, inventory)
-            minimum = assign_expiry(db, inventory["entities"], args.max_expiry)
+            if far_future:
+                minimum = uniform_minimum(inventory["entities"], args.max_expiry)
+                require(minimum >= args.min_expiry, "dataset exceeds finite-expiry capacity")
+                if not graph:
+                    # Typed key references are resolved only while emitting.
+                    checked = "-and-key-references" if args.command == "convert" else ""
+                    inventory["validationScope"] = f"all-source-checksums-wire-inventory{checked}/no-semantic-payload-validation"
+            else:
+                minimum = assign_expiry(db, inventory["entities"], args.max_expiry)
             inventory.update({"schema": "arkiv-sourcify-conversion-v2", "chainId": args.chain_id,
                               "sourceLockSha256": hashlib.sha256(json_bytes(lock)).hexdigest(),
                               "sourceSkippedCount": report.get("sourceSkippedCount", 0),
                               "sourceAdapter": report["adapter"],
-                              "dependencyEdges": db.execute("SELECT count(*) FROM edges").fetchone()[0],
-                              "expiryPolicy": "dependency-safe-v1", "expiryPerHeight": EXPIRY_CAP,
+                              # None: no graph was built, not a claim of zero dependencies.
+                              "dependencyEdges": db.execute("SELECT count(*) FROM edges").fetchone()[0] if graph else None,
+                              "expiryPolicy": "far-future-uniform-v1" if far_future else "dependency-safe-v1",
+                              "expiryPerHeight": EXPIRY_CAP,
                               "minimumExpiryHeight": minimum, "maximumExpiryHeight": args.max_expiry,
                               "keyPolicy": "source-order-per-creator/nonce-from-zero/salt-zero-v1",
                               "maxTotalCells": 64, "maxUserAttributesSupported": ATTR_CAP,
                               "bounds": {"sqliteCacheMiB": args.cache_mib, "lineBytes": LINE_CAP,
                                          "logicalPayloadMiB": args.max_logical_payload_mib}})
             if args.command == "convert":
-                inventory.update(emit(db, inventory["entities"], staged, args))
+                inventory.update(emit(db, inventory["entities"], staged, args, minimum if far_future else None))
             sync_json(staged / "source-lock.json", lock)
             sync_json(staged / "conversion-report.json", inventory)
             sync_dir(staged)
@@ -857,8 +903,12 @@ def parser():
     result.add_argument("--bundle", type=Path, required=True)
     result.add_argument("--out", type=Path, required=True, help="new directory; never overwritten")
     result.add_argument("--chain-id", type=int, default=7706815)
+    result.add_argument("--expiry-policy", choices=("dependency-safe", "far-future"), default="dependency-safe",
+                        help="dependency-safe: graph-ordered expiries up to 6307200; far-future: uniform expiries "
+                             "ending at --max-expiry without a dependency graph (needs base genesis max_lifetime >= it)")
     result.add_argument("--min-expiry", type=int, default=1, help="minimum acceptable dataset lifetime in blocks")
-    result.add_argument("--max-expiry", type=int, default=MAX_EXPIRY)
+    result.add_argument("--max-expiry", type=int, default=None,
+                        help=f"last expiry height (default {MAX_EXPIRY}, or {FAR_FUTURE_EXPIRY} for far-future)")
     result.add_argument("--max-skipped", type=int, default=5)
     result.add_argument("--contract-limit", type=int, help="first N imported audit ordinals, retaining complete dependency closure")
     result.add_argument("--cache-mib", type=int, default=64)

@@ -36,6 +36,33 @@ class RunnerTests(unittest.TestCase):
             self.assertIn('fixture conversion failed', (out / 'convert.log').read_text())
             self.assertFalse((out / 'stream-build.log').exists())
 
+    def test_expiry_policy_is_forwarded_to_converter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            converter = root / 'converter.py'
+            converter.write_text('import json, sys\nprint(json.dumps(sys.argv[1:]), flush=True)\nsys.exit(7)\n')
+            out = root / 'run'
+            result = subprocess.run([
+                sys.executable, str(Path(module.__file__)), '--bin', '/does-not-exist',
+                '--converter', str(converter), '--source', str(root), '--base', '/missing',
+                '--key', '/missing', '--out', str(out), '--sponsor', 'fixture',
+                '--expiry-policy', 'far-future', '--max-expiry', '1000000000000'],
+                capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(json.loads((out / 'status.json').read_text())['phases'][0]['exitCode'], 7)
+            argv = json.loads((out / 'convert.log').read_text())
+            self.assertEqual(argv[argv.index('--expiry-policy') + 1], 'far-future')
+            self.assertEqual(argv[argv.index('--max-expiry') + 1], '1000000000000')
+            default = root / 'default'
+            subprocess.run([
+                sys.executable, str(Path(module.__file__)), '--bin', '/does-not-exist',
+                '--converter', str(converter), '--source', str(root), '--base', '/missing',
+                '--key', '/missing', '--out', str(default), '--sponsor', 'fixture'],
+                capture_output=True, text=True, timeout=15)
+            argv = json.loads((default / 'convert.log').read_text())
+            self.assertEqual(argv, ['convert', '--bundle', str(root), '--out', str(default / 'converted'),
+                                    '--reserve-gib', '80'])
+
     def test_verified_producer_keeps_running_until_signal(self):
         with tempfile.TemporaryDirectory() as directory:
             runner = module.Runner(argparse.Namespace(out=Path(directory) / 'run'))

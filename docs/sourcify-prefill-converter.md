@@ -205,6 +205,51 @@ formula and `ceil(units * expiry * 8 / 17280) * 1000000000` wei, rounded per row
 The report states the sponsor allocation required for genesis rent. It does not
 debit a wallet. The node builder independently verifies this amount.
 
+### Far-future expiry (`--expiry-policy far-future`)
+
+The source rows say `$expiresAt: never`, and the original Arkiv prefill stores
+them as `u64::MAX` with no rent and no ordering. This protocol cannot: the stream
+format rejects `u64::MAX` (`genesis_streaming::validate_row`), GLM rent rejects
+it as `PermanentUnsupported` (`gas::rent`), and every signed genesis must use GLM
+pricing. A finite height within `max_lifetime` is the only admissible expiry.
+
+`--expiry-policy far-future` therefore keeps finite heights but puts them beyond
+any realistic chain horizon. The last expiry defaults to `--max-expiry
+1000000000000` (about 63,000 years at 2-second blocks) and may be at most
+`10^15`, where any admissible row's rent gas still fits u64. Rows fill heights in
+emission (creator, nonce) order, 16 per height, ending at `--max-expiry`. With N
+rows the first height is `max_expiry - floor((N - 1) / 16)`. Since nothing can
+expire within the horizon, dependency order is moot. The converter builds no
+dependency graph and skips dependency-safe ordering. The report records
+`expiryPolicy: far-future-uniform-v1` and `dependencyEdges: null`, meaning no
+graph was built, not zero dependencies.
+
+Without `--contract-limit`, semantic payload validation is skipped too. That
+covers staging identities, code/source/compilation hashes, payload schemas,
+payload hash references, spill reassembly and helper fingerprints. The report's
+`validationScope` says so. Still enforced:
+
+- every SHA256SUMS, report and part checksum and byte length;
+- per-row wire validation: system fields, `never` expiry, empty flags,
+  owner/creator, attribute names and types, base64, gzip bounds and payload
+  SHA-256;
+- the entity count and duplicate keys;
+- in `convert` only, every typed `key:` reference, which must resolve when
+  encoded. `inventory` emits nothing and reports a scope without key references.
+
+With `--contract-limit`, the dependency phase still runs over the selected closure,
+because the closure is found through its edges. Only the expiry assignment changes.
+
+The node-side requirements are explicit. The base genesis profile's
+`chain_params.max_lifetime` must be at least `--max-expiry`; the preset's
+6,307,200 rejects the stream with `ExpiryInvalid(TooFar)`. Rent grows linearly
+with expiry, and the sponsor allocation must cover it. The genesis
+`expiry_per_block` must stay at 16, the per-height packing the converter
+assumes.
+[`examples/far-future-prefill`](examples/far-future-prefill) pins a profile with
+`max_lifetime = 1000000000000` and a 10^30 wei sponsor. A larger `max_lifetime` also lets live
+transactions buy longer lifetimes, still limited by their gas budget.
+
 ## Memory, disk and interruption
 
 Dataset-sized row copies, key maps, uniqueness indexes, dependency edges and
@@ -266,3 +311,14 @@ The preserved 16-contract fixture converts to 263 rows, 288 dependency edges,
 stream hash is
 `0x6f8634a91b73423f6b5ff462ccc08cbeb6b5b6ae2e799f67f057e5b25ec37e05`.
 These are fixture results, not full-dataset performance claims.
+With `--expiry-policy far-future` the same fixture keeps all keys, payloads and
+attributes. It reports no dependency graph, expiries 999,999,999,984 to
+1,000,000,000,000, and 715,027,777,772,040,000,000,000 wei rent. Its stream hash is
+`0xd6d893668d463a3f944792caa69af23db779e4d5ba0e7ce66dfcf6891eb08042`.
+
+On October 20, 2026 the 445,583-entity 100k helper bundle was converted on the
+same host, while the full prefill was running alongside. The default
+`dependency-safe` conversion took 513.9 s and reproduced the recorded stream hash
+`0x58691b67…1eb6`. Ingest took 113 s, dependencies 288 s, expiry 33 s and
+emit 73 s. `far-future` took 203.6 s: ingest 122 s and emit 73 s, with the same
+canonical bytes.

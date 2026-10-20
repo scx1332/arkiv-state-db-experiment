@@ -1,0 +1,41 @@
+# fixed-glm-v2 with only chain_params.max_lifetime raised for far-future prefill expiry.
+schema = "arkiv-genesis-profile-v1"
+entity_rules = "arkiv-entity-v2"
+account_rules = "glm-v2"
+state_layout = 2
+codec_version = 1
+admins = []
+
+[pricing]
+schedule_id = 1196182785 # 0x474c4d01
+weights = [100, 20000, 10000, 10000, 10000, 4, 4, 100, 100, 10, 1, 20000, 12000, 10000, 250, 4, 100, 500, 0, 300, 100, 100, 10, 10, 10, 10, 10, 100, 2, 10, 1]
+gas_price_wei = "1000000000"
+rent_rule = "glm-rent-v1"
+
+[engine_limits]
+namespace_cap = 1024
+max_cells = 32
+max_cell_name_len = 32
+max_str_len = 131072
+max_bytes_len = 131072
+max_indexed_len = 128
+max_page = 64
+max_groups = 8
+max_literals = 8
+
+[chain_params]
+block_budget = "100000000"
+user_budget = "90000000"
+expiry_per_block = 16
+max_admin_per_block = 0
+max_txs_per_block = 16
+max_ops_per_tx = 16
+max_ops_per_block = 128
+max_tx_bytes = 262035
+max_block_input_bytes = 786432
+max_lifetime = "1000000000000"
+
+[signed_limits]
+max_tx_bytes = 262144
+max_input_bytes = 786432
+max_body_bytes = 1048576

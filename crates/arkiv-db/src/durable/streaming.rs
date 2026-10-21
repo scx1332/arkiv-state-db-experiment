@@ -23,7 +23,7 @@ impl From<TrieError> for CopyFailure {
 /// number of terms. A collision only repeats a traversal. The nonzero length
 /// marks an occupied slot: decoded term leaves cannot contain empty postings.
 /// At 48 bytes per slot the production cache retains exactly 768 KiB.
-const POSTING_CACHE_SLOTS: usize = 16_384;
+pub(super) const POSTING_CACHE_SLOTS: usize = 16_384;
 
 #[derive(Clone, Copy, Default)]
 struct CopiedPosting {
@@ -32,11 +32,11 @@ struct CopiedPosting {
     len: u64,
 }
 
-struct PostingCache {
+pub(super) struct PostingCache {
     slots: Box<[CopiedPosting]>,
 }
 impl PostingCache {
-    fn new(slots: usize) -> Self {
+    pub(super) fn new(slots: usize) -> Self {
         assert!(slots.is_power_of_two());
         Self {
             slots: vec![CopiedPosting::default(); slots].into_boxed_slice(),
@@ -48,7 +48,12 @@ impl PostingCache {
         (prefix ^ namespace) as usize & (self.slots.len() - 1)
     }
 
-    fn contains(&self, root: &ObjectId, namespace: u64, len: u64) -> Result<bool, DurableError> {
+    pub(super) fn contains(
+        &self,
+        root: &ObjectId,
+        namespace: u64,
+        len: u64,
+    ) -> Result<bool, DurableError> {
         let cached = &self.slots[self.slot(root, namespace)];
         if cached.len == 0 || cached.root != *root || cached.namespace != namespace {
             return Ok(false);
@@ -59,7 +64,7 @@ impl PostingCache {
         Ok(true)
     }
 
-    fn insert(&mut self, root: ObjectId, namespace: u64, len: u64) {
+    pub(super) fn insert(&mut self, root: ObjectId, namespace: u64, len: u64) {
         let slot = self.slot(&root, namespace);
         self.slots[slot] = CopiedPosting {
             root,
@@ -94,15 +99,8 @@ impl Copier<'_> {
         }
     }
     fn push(&self, space: SpaceId, id: ObjectId, bytes: &[u8]) -> Result<(), DurableError> {
-        let size = bytes
-            .len()
-            .checked_add(32)
-            .ok_or_else(|| incompatible("object size overflow"))?;
-        if size > self.options.prepare_bytes || self.options.prepare_objects == 0 {
-            return Err(DurableError::ResourceLimit(
-                "copy object exceeds batch cap".into(),
-            ));
-        }
+        check_object_size(bytes.len(), self.options)?;
+        let size = bytes.len() + 32;
         let flush = {
             let pending = self.pending.borrow();
             pending.len() >= self.options.prepare_objects
@@ -160,30 +158,58 @@ impl Copier<'_> {
         let catalog = Catalog::from_root(state.catalog_root, state.catalog_len)
             .map_err(|e| CopyFailure::from(e).0)?;
         self.map(&catalog, SpaceId::Catalog, |id, ns| {
-            if ns.descriptor.id != id || id.ordinal() >= state.next_namespace {
-                return Err(corrupt("import namespace association/allocator"));
-            }
+            check_namespace(state, id, &ns)?;
             let space = SpaceId::Namespace(id.ordinal());
             self.map(&ns.records, space, |_, _| Ok(()))?;
             self.map(&ns.typed.keys, space, |_, _| Ok(()))?;
-            self.map(&ns.typed.rows, space, |_, row| {
-                crate::typed::validate_create(&genesis.limits, &row.cells)
-                    .map_err(|_| incompatible("import row exceeds admission limits"))
-            })?;
+            self.map(&ns.typed.rows, space, |_, row| check_row(genesis, &row))?;
             self.map(&ns.typed.terms, space, |_, posting| {
                 self.posting(&posting.0, id.ordinal())
             })
         })?;
         let host = HostMap::from_root(state.host_root, state.host_len)
             .map_err(|e| CopyFailure::from(e).0)?;
-        self.map(&host, SpaceId::Host, |_, blob| {
-            if blob.0.len() > crate::HOST_VALUE_MAX {
-                return Err(corrupt("import host value exceeds limit"));
-            }
-            Ok(())
-        })?;
+        self.map(&host, SpaceId::Host, |_, blob| check_host(&blob))?;
         self.flush()
     }
+}
+
+// The leaf checks of a staged state, shared by the copy and the verify-only
+// walk of an adoption (`adopt.rs`) so both accept exactly the same states.
+pub(super) fn check_namespace(
+    state: &StateHeader,
+    id: crate::NamespaceId,
+    ns: &crate::layout::NamespaceState,
+) -> Result<(), DurableError> {
+    if ns.descriptor.id != id || id.ordinal() >= state.next_namespace {
+        return Err(corrupt("import namespace association/allocator"));
+    }
+    Ok(())
+}
+pub(super) fn check_row(
+    genesis: &EngineGenesis,
+    row: &crate::layout::StoredRecord,
+) -> Result<(), DurableError> {
+    crate::typed::validate_create(&genesis.limits, &row.cells)
+        .map_err(|_| incompatible("import row exceeds admission limits"))
+}
+pub(super) fn check_host(blob: &crate::layout::Blob) -> Result<(), DurableError> {
+    if blob.0.len() > crate::HOST_VALUE_MAX {
+        return Err(corrupt("import host value exceeds limit"));
+    }
+    Ok(())
+}
+/// The copy's per-object bound: one object must fit an empty object batch.
+pub(super) fn check_object_size(len: usize, options: &Options) -> Result<(), DurableError> {
+    let size = len
+        .checked_add(32)
+        .ok_or_else(|| incompatible("object size overflow"))?;
+    if size > options.prepare_bytes || options.prepare_objects == 0 {
+        return Err(DurableError::ResourceLimit(
+            "copy object exceeds batch cap".into(),
+        ));
+    }
+    Ok(())
 }
 struct CopyLoader<'a, 'b> {
     copier: &'a Copier<'b>,

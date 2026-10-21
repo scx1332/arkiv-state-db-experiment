@@ -6,9 +6,9 @@ use std::{
 };
 
 use arkiv_db_storage::versioned::{
-    CommitBatch, CommitOutcome, DatabaseId, Head, Health, ObjectId, ObjectReader, SpaceId,
+    CommitBatch, CommitOutcome, DatabaseId, Head, Health, ObjectId, ObjectReader, Relabel, SpaceId,
     StatsRecorder, StorageError, StorageErrorKind, StoreStats, Table, VersionedStore,
-    head_mismatch, object_conflict, record_conflict,
+    head_mismatch, object_conflict, record_conflict, relabel_mismatch,
 };
 
 /// A [`VersionedStore`] held entirely in process memory.
@@ -149,6 +149,22 @@ impl VersionedStore for MemoryVersionedStore {
         }
     }
 
+    fn relabel(&self, relabel: &Relabel) -> CommitOutcome {
+        let outcome = self.apply_relabel(relabel);
+        match outcome {
+            Ok((new_objects, new_records)) => {
+                let outcome = CommitOutcome::Committed;
+                self.stats.commit(&outcome, &new_objects, new_records);
+                outcome
+            }
+            Err(error) => {
+                let outcome = CommitOutcome::NotCommitted(error);
+                self.stats.commit(&outcome, &[], 0);
+                outcome
+            }
+        }
+    }
+
     fn health(&self) -> Health {
         Health::Available
     }
@@ -187,7 +203,53 @@ impl MemoryVersionedStore {
         headless: bool,
     ) -> Result<(Vec<(SpaceId, usize)>, u64), StorageError> {
         batch.validate()?;
+        Self::apply_locked(&mut self.write(), batch, headless)
+    }
+
+    /// Checks the retired records and the head, then replaces them with the
+    /// batch under one lock (see [`Relabel`]).
+    fn apply_relabel(
+        &self,
+        relabel: &Relabel,
+    ) -> Result<(Vec<(SpaceId, usize)>, u64), StorageError> {
+        relabel.validate()?;
         let mut state = self.write();
+        if state.head != Some(relabel.expected_head) {
+            return Err(head_mismatch(Some(relabel.expected_head), state.head));
+        }
+        if state.records.len() != relabel.retired.len() {
+            return Err(relabel_mismatch(format!(
+                "{} records, {} retired",
+                state.records.len(),
+                relabel.retired.len()
+            )));
+        }
+        for (table, key, value) in &relabel.retired {
+            if state.records.get(&(*table, key.clone())) != Some(value) {
+                return Err(relabel_mismatch(format!("{} record differs", table.name())));
+            }
+        }
+        // The batch is checked against the emptied tables before anything
+        // changes, so a refusal leaves the store as it was.
+        let mut relabelled = MemoryState {
+            head: None,
+            objects: std::mem::take(&mut state.objects),
+            records: BTreeMap::new(),
+        };
+        let result = Self::apply_locked(&mut relabelled, &relabel.batch, false);
+        if result.is_err() {
+            state.objects = relabelled.objects;
+        } else {
+            *state = relabelled;
+        }
+        result
+    }
+
+    fn apply_locked(
+        state: &mut MemoryState,
+        batch: &CommitBatch,
+        headless: bool,
+    ) -> Result<(Vec<(SpaceId, usize)>, u64), StorageError> {
         if state.head != batch.expected_head {
             return Err(head_mismatch(batch.expected_head, state.head));
         }
@@ -363,6 +425,104 @@ mod tests {
         let stats = store.stats();
         assert_eq!(stats.space(SpaceId::Catalog).objects_written, 1);
         assert_eq!(stats.records_written, 1);
+    }
+
+    #[test]
+    fn relabel_replaces_exactly_the_retired_records_and_keeps_objects() {
+        let store = MemoryVersionedStore::new();
+        let mut first = CommitBatch::new(None, head(0));
+        first
+            .put_object(SpaceId::Namespace(1), [1; 32], b"kept".to_vec())
+            .put_record(Table::Meta, b"engine/profile".to_vec(), b"old".to_vec())
+            .put_record(Table::Manifests, height_key(0), b"m0".to_vec());
+        assert_eq!(store.commit(&first), CommitOutcome::Committed);
+        let new_head = Head {
+            height: 0,
+            hash: [9; 32],
+        };
+        let mut batch = CommitBatch::new(None, new_head);
+        batch
+            .put_object(SpaceId::Host, [2; 32], b"added".to_vec())
+            .put_record(Table::Meta, b"engine/profile".to_vec(), b"new".to_vec())
+            .put_record(Table::Blocks, height_key(0), b"b0".to_vec());
+        let relabel = Relabel {
+            expected_head: head(0),
+            retired: first.records.clone(),
+            batch,
+        };
+
+        // Anything but exactly the retired records under the expected head
+        // is refused, and the store is unchanged.
+        let mut refused = Vec::new();
+        let mut stale = relabel.clone();
+        stale.expected_head = new_head;
+        refused.push(stale);
+        let mut partial = relabel.clone();
+        partial.retired.pop();
+        refused.push(partial);
+        let mut differs = relabel.clone();
+        differs.retired[0].2 = b"other".to_vec();
+        refused.push(differs);
+        let mut absent = relabel.clone();
+        absent
+            .retired
+            .push((Table::Inclusions, b"never".to_vec(), b"x".to_vec()));
+        refused.push(absent);
+        let mut conflict = relabel.clone();
+        conflict
+            .batch
+            .put_object(SpaceId::Namespace(1), [1; 32], b"changed".to_vec());
+        refused.push(conflict);
+        for refusal in &refused {
+            assert!(matches!(
+                store.relabel(refusal),
+                CommitOutcome::NotCommitted(_)
+            ));
+            assert_eq!(store.head().unwrap(), Some(head(0)));
+            assert_eq!(
+                store
+                    .read_record(Table::Meta, b"engine/profile")
+                    .unwrap()
+                    .as_deref(),
+                Some(&b"old"[..])
+            );
+            assert_eq!(
+                store.read_object(SpaceId::Namespace(1), &[1; 32]).unwrap(),
+                Some(b"kept".to_vec())
+            );
+            assert_eq!(store.read_object(SpaceId::Host, &[2; 32]).unwrap(), None);
+        }
+
+        assert_eq!(store.relabel(&relabel), CommitOutcome::Committed);
+        assert_eq!(store.head().unwrap(), Some(new_head));
+        assert_eq!(
+            store
+                .read_record(Table::Meta, b"engine/profile")
+                .unwrap()
+                .as_deref(),
+            Some(&b"new"[..])
+        );
+        assert_eq!(
+            store.read_record(Table::Manifests, &height_key(0)).unwrap(),
+            None
+        );
+        assert_eq!(
+            store.read_record(Table::Blocks, &height_key(0)).unwrap(),
+            Some(b"b0".to_vec())
+        );
+        assert_eq!(
+            store.read_object(SpaceId::Namespace(1), &[1; 32]).unwrap(),
+            Some(b"kept".to_vec())
+        );
+        assert_eq!(
+            store.read_object(SpaceId::Host, &[2; 32]).unwrap(),
+            Some(b"added".to_vec())
+        );
+        // A repeat no longer finds the retired records.
+        assert!(matches!(
+            store.relabel(&relabel),
+            CommitOutcome::NotCommitted(_)
+        ));
     }
 
     #[test]

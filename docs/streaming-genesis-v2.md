@@ -123,6 +123,12 @@ again from the beginning. Normal node open refuses an unfinished headless store.
 Successful installation removes importer scratch. Bundle publication uses synced
 files and an atomic no-replace directory rename.
 
+`producer --genesis-install adopt` installs without the copy. It reads and checks
+the same reachable objects in parallel without writing them, relabels the staged
+store in one durable commit, and renames it over the headless `node.redb`. No
+second database copy is written or stored. See
+[Adopting the staged genesis store](genesis-adoption.md).
+
 A fresh producer supplied with `--bundle` performs three standalone stream
 audits: the supplied bundle, the actual local copy, and the retained serving
 file after final database installation. The local audit retains an open file

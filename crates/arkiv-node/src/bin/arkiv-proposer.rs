@@ -338,6 +338,87 @@ fn create_host(
         ),
     }
 }
+/// `--genesis-install adopt`: install a streaming genesis by verifying and
+/// relabelling the staged store in place and renaming it over the headless
+/// `state` (see `arkiv_node::genesis_adopt`), instead of copying it.
+#[allow(clippy::too_many_arguments)]
+fn adopt_host(
+    state: Arc<RedbStore>,
+    mut history: History,
+    genesis: SignedGenesis,
+    source: [u8; 16],
+    certificate: SignedHeader,
+    signer: Option<Signer>,
+    options: Options,
+    prefill: Option<PrefillSource>,
+    path: &Path,
+    reopen: &dyn Fn(&Path, bool) -> Result<Arc<RedbStore>>,
+) -> Result<Host> {
+    use arkiv_node::genesis_adopt::{self, Staged};
+    let Some(PrefillSource::Streaming {
+        path: input,
+        verified,
+    }) = prefill
+    else {
+        eprintln!("--genesis-install adopt requires a streaming prefill bundle");
+        return Err(Error("InvalidRequest"));
+    };
+    let started = std::time::Instant::now();
+    let work = path.join("prefill-work");
+    let staged = genesis_adopt::staged_path(&work);
+    let node = path.join("node.redb");
+    let resumed = genesis_adopt::inspect(&staged).map_err(authoring_error)? == Staged::Relabelled;
+    if !resumed {
+        let engine = arkiv_node::genesis_streaming::prepare_verified_streaming(
+            &genesis,
+            verified,
+            &work,
+            options.clone(),
+        )
+        .map_err(authoring_error)?;
+        genesis_adopt::check_rename(&staged, &node).map_err(authoring_error)?;
+        let verifying = std::time::Instant::now();
+        Host::adopt_staged(
+            &mut history,
+            &genesis,
+            source,
+            certificate,
+            signer.as_ref(),
+            options.clone(),
+            engine,
+            genesis_adopt::verify_threads(),
+        )?;
+        eprintln!(
+            "{}",
+            serde_json::json!({"event": "prefill_genesis_adopt", "stage": "relabelled",
+                "verifySeconds": verifying.elapsed().as_secs_f64()})
+        );
+    }
+    // Check the relabelled store before it takes the node database's name.
+    Host::check_adopted(
+        Arc::new(RedbStore::open(&staged, RedbConfig::default())?),
+        &genesis,
+        source,
+        options.clone(),
+    )?;
+    genesis_adopt::publish(&staged, &node, state.as_ref()).map_err(authoring_error)?;
+    drop(state);
+    let mut host = Host::open(reopen(&node, false)?, history, &genesis, signer, options)?;
+    host.prefill_file = Some(input.clone());
+    // As after a copy: catch path replacement or inode mutation since the
+    // bulk construction ended.
+    arkiv_node::genesis_streaming::verify_stream_file(&host.genesis, &input)
+        .map_err(authoring_error)?;
+    eprintln!(
+        "{}",
+        serde_json::json!({"event": "prefill_genesis_adopt", "stage": "adopted",
+            "resumed": resumed, "elapsedSeconds": started.elapsed().as_secs_f64()})
+    );
+    if let Err(error) = std::fs::remove_dir_all(&work) {
+        eprintln!("genesis adopted; could not remove import scratch: {error}");
+    }
+    Ok(host)
+}
 fn attach_prefill(host: &mut Host, prefill: Option<PrefillSource>) {
     match prefill {
         Some(PrefillSource::Small(bytes)) => host.prefill_stream = Some(bytes),
@@ -533,12 +614,16 @@ async fn run() -> Result<()> {
         println!(
             "arkiv-proposer genesis lock CHAIN [--refresh]\narkiv-proposer genesis build CHAIN --out BUNDLE --locked\narkiv-proposer genesis verify BUNDLE\narkiv-proposer genesis stream-build BASE_GENESIS --prefill FILE --out BUNDLE --sponsor 0xADDRESS [--state-out DIR]\narkiv-proposer genesis stream-verify BUNDLE\narkiv-proposer keygen --out FILE\narkiv-proposer producer --run-dir DIR --key-file FILE [--listen 127.0.0.1:9500] [--private-listen 127.0.0.1:9501] [--start paused|running] [--source-id UUID] [--chain-id 9001] [--block-period-ms 1000] [--state-retention archive|N] [--read-concurrency 4] [--read-deadline-secs 30] [--read-max-groups N] [--read-max-literals N] (--allocations-file FILE | --bundle BUNDLE [--prebuilt-state DIR])\narkiv-proposer full|light --run-dir DIR --peer URL --genesis-hash 0xHEX --proposer 0xADDRESS --chain-id N --source-id UUID --run-id HEX32 [--replication-peer URL] [--bundle BUNDLE] [--state-retention archive|N (full only)] [--read-concurrency 4] [--read-deadline-secs 30] [--read-max-groups N] [--read-max-literals N]\narkiv-proposer sign --key-file FILE --genesis-file FILE --tx-file FILE --nonce N --out FILE\narkiv-proposer create --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --payload-file FILE --out FILE [--salt 0] [--gas-limit 1000000] [--lifetime-blocks 17280]\narkiv-proposer transfer --key-file FILE --genesis-file FILE --nonce N --request-id 0xHEX64 --to 0xADDRESS --amount-wei DECIMAL --out FILE [--gas-limit 21000]\narkiv-proposer submit --peer URL --transaction-file FILE\nOptional private Prometheus exporter: --metrics-listen 127.0.0.1:9600 [--metrics-interval-secs 300] (minimum 10). Metrics use rogue_one_ prefix.\nPrivate listener/full replication use ARKIV_PROPOSER_TOKEN (at least 32 bytes). Producer starts paused. Every chain runs the glm-v2 gas profile with funded accounts. A bundle chain creates the entities namespace (and its prefill) at height 0; a chain created from --allocations-file creates it with the proposer's bootstrap transaction in block 1. Each run exports public genesis.bin/certificate.bin. stream-build --state-out keeps its verified private state; a fresh producer given it with --prebuilt-state moves it into the run directory and installs it without rebuilding (it is ignored once the node is initialized). Sign/create files use native canonical bytes; submit polls pending/included status. Single-proposer authentication supplies no consensus or finality. Bodies are retained in history.redb separately from node.redb. --state-retention N serves state (balances, proofs, queries, receipts/logs) only for the head and the N snapshots before it and refuses older heights with HistoryPruned; archive (default) serves every height. Nothing is deleted yet, and a pruned floor never moves back. Entity queries and counts, proofs and the state tree explorer run outside the node lock against a pinned snapshot: at most --read-concurrency (1-64) at once, others refused with ServerBusy (HTTP 429), each stopped after --read-deadline-secs (1-3600) with ReadDeadlineExceeded (HTTP 503) or when its client disconnects. Entity queries and counts are planned: each AND-group is driven by its smallest index posting, so clause order does not change their cost, and counts use stored posting sizes. --read-max-groups (1-64) and --read-max-literals (1-256) raise the genesis query bounds for these reads only (default: the genesis values); larger queries still use the bounded scan fallback (queries) or are refused (counts)."
         );
+        println!(
+            "producer --genesis-install copy|adopt: how a fresh producer installs a streaming bundle's staged genesis state. copy (default) copies every reachable object into a new node.redb. adopt reads and verifies the same objects without writing them, relabels the private staged store in place and renames it to node.redb, so no second copy of the state is written or stored; it consumes the run directory's prefill-work store, an interrupted adoption resumes only with adopt, and the option is ignored once the node is initialized."
+        );
         return Ok(());
     }
     const FLAGS: &[&str] = &[
         "--metrics-listen",
         "--metrics-interval-secs",
         "--bundle",
+        "--genesis-install",
         "--out",
         "--key-file",
         "--genesis-file",
@@ -765,13 +850,23 @@ async fn run() -> Result<()> {
             .transpose()?,
     };
     read_limits.validate()?;
+    // Only a producer may adopt its own staged genesis store; followers keep
+    // the copy installation.
+    let adopt = match args.get("--genesis-install").map(String::as_str) {
+        None | Some("copy") => false,
+        Some("adopt") => true,
+        Some(_) => return Err(Error("InvalidRequest")),
+    };
+    if args.contains_key("--genesis-install") && command != "producer" {
+        return Err(Error("InvalidRequest"));
+    }
     let options = Options {
         retention: get("--state-retention", "archive")
             .parse()
             .map_err(|_| Error("InvalidRequest"))?,
         ..Options::default()
     };
-    let databases = std::cell::RefCell::new(Vec::new());
+    let databases = std::cell::RefCell::new(Vec::<arkiv_node::signed::metrics::Database>::new());
     let store = |path: &Path, streaming_import: bool| -> Result<Arc<RedbStore>> {
         let opened = store(path, streaming_import)?;
         let name = match path.file_name().and_then(|s| s.to_str()) {
@@ -780,13 +875,14 @@ async fn run() -> Result<()> {
             Some("headers.redb") => "headers",
             _ => return Err(Error("InvalidRequest")),
         };
-        databases
-            .borrow_mut()
-            .push(arkiv_node::signed::metrics::Database {
-                name,
-                path: path.to_owned(),
-                store: opened.clone(),
-            });
+        let mut databases = databases.borrow_mut();
+        // A reopened database (an adopted node.redb) replaces its entry.
+        databases.retain(|database| database.name != name);
+        databases.push(arkiv_node::signed::metrics::Database {
+            name,
+            path: path.to_owned(),
+            store: opened.clone(),
+        });
         Ok(opened)
     };
     let node = if command == "producer" {
@@ -922,17 +1018,33 @@ async fn run() -> Result<()> {
             } else {
                 History::create(history_store, genesis.hash())?
             };
-            create_host(
-                state,
-                history,
-                genesis,
-                parse_uuid(&get("--source-id", "00000000-0000-4000-8000-000000000001"))?,
-                certificate,
-                Some(s),
-                options.clone(),
-                prefill,
-                &path,
-            )?
+            let source = parse_uuid(&get("--source-id", "00000000-0000-4000-8000-000000000001"))?;
+            if adopt {
+                adopt_host(
+                    state,
+                    history,
+                    genesis,
+                    source,
+                    certificate,
+                    Some(s),
+                    options.clone(),
+                    prefill,
+                    &path,
+                    &store,
+                )?
+            } else {
+                create_host(
+                    state,
+                    history,
+                    genesis,
+                    source,
+                    certificate,
+                    Some(s),
+                    options.clone(),
+                    prefill,
+                    &path,
+                )?
+            }
         };
         match get("--start", "paused").as_str() {
             "paused" => {}

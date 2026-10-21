@@ -339,6 +339,128 @@ impl Host {
             refusal: Default::default(),
         })
     }
+    /// Relabel a verified, privately staged genesis store in place as this
+    /// node's height-zero database instead of copying it (see
+    /// [`DurableEngine::adopt_staged_simulator`]). The staged engine is
+    /// consumed. On success its store holds the same height-zero record that
+    /// [`Self::create_from_staged`] would publish; the caller checks it with
+    /// [`Self::check_adopted`], moves its file into place and opens it with
+    /// [`Self::open`]. `threads` workers share the verification reads.
+    #[allow(clippy::too_many_arguments)]
+    pub fn adopt_staged(
+        history: &mut History,
+        genesis: &SignedGenesis,
+        source: [u8; 16],
+        certificate: SignedHeader,
+        signer: Option<&Signer>,
+        options: Options,
+        staged: DurableEngine,
+        threads: usize,
+    ) -> Result<()> {
+        genesis.validate()?;
+        // The staged header binds the store to the signed launch; the caller
+        // selects this path only for a streaming prefill.
+        if staged.head_snapshot().state_header()
+            != genesis
+                .prefill
+                .as_ref()
+                .ok_or(Error("InvalidPrefillBundle"))?
+                .state
+        {
+            return Err(Error("InvalidPrefillBundle"));
+        }
+        certificate.authenticate(genesis)?;
+        if certificate.header != genesis.header()
+            || signer.is_some_and(|s| s.address().as_bytes() != &genesis.proposer)
+        {
+            return Err(Error("IdentityMismatch"));
+        }
+        let durable = SimulatorIdentity {
+            source_id: source,
+            run_id: genesis.run_id,
+            node_genesis_hash: genesis.hash(),
+            metadata: encode(genesis),
+        };
+        let identity = identity(&durable, genesis);
+        let block = SignedBlock {
+            header: certificate.clone(),
+            inputs: SignedInputs { txs: vec![] },
+            outcomes: BlockOutcomes::default(),
+        };
+        let body = history.persist(&encode(&block))?;
+        let record = HeaderRecord {
+            certificate,
+            body,
+            feed: FeedBlock::new(&identity, &genesis.header(), Default::default())?,
+        };
+        let packet = SimulatorPacket {
+            height: 0,
+            state_root: genesis.header().state_root,
+            bytes: record.bytes()?,
+            inclusions: vec![],
+        };
+        let outcome = staged.adopt_staged_simulator(
+            engine_genesis(&durable, genesis),
+            options,
+            durable,
+            packet,
+            threads,
+        );
+        // The node error code alone would hide why a store was refused.
+        let failure = match &outcome {
+            Ok(Publication::Committed(_)) => None,
+            Ok(Publication::NotCommitted(e) | Publication::Indeterminate(e)) => Some(e.to_string()),
+            Err(e) => Some(e.to_string()),
+        };
+        if let Some(error) = failure {
+            eprintln!(
+                "{}",
+                json!({"event": "prefill_genesis_adopt", "stage": "failed", "error": error})
+            );
+        }
+        match outcome? {
+            Publication::Committed(_) => Ok(()),
+            Publication::NotCommitted(_) => Err(Error("StorageUnavailable")),
+            Publication::Indeterminate(_) => Err(Error("CommitUncertain")),
+        }
+    }
+    /// Checks that `store` is exactly the height-zero database that
+    /// [`Self::adopt_staged`] makes for `genesis` and `source`: the simulator
+    /// identity, engine genesis, head manifest and the signed genesis record.
+    /// Reads a bounded number of records and no trie objects.
+    pub fn check_adopted(
+        store: Arc<dyn VersionedStore>,
+        genesis: &SignedGenesis,
+        source: [u8; 16],
+        options: Options,
+    ) -> Result<()> {
+        genesis.validate()?;
+        let expected = SimulatorIdentity {
+            source_id: source,
+            run_id: genesis.run_id,
+            node_genesis_hash: genesis.hash(),
+            metadata: encode(genesis),
+        };
+        if DurableEngine::read_simulator_identity(store.as_ref())? != expected {
+            return Err(Error("IdentityMismatch"));
+        }
+        let identity = identity(&expected, genesis);
+        let engine = DurableEngine::open_simulator(
+            store,
+            engine_genesis(&expected, genesis),
+            options,
+            expected,
+        )?;
+        let stored = engine.simulator_block(0)?;
+        let record = HeaderRecord::from_bytes(&stored.bytes, genesis, &identity)?;
+        if engine.head().sequence() != 0
+            || record.certificate.header != genesis.header()
+            || stored.info.state_root != genesis.header().state_root
+        {
+            return Err(Error("StorageCorrupt"));
+        }
+        Ok(())
+    }
     pub fn open(
         store: Arc<dyn VersionedStore>,
         history: History,

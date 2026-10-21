@@ -261,7 +261,32 @@ pub(crate) fn read_block(
     })
 }
 
+/// The storage profile a durable store was published under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageProfile {
+    /// Engine-only: private staging and compaction stores.
+    Engine,
+    /// The simulator/signed-node profile.
+    Simulator,
+}
+
 impl DurableEngine {
+    /// Reads only the profile record: `None` before a store's first
+    /// publication, `Incompatible` for an unknown profile. Unlike an open, it
+    /// checks nothing else; it tells a staged store from an adopted one.
+    pub fn storage_profile(
+        store: &dyn VersionedStore,
+    ) -> Result<Option<StorageProfile>, DurableError> {
+        if let Health::Failed(e) = store.health() {
+            return Err(e.into());
+        }
+        match store.read_record_bounded(Table::Meta, PROFILE_KEY, 12)? {
+            None => Ok(None),
+            Some(profile) if profile == super::profile_bytes() => Ok(Some(StorageProfile::Engine)),
+            Some(profile) if profile == profile_bytes() => Ok(Some(StorageProfile::Simulator)),
+            Some(_) => Err(incompatible("unknown engine profile/version")),
+        }
+    }
     pub fn read_simulator_identity(
         store: &dyn VersionedStore,
     ) -> Result<SimulatorIdentity, DurableError> {

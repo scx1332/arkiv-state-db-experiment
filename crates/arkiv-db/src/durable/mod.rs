@@ -8,6 +8,7 @@
 //! State history is retained according to [`Retention`] (archive by
 //! default); see the [`retention`] module for the floor and pin semantics.
 
+mod adopt;
 mod bulk;
 pub(crate) mod cache;
 mod format;

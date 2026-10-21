@@ -160,6 +160,11 @@ class Runner:
 
     def run(self):
         a = self.args
+        # adopt makes the producer relabel its verified staged store as node.redb
+        # instead of copying it; the default keeps the original command line.
+        install = [] if getattr(a, 'genesis_install', 'copy') == 'copy' else ['--genesis-install', 'adopt']
+        if install:
+            self.status['genesisInstall'] = 'adopt'
         converted, bundle = a.out / 'converted', a.out / 'bundle'
         # Same filesystem as the bundle and node directories: both handoffs are renames.
         prebuilt = None if a.rebuild_genesis_in_producer else a.out / 'genesis-state'
@@ -205,7 +210,7 @@ class Runner:
 
         handoff = [] if prebuilt is None else ['--prebuilt-state', str(prebuilt)]
         self.phase('producer', [str(a.bin), 'producer', '--run-dir', str(a.out / 'node'),
-                                '--bundle', str(bundle), '--key-file', str(a.key),
+                                '--bundle', str(bundle), '--key-file', str(a.key), *install,
                                 '--listen', f'127.0.0.1:{public}',
                                 '--private-listen', f'127.0.0.1:{private}', *handoff],
                    env=env, ready=ready)
@@ -216,6 +221,9 @@ def main():
     for name in ('bin', 'converter', 'source', 'base', 'key', 'out'):
         parser.add_argument('--' + name, type=lambda value: Path(value).resolve(), required=True)
     parser.add_argument('--sponsor', required=True)
+    parser.add_argument('--genesis-install', choices=('copy', 'adopt'), default='copy',
+                        help='producer genesis installation: copy the staged state into a new node.redb '
+                             '(default) or adopt the verified staged store in place')
     parser.add_argument('--reserve-gib', type=int, default=80)
     # far-future needs a base genesis whose max_lifetime is at least --max-expiry;
     # unlimited needs a base genesis built with [prefill] allow_permanent = true.

@@ -15,8 +15,9 @@ use std::{
 use alloy_primitives::keccak256;
 use arkiv_db_storage::versioned::{
     BackendStats, CommitBatch, CommitOutcome, DatabaseId, Head, Health, ObjectId, ObjectReader,
-    SpaceId, StatsRecorder, StorageError, StorageErrorKind, StoreStats, Table, VersionedStore,
-    head_mismatch, object_conflict, record_conflict,
+    RESERVED_META_PREFIX, Relabel, SpaceId, StatsRecorder, StorageError, StorageErrorKind,
+    StoreStats, Table, VersionedStore, head_mismatch, object_conflict, record_conflict,
+    relabel_mismatch,
 };
 use redb::{
     Builder, Database, Durability, ReadableDatabase, ReadableTable, ReadableTableMetadata,
@@ -488,12 +489,22 @@ impl RedbStore {
         batch: &CommitBatch,
         headless: bool,
     ) -> (CommitOutcome, Vec<(SpaceId, usize)>, u64) {
+        self.transact(|| batch.validate(), |txn| stage(txn, batch, headless))
+    }
+
+    /// Runs `apply` in one durable write transaction after `validate`, under
+    /// the writer lock, and maps redb's outcome to a [`CommitOutcome`].
+    fn transact(
+        &self,
+        validate: impl FnOnce() -> Result<(), StorageError>,
+        apply: impl FnOnce(&WriteTransaction) -> Result<(Vec<(SpaceId, usize)>, u64), Fault>,
+    ) -> (CommitOutcome, Vec<(SpaceId, usize)>, u64) {
         let _writer = lock(&self.writer);
         // A latched failure answers every call, even a malformed batch.
         if let Some(error) = self.failure() {
             return (CommitOutcome::NotCommitted(error), Vec::new(), 0);
         }
-        if let Err(error) = batch.validate() {
+        if let Err(error) = validate() {
             return (CommitOutcome::NotCommitted(error), Vec::new(), 0);
         }
         let slot = self.slot.read().unwrap_or_else(PoisonError::into_inner);
@@ -505,7 +516,7 @@ impl RedbStore {
             let mut txn = db.begin_write()?;
             txn.set_durability(Durability::Immediate)?;
             txn.set_quick_repair(self.config.quick_repair);
-            let (objects, records) = stage(&txn, batch, headless)?;
+            let (objects, records) = apply(&txn)?;
             Ok((txn, objects, records))
         })();
         let (txn, objects, records) = match staged {
@@ -636,6 +647,96 @@ fn stage(
         meta.insert(HEAD_KEY, batch.new_head.encode().as_slice())?;
     }
     Ok((new_objects, new_records))
+}
+
+/// Checks that the store holds exactly `relabel`'s head and retired records,
+/// removes them all, then stages its batch as a first commit, in `txn`.
+fn stage_relabel(
+    txn: &WriteTransaction,
+    relabel: &Relabel,
+) -> Result<(Vec<(SpaceId, usize)>, u64), Fault> {
+    {
+        let mut meta = txn.open_table(META)?;
+        let current = match meta.get(HEAD_KEY)? {
+            Some(guard) => Some(Head::decode(guard.value())?),
+            None => None,
+        };
+        if current != Some(relabel.expected_head) {
+            return Err(head_mismatch(Some(relabel.expected_head), current).into());
+        }
+        let retired = |table: Table| {
+            relabel
+                .retired
+                .iter()
+                .filter(move |(of, _, _)| *of == table)
+                .map(|(_, key, value)| (key.as_slice(), value.as_slice()))
+        };
+        // The caller's metadata, the store's own records aside, must be
+        // exactly the retired set: every name is checked, not only counted.
+        let mut names = Vec::new();
+        for entry in meta.iter()? {
+            let (name, value) = entry?;
+            let name = name.value();
+            if name.starts_with(RESERVED_META_PREFIX) {
+                continue;
+            }
+            if retired(Table::Meta).all(|(key, _)| key != name.as_bytes()) {
+                return Err(relabel_mismatch(format!("unexpected meta record {name}")).into());
+            }
+            names.push((name.to_owned(), value.value().to_vec()));
+        }
+        if names.len() != retired(Table::Meta).count() {
+            return Err(relabel_mismatch("meta records missing").into());
+        }
+        for (key, value) in retired(Table::Meta) {
+            let name = std::str::from_utf8(key).map_err(|_| shape(Table::Meta))?;
+            if !names.iter().any(|(n, v)| n == name && v == value) {
+                return Err(relabel_mismatch(format!("meta record {name} differs")).into());
+            }
+            meta.remove(name)?;
+        }
+        meta.remove(HEAD_KEY)?;
+        for table in [Table::Blocks, Table::Manifests] {
+            let mut records = txn.open_table(if table == Table::Blocks {
+                BLOCKS
+            } else {
+                MANIFESTS
+            })?;
+            if records.len()? != retired(table).count() as u64 {
+                return Err(relabel_mismatch(format!("{} record count", table.name())).into());
+            }
+            for (key, value) in retired(table) {
+                let height = u64::from_be_bytes(key.try_into().map_err(|_| shape(table))?);
+                if records.remove(height)?.map(|v| v.value() == value) != Some(true) {
+                    return Err(relabel_mismatch(format!("{} record differs", table.name())).into());
+                }
+            }
+        }
+        let mut inclusions = txn.open_table(INCLUSIONS)?;
+        if inclusions.len()? != retired(Table::Inclusions).count() as u64 {
+            return Err(relabel_mismatch("inclusions record count").into());
+        }
+        for (key, value) in retired(Table::Inclusions) {
+            if inclusions.remove(key)?.map(|v| v.value() == value) != Some(true) {
+                return Err(relabel_mismatch("inclusions record differs").into());
+            }
+        }
+        let mut index = txn.open_table(BLOCK_INDEX)?;
+        if index.len()? != retired(Table::BlockIndex).count() as u64 {
+            return Err(relabel_mismatch("block_index record count").into());
+        }
+        for (key, value) in retired(Table::BlockIndex) {
+            let hash: &[u8; 32] = key.try_into().map_err(|_| shape(Table::BlockIndex))?;
+            let height =
+                u64::from_be_bytes(value.try_into().map_err(|_| shape(Table::BlockIndex))?);
+            if index.remove(hash)?.map(|v| v.value() == height) != Some(true) {
+                return Err(relabel_mismatch("block_index record differs").into());
+            }
+        }
+    }
+    // Every table is empty of caller records and the head is gone, so the
+    // replacement stages exactly like an initial commit.
+    stage(txn, &relabel.batch, false)
 }
 
 fn shape(table: Table) -> Fault {
@@ -1048,6 +1149,17 @@ impl VersionedStore for RedbStore {
         batch.objects = objects.to_vec();
         let (outcome, objects, records) = self.commit_batch(&batch, true);
         self.stats.commit(&outcome, &objects, records);
+        outcome
+    }
+
+    fn relabel(&self, relabel: &Relabel) -> CommitOutcome {
+        let mut timing = self.timings[3].start();
+        let (outcome, objects, records) =
+            self.transact(|| relabel.validate(), |txn| stage_relabel(txn, relabel));
+        self.stats.commit(&outcome, &objects, records);
+        if matches!(outcome, CommitOutcome::Committed) {
+            timing.success();
+        }
         outcome
     }
 

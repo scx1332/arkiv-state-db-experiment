@@ -2,6 +2,7 @@
 """Failure handoff and readiness lifecycle tests for the overnight runner."""
 import argparse
 import importlib.util
+import io
 import json
 from pathlib import Path
 import signal
@@ -221,6 +222,57 @@ sys.exit(9)
             with self.assertRaises(FileExistsError):
                 module.Runner(argparse.Namespace(out=Path(directory)))
 
+    def test_genesis_install_is_forwarded_to_the_producer_only_for_adopt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            converter = root / 'converter.py'
+            converter.write_text('import pathlib, sys\n'
+                                 'pathlib.Path(sys.argv[sys.argv.index("--out") + 1]).mkdir()\n')
+            # Builds a bundle report, then records the producer command line and fails.
+            binary = root / 'bin.py'
+            binary.write_text(
+                '#!' + sys.executable + '\n'
+                'import json, pathlib, sys\n'
+                'args = sys.argv[1:]\n'
+                'if args[:2] == ["genesis", "stream-build"]:\n'
+                '    out = pathlib.Path(args[args.index("--out") + 1])\n'
+                '    out.mkdir()\n'
+                '    (out / "report.json").write_text(json.dumps({"genesisHash": "0x1", "stateRoot": "0x2"}))\n'
+                'else:\n'
+                '    print(json.dumps(args), flush=True)\n'
+                '    sys.exit(3)\n')
+            binary.chmod(0o755)
+            for install in (None, 'copy', 'adopt', 'move'):
+                out = root / f'run-{install}'
+                argv = ['run-full-prefill.py', '--bin', str(binary), '--converter', str(converter),
+                        '--source', str(root), '--base', str(root / 'base'), '--key', str(root / 'key'),
+                        '--out', str(out), '--sponsor', 'fixture', '--reserve-gib', '0']
+                if install is not None:
+                    argv += ['--genesis-install', install]
+                # The runner's own parser supplies every option's default.
+                with patch.object(module.sys, 'argv', argv), \
+                        patch.object(module.time, 'sleep', lambda _seconds: None), \
+                        patch.object(module.signal, 'signal', lambda *_args: None), \
+                        patch.dict(module.os.environ):
+                    if install == 'move':
+                        with self.assertRaises(SystemExit) as refused, \
+                                patch.object(module.sys, 'stderr', io.StringIO()):
+                            module.main()
+                        self.assertEqual(refused.exception.code, 2)
+                        self.assertFalse(out.exists())
+                        continue
+                    with patch.object(module.sys, 'stderr', io.StringIO()):
+                        self.assertEqual(module.main(), 1)
+                status = json.loads((out / 'status.json').read_text())
+                self.assertIn('producer exited with code 3', status['error'])
+                argv = json.loads((out / 'producer.log').read_text())
+                self.assertEqual(argv[0], 'producer')
+                if install == 'adopt':
+                    self.assertEqual(argv[argv.index('--genesis-install') + 1], 'adopt')
+                    self.assertEqual(status['genesisInstall'], 'adopt')
+                else:
+                    self.assertNotIn('--genesis-install', argv)
+                    self.assertNotIn('genesisInstall', status)
 
 if __name__ == '__main__':
     unittest.main()

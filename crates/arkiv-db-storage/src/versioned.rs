@@ -410,6 +410,64 @@ impl CommitBatch {
     }
 }
 
+/// A one-time relabelling of a private store ([`VersionedStore::relabel`]).
+///
+/// It replaces every record and the head of a store and keeps its objects.
+/// The store must have exactly `expected_head` and hold exactly the `retired`
+/// records, byte for byte, besides the store's own metadata. All of them are
+/// removed, and `batch` is then applied as the store's first commit: its
+/// `expected_head` is `None`, its objects are put if absent and its records
+/// are inserted into the emptied tables.
+///
+/// This is the only operation that removes records or gives a head a value
+/// that does not advance. It lets a privately built store become a database
+/// of another profile without copying its objects. It must never be applied
+/// to a store whose publication anything else has served or relied on.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Relabel {
+    /// The head the store must have now.
+    pub expected_head: Head,
+    /// Every record the store holds now, with its exact value.
+    pub retired: Vec<(Table, Vec<u8>, Vec<u8>)>,
+    /// The publication that replaces them; a first commit.
+    pub batch: CommitBatch,
+}
+
+impl Relabel {
+    /// Checks everything that can be decided without the store's contents:
+    /// the batch is a valid first commit and the retired records have their
+    /// tables' shapes, each key once.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        if self.batch.expected_head.is_some() {
+            return Err(StorageError::new(
+                StorageErrorKind::Incompatible,
+                "a relabelling batch must be a first commit",
+            ));
+        }
+        self.batch.validate()?;
+        let mut keys = std::collections::BTreeSet::new();
+        for (table, key, value) in &self.retired {
+            table.check_record(key, value)?;
+            if !keys.insert((*table, key.as_slice())) {
+                return Err(StorageError::new(
+                    StorageErrorKind::Incompatible,
+                    format!("{} record {} retired twice", table.name(), hex_prefix(key)),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The `Incompatible` error for a store whose records are not exactly the
+/// ones a [`Relabel`] retires.
+pub fn relabel_mismatch(detail: impl fmt::Display) -> StorageError {
+    StorageError::new(
+        StorageErrorKind::Incompatible,
+        format!("store does not hold exactly the relabelled publication: {detail}"),
+    )
+}
+
 /// The `Conflict` error for different bytes under one object id.
 pub fn object_conflict(space: SpaceId, id: &ObjectId) -> StorageError {
     StorageError::new(
@@ -682,6 +740,17 @@ pub trait VersionedStore: ObjectReader {
         ))
     }
 
+    /// Atomically replaces every record and the head of a private store and
+    /// keeps its objects (see [`Relabel`]). The outcomes mean what they mean
+    /// for [`commit`](Self::commit); `NotCommitted` leaves the store as it
+    /// was. Stores that cannot relabel refuse.
+    fn relabel(&self, _relabel: &Relabel) -> CommitOutcome {
+        CommitOutcome::NotCommitted(StorageError::new(
+            StorageErrorKind::Incompatible,
+            "store relabelling unsupported",
+        ))
+    }
+
     /// Whether calls are served or a failure has latched.
     fn health(&self) -> Health;
 
@@ -737,6 +806,9 @@ impl<T: VersionedStore + ?Sized> VersionedStore for Arc<T> {
     fn stage_objects(&self, objects: &[(SpaceId, ObjectId, Vec<u8>)]) -> CommitOutcome {
         (**self).stage_objects(objects)
     }
+    fn relabel(&self, relabel: &Relabel) -> CommitOutcome {
+        (**self).relabel(relabel)
+    }
     fn health(&self) -> Health {
         (**self).health()
     }
@@ -785,6 +857,9 @@ impl<T: VersionedStore + ?Sized> VersionedStore for Box<T> {
     }
     fn stage_objects(&self, objects: &[(SpaceId, ObjectId, Vec<u8>)]) -> CommitOutcome {
         (**self).stage_objects(objects)
+    }
+    fn relabel(&self, relabel: &Relabel) -> CommitOutcome {
+        (**self).relabel(relabel)
     }
     fn health(&self) -> Health {
         (**self).health()
@@ -1144,6 +1219,47 @@ mod tests {
         conflict.put_record(Table::Blocks, height_key(0), b"c".to_vec());
         assert_eq!(
             conflict.validate().unwrap_err().kind,
+            StorageErrorKind::Conflict
+        );
+    }
+
+    #[test]
+    fn relabel_validation_requires_a_first_commit_and_distinct_retired_records() {
+        let mut relabel = Relabel {
+            expected_head: head(0, 1),
+            retired: vec![
+                (Table::Meta, b"engine/profile".to_vec(), b"a".to_vec()),
+                (Table::Manifests, height_key(0).to_vec(), b"m".to_vec()),
+            ],
+            batch: CommitBatch::new(None, head(0, 2)),
+        };
+        assert!(relabel.validate().is_ok());
+        let mut later = relabel.clone();
+        later.batch.expected_head = Some(head(0, 1));
+        later.batch.new_head = head(1, 2);
+        assert_eq!(
+            later.validate().unwrap_err().kind,
+            StorageErrorKind::Incompatible
+        );
+        let mut twice = relabel.clone();
+        twice
+            .retired
+            .push((Table::Meta, b"engine/profile".to_vec(), b"a".to_vec()));
+        assert_eq!(
+            twice.validate().unwrap_err().kind,
+            StorageErrorKind::Incompatible
+        );
+        let mut reserved = relabel.clone();
+        reserved
+            .retired
+            .push((Table::Meta, b"store/head".to_vec(), Vec::new()));
+        assert!(reserved.validate().is_err());
+        relabel
+            .batch
+            .put_record(Table::Blocks, height_key(0), b"one".to_vec())
+            .put_record(Table::Blocks, height_key(0), b"two".to_vec());
+        assert_eq!(
+            relabel.validate().unwrap_err().kind,
             StorageErrorKind::Conflict
         );
     }

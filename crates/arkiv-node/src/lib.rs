@@ -30,6 +30,7 @@ pub mod block;
 pub mod demo;
 pub mod exec;
 pub mod gas;
+pub mod genesis_adopt;
 pub mod genesis_authoring;
 mod genesis_bulk;
 pub mod genesis_bundle;

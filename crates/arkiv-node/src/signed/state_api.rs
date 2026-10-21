@@ -12,7 +12,7 @@ use arkiv_db_trie::NodeKind;
 use axum::body::Body;
 use serde::Deserialize;
 use serde_json::{Value as Json, json};
-use std::sync::Arc;
+use tokio::sync::OwnedSemaphorePermit;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -36,10 +36,13 @@ fn nibbles(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// A detached read (see [`super::super::reads`]): the request's admission
+/// permit is released once a read permit is held, and the tree is walked
+/// after the node lock is released.
 pub(super) async fn handle(
     rt: Shared,
     body: Body,
-    permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+    admission: OwnedSemaphorePermit,
 ) -> Result<Json> {
     let q: Request = parse(body, REQUEST_CAP).await?;
     if !matches!(
@@ -64,12 +67,14 @@ pub(super) async fn handle(
         return Err(Error("InvalidRequest"));
     }
     let height = number(&q.height)?;
-    tokio::task::spawn_blocking(move||{
-        let _permit=permit;
-        let node=rt.node.try_lock().map_err(|_|Error("ServerBusy"))?;
-        let Node::Full(host)=&*node else{return Err(Error("UnsupportedNodeRole"))};
-        let certificate=host.certificate(height)?;
-        let s=host.state(height)?;
+    let admitted = rt.reads.admit()?;
+    drop(admission);
+    admitted.run("state/explore", move||{
+        let (certificate,s,identity)={
+            let node=rt.node.try_lock().map_err(|_|Error("ServerBusy"))?;
+            let Node::Full(host)=&*node else{return Err(Error("UnsupportedNodeRole"))};
+            (host.certificate(height)?,host.state(height)?,host.identity.clone())
+        };
         let h=s.state_header();
         if h.root()!=certificate.header.state_root{return Err(Error("InvalidProof"))}
         let m=s.explore_tree(&q.map,ns,&q.path,&q.term_path)?.ok_or(Error("TreePathNotFound"))?;
@@ -90,8 +95,8 @@ pub(super) async fn handle(
             }).collect::<Vec<_>>()}),
         };
         let tree_node=m.node.map(|n|json!({"path":q.path,"prefix":nibbles(&n.prefix),"hash":hex(n.hash.as_slice()),"rlp":hex(&n.rlp),"kind":match n.kind{NodeKind::Leaf=>"leaf",NodeKind::Extension=>"extension",NodeKind::Branch=>"branch"},"compressedPath":nibbles(&n.compressed_path),"key":n.key.as_ref().map(|k|hex(k)),"valueBytes":n.value.as_ref().map(|v|hex(v)),"decoded":decoded,"children":n.children.into_iter().map(|c|{let mut path=q.path.clone();path.push(c.slot);json!({"slot":c.slot,"kind":if c.hash.is_none(){"empty"}else if c.inline.is_some(){"inline"}else{"hash"},"hash":c.hash.map(|h|hex(h.as_slice())),"rlp":c.inline.map(|b|hex(&b)),"path":path})}).collect::<Vec<_>>()}));
-        let result=json!({"apiVersion":1,"identity":host.identity,"snapshot":snapshot(&certificate.header),"certificateBytes":pack(&certificate),"verification":{"status":"exploratory","source":"full-node"},"stateComposition":{"domain":"arkiv/state/v1","encodedHeader":pack(&h),"stateRoot":hex(h.root().as_slice()),"catalogRoot":hex(h.catalog_root.as_slice()),"catalogCount":h.catalog_len.to_string(),"hostRoot":hex(h.host_root.as_slice()),"hostCount":h.host_len.to_string()},"map":{"kind":q.map,"namespace":q.namespace,"root":hex(m.root.as_slice()),"count":m.count.to_string(),"termPath":q.term_path},"node":tree_node});
+        let result=json!({"apiVersion":1,"identity":identity,"snapshot":snapshot(&certificate.header),"certificateBytes":pack(&certificate),"verification":{"status":"exploratory","source":"full-node"},"stateComposition":{"domain":"arkiv/state/v1","encodedHeader":pack(&h),"stateRoot":hex(h.root().as_slice()),"catalogRoot":hex(h.catalog_root.as_slice()),"catalogCount":h.catalog_len.to_string(),"hostRoot":hex(h.host_root.as_slice()),"hostCount":h.host_len.to_string()},"map":{"kind":q.map,"namespace":q.namespace,"root":hex(m.root.as_slice()),"count":m.count.to_string(),"termPath":q.term_path},"node":tree_node});
         crate::simulator::wire::json_bytes(&result,1024*1024)?;
         Ok(result)
-    }).await.map_err(|_|Error("StorageUnavailable"))?
+    }).await
 }

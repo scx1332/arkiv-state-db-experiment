@@ -228,7 +228,7 @@
             }
           },
           "429": {
-            "description": "All four read jobs are occupied or the node storage lock is busy. Retry later.",
+            "description": "All four admission slots or every detached-read permit (--read-concurrency) is taken, or the node storage lock is busy. Retry later.",
             "content": {
               "application/json": {
                 "schema": {
@@ -246,7 +246,7 @@
             }
           },
           "503": {
-            "description": "Storage or retained history unavailable.",
+            "description": "Storage or retained history unavailable, or the read ran past the node's --read-deadline-secs.",
             "content": {
               "application/json": {
                 "schema": {
@@ -263,6 +263,12 @@
                     "summary": "HistoryUnavailable",
                     "value": {
                       "error": "HistoryUnavailable"
+                    }
+                  },
+                  "ReadDeadlineExceeded": {
+                    "summary": "ReadDeadlineExceeded",
+                    "value": {
+                      "error": "ReadDeadlineExceeded"
                     }
                   }
                 }
@@ -1357,7 +1363,7 @@
             }
           },
           "429": {
-            "description": "Shared admission slots exhausted (ServerBusy), or transaction pool full.",
+            "description": "Shared admission slots or every detached-read permit (--read-concurrency) taken (ServerBusy).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1367,7 +1373,7 @@
             }
           },
           "503": {
-            "description": "Storage/history unavailable or commit uncertain.",
+            "description": "Storage/history unavailable, or proof generation ran past the node's --read-deadline-secs (ReadDeadlineExceeded).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1524,7 +1530,7 @@
             }
           },
           "429": {
-            "description": "Shared admission slots exhausted (ServerBusy), or transaction pool full.",
+            "description": "Shared admission slots or every detached-read permit (--read-concurrency) taken (ServerBusy).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1534,7 +1540,7 @@
             }
           },
           "503": {
-            "description": "Storage/history unavailable or commit uncertain.",
+            "description": "Storage/history unavailable, or proof generation ran past the node's --read-deadline-secs (ReadDeadlineExceeded).",
             "content": {
               "application/json": {
                 "schema": {
@@ -3176,6 +3182,17 @@
                         "message": "MethodNotFound"
                       }
                     }
+                  },
+                  "readDeadlineExceeded": {
+                    "summary": "Detached read past --read-deadline-secs",
+                    "value": {
+                      "jsonrpc": "2.0",
+                      "id": 1,
+                      "error": {
+                        "code": -32000,
+                        "message": "ReadDeadlineExceeded"
+                      }
+                    }
                   }
                 }
               }
@@ -3189,6 +3206,28 @@
           },
           "413": {
             "description": "Request body could not be read within the 1 MiB cap."
+          },
+          "429": {
+            "description": "A single request refused because every detached-read permit (--read-concurrency) is taken; only arkiv_query and arkiv_getEntityCount are detached. The body is the JSON-RPC error; a batch answers 200 with the same per-entry error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RpcResponse"
+                },
+                "examples": {
+                  "ServerBusy": {
+                    "value": {
+                      "jsonrpc": "2.0",
+                      "id": 1,
+                      "error": {
+                        "code": -32005,
+                        "message": "ServerBusy"
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
         },
         "x-jsonrpc-methods": {

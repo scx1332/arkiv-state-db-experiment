@@ -175,6 +175,29 @@ HTTP cancellation, and five-second request-body/fetch deadlines. Feed and
 response caps remain 4 MiB and 8 MiB. Resource-limit proof failures remain
 explicit; text queries never silently downgrade to unverified results.
 
+Reads whose cost grows with the state are detached: full-node
+`POST state/explore`, `query/eq` and `query/range`, and JSON-RPC `arkiv_query`
+and `arkiv_getEntityCount`. Such a read holds the node lock only to check
+heights and pin a snapshot (plus identity and limits), then evaluates on a
+blocking thread after releasing it. A REST read gives back its admission slot
+once admitted. At most `--read-concurrency` (1–64, default 4) detached reads
+run at once; another is refused at once with `ServerBusy` (HTTP 429, JSON-RPC
+code `-32005`). A detached read running past `--read-deadline-secs` (1–3600,
+default 30) answers `ReadDeadlineExceeded` (HTTP 503, JSON-RPC code `-32000`),
+and one whose client disconnects is abandoned; its metered walk stops at the
+next charge and releases its permit. Status, headers, accounts, `eth_*` reads,
+transaction admission and block production therefore no longer wait for a
+long count. Those other requests, and every write, remain serialized under the
+node lock as before; writers still answer `ServerBusy` when the lock is
+momentarily held.
+
+A pinned snapshot is consistent while blocks are produced: it fixes one
+published state header, every trie node below it is a committed,
+content-addressed and hash-verified object that later commits never change or
+delete, each object read is its own short redb read transaction, and the
+decoded-node cache is keyed by object id. The snapshot pins its height against
+retention while it is read. See `crates/arkiv-node/src/signed/reads.rs`.
+
 `history.redb` stores framed content-addressed bodies under raw Keccak IDs,
 with its own profile, identity and storage sequence. `node.redb` stores engine
 snapshots plus a bounded signed header/feed/body-reference envelope and typed

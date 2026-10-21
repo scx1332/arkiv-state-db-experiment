@@ -8,6 +8,7 @@ pub mod host;
 pub mod light;
 pub mod pool;
 pub mod protocol;
+pub mod reads;
 pub mod runtime;
 
 pub mod rpc;

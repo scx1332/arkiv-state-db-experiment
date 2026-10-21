@@ -3,6 +3,10 @@
 //! Cursors retain native snapshot cursors in a bounded process-local cache. They
 //! are not proofs and expire after restart or eviction; callers can restart a
 //! query at its explicitly retained block height.
+//!
+//! `arkiv_query` and `arkiv_getEntityCount` are [planned](plan) under the node
+//! lock, which checks heights and pins the snapshot, and [run](Planned::run)
+//! after it is released (see [`super::reads`]). [`dispatch`] does both.
 use super::{Error, Result, host::Host};
 use crate::{
     arkiv,
@@ -16,7 +20,10 @@ use crate::{
     },
 };
 use alloy_primitives::{U256, keccak256};
-use arkiv_db::{Budget, CellName, Cursor, Literal, Projection, Query, Row, Term, TypeTag, Value};
+use arkiv_db::{
+    Budget, CellName, Cursor, Limits, Literal, Projection, Query, Row, Snapshot, Term, TypeTag,
+    Value,
+};
 use serde_json::{Value as Json, json};
 use std::{
     collections::BTreeMap,
@@ -56,10 +63,36 @@ struct Cursors {
 }
 static CURSORS: OnceLock<Mutex<Cursors>> = OnceLock::new();
 
+/// Plans and runs an SDK read, or `None` for another method.
 pub fn dispatch(host: &Host, method: &str, params: &Json) -> Option<Result<Json>> {
+    plan(host, method, params).map(|planned| planned.and_then(Planned::run))
+}
+/// The methods whose evaluation runs after the node lock is released.
+pub(super) fn detached(method: &str) -> bool {
+    matches!(method, "arkiv_query" | "arkiv_getEntityCount")
+}
+/// An SDK read with every check against the node done: what is left needs
+/// only the pinned snapshot it holds.
+pub enum Planned {
+    Ready(Json),
+    Count { snapshot: Snapshot, query: Query },
+    Page(Box<PageRead>),
+}
+pub struct PageRead {
+    snapshot: Snapshot,
+    query: Query,
+    limits: Limits,
+    limit: usize,
+    cursor: Option<Cursor>,
+    selected: Json,
+    binding: [u8; 32],
+    height: u64,
+}
+/// Validates an SDK read and pins its snapshot, or `None` for another method.
+pub fn plan(host: &Host, method: &str, params: &Json) -> Option<Result<Planned>> {
     Some(match method {
-        "arkiv_query" => query(host, params),
-        "arkiv_getEntityCount" => entity_count(host, params),
+        "arkiv_query" => plan_query(host, params).map(|page| Planned::Page(Box::new(page))),
+        "arkiv_getEntityCount" => plan_count(host, params),
         "arkiv_getBlockTiming" => empty_params(params).and_then(|()| {
             let current_block_time = host.head.timestamp_ms / 1000;
             let duration = if host.head.height == 0 {
@@ -68,12 +101,36 @@ pub fn dispatch(host: &Host, method: &str, params: &Json) -> Option<Result<Json>
                 let previous = host.certificate(host.head.height - 1)?.header;
                 current_block_time.saturating_sub(previous.timestamp_ms / 1000)
             };
-            Ok(json!({"current_block": host.head.height, "current_block_time": current_block_time, "duration": duration}))
+            Ok(Planned::Ready(json!({"current_block": host.head.height, "current_block_time": current_block_time, "duration": duration})))
         }),
         _ => return None,
     })
 }
-fn entity_count(host: &Host, params: &Json) -> Result<Json> {
+impl Planned {
+    /// Evaluates the read against its pinned snapshot. Its metered reads stop
+    /// early when an enclosing [`arkiv_db::Interrupt`] is raised.
+    pub fn run(self) -> Result<Json> {
+        match self {
+            Self::Ready(value) => Ok(value),
+            Self::Count { snapshot, query } => {
+                let n = snapshot
+                    .try_count(
+                        arkiv::entity_namespace(),
+                        &query,
+                        Budget::limit(READ_BUDGET).interruptible(),
+                    )?
+                    .map_err(read_error)?
+                    .value;
+                if n > 9_007_199_254_740_991 {
+                    return Err(Error("ResourceLimit"));
+                }
+                Ok(json!(n))
+            }
+            Self::Page(page) => page.run(),
+        }
+    }
+}
+fn plan_count(host: &Host, params: &Json) -> Result<Planned> {
     let empty = json!({});
     let options = if params.is_null() {
         &empty
@@ -96,19 +153,10 @@ fn entity_count(host: &Host, params: &Json) -> Result<Json> {
         Some(value) => parse_query(value.as_str().ok_or(Error("InvalidParams"))?)?,
         None => Query::match_all(),
     };
-    let snapshot = host.state(height)?;
-    let n = snapshot
-        .try_count(
-            arkiv::entity_namespace(),
-            &query,
-            Budget::limit(READ_BUDGET),
-        )?
-        .map_err(read_error)?
-        .value;
-    if n > 9_007_199_254_740_991 {
-        return Err(Error("ResourceLimit"));
-    }
-    Ok(json!(n))
+    Ok(Planned::Count {
+        snapshot: host.state(height)?,
+        query,
+    })
 }
 fn empty_params(params: &Json) -> Result<()> {
     if params.is_null() || params.as_array().is_some_and(Vec::is_empty) {
@@ -169,7 +217,7 @@ fn selection(value: Option<&Json>) -> Result<Json> {
         .or_insert(Json::Bool(true));
     Ok(selected)
 }
-fn query(host: &Host, params: &Json) -> Result<Json> {
+fn plan_query(host: &Host, params: &Json) -> Result<PageRead> {
     let args = params
         .as_array()
         .filter(|p| !p.is_empty() && p.len() <= 2)
@@ -239,18 +287,43 @@ fn query(host: &Host, params: &Json) -> Result<Json> {
     } else {
         None
     };
-    let snapshot = host.state(height)?;
-    let page = read_page(
-        &snapshot,
-        &query,
-        &host.genesis.genesis.limits,
-        limit as usize,
+    Ok(PageRead {
+        snapshot: host.state(height)?,
+        query,
+        limits: host.genesis.genesis.limits,
+        limit: limit as usize,
         cursor,
-    )?;
+        selected,
+        binding,
+        height,
+    })
+}
+impl PageRead {
+    fn run(self) -> Result<Json> {
+        let Self {
+            snapshot,
+            query,
+            limits,
+            limit,
+            cursor,
+            selected,
+            binding,
+            height,
+        } = self;
+        let page = read_page(&snapshot, &query, &limits, limit, cursor)?;
+        page_result(page, &selected, binding, height)
+    }
+}
+fn page_result(
+    page: arkiv_db::QueryPage,
+    selected: &Json,
+    binding: [u8; 32],
+    height: u64,
+) -> Result<Json> {
     let data = page
         .rows
         .iter()
-        .map(|row| project(row, &selected))
+        .map(|row| project(row, selected))
         .collect::<Result<Vec<_>>>()?;
     let mut result = json!({"data":data,"blockNumber":format!("0x{height:x}")});
     if serde_json::to_vec(&result)
@@ -314,7 +387,7 @@ fn read_page(
                 &Projection::ALL,
                 page_size,
                 cursor.as_ref(),
-                Budget::limit(remaining),
+                Budget::limit(remaining).interruptible(),
             )?
             .map_err(read_error)?;
         remaining = remaining
@@ -719,6 +792,13 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The reads as served under the lock: planned and run back to back.
+    fn entity_count(host: &Host, params: &Json) -> Result<Json> {
+        plan_count(host, params).and_then(Planned::run)
+    }
+    fn query(host: &Host, params: &Json) -> Result<Json> {
+        plan_query(host, params).and_then(PageRead::run)
+    }
     #[test]
     fn sdk_operators_and_bounds() {
         for s in [

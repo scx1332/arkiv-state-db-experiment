@@ -859,34 +859,60 @@ impl Host {
         self.finish_pending(true)
     }
     pub fn proof(&self, request: &arkiv_db::proof::EqRequest) -> Result<Vec<u8>> {
-        let header = self.certificate(request.snapshot.height)?.header;
-        if request.snapshot.genesis_hash != self.genesis.hash()
-            || request.snapshot.block_hash != header.hash()
-            || request.snapshot.state_root != header.state_root
-        {
-            return Err(Error("CursorMismatch"));
-        }
-        Ok(self
-            .state(header.height)?
-            .prove_eq(request, proof_limits(), Budget::limit(10_000_000))?
-            .bytes)
+        eq_proof_bytes(
+            &self.proof_state(&request.snapshot, "CursorMismatch")?,
+            request,
+        )
     }
 
     pub fn range_proof(&self, request: &arkiv_db::proof::RangeRequest) -> Result<Vec<u8>> {
-        let header = self.certificate(request.snapshot.height)?.header;
-        if request.snapshot.genesis_hash != self.genesis.hash()
-            || request.snapshot.block_hash != header.hash()
-            || request.snapshot.state_root != header.state_root
-        {
-            return Err(Error("InvalidRequest"));
-        }
-        Ok(self
-            .state(header.height)?
-            .prove_range(
-                request,
-                crate::simulator::wire::range_proof_limits()?,
-                Budget::limit(10_000_000),
-            )?
-            .bytes)
+        range_proof_bytes(
+            &self.proof_state(&request.snapshot, "InvalidRequest")?,
+            request,
+        )
     }
+
+    /// The pinned state a proof for `snapshot` is generated from, once the
+    /// reference names this chain's block at its height; `mismatch` is the
+    /// refusal otherwise. Proving needs only the returned snapshot, so it
+    /// can run after the node lock is released.
+    pub fn proof_state(
+        &self,
+        snapshot: &arkiv_db::proof::SnapshotRef,
+        mismatch: &'static str,
+    ) -> Result<arkiv_db::Snapshot> {
+        let header = self.certificate(snapshot.height)?.header;
+        if snapshot.genesis_hash != self.genesis.hash()
+            || snapshot.block_hash != header.hash()
+            || snapshot.state_root != header.state_root
+        {
+            return Err(Error(mismatch));
+        }
+        self.state(header.height)
+    }
+}
+
+/// Work bound of one proof; reads abandoned by the node stop early.
+const PROOF_BUDGET: Budget = Budget::limit(10_000_000).interruptible();
+
+/// Equality proof bytes for `request` from its [`Host::proof_state`].
+pub fn eq_proof_bytes(
+    state: &arkiv_db::Snapshot,
+    request: &arkiv_db::proof::EqRequest,
+) -> Result<Vec<u8>> {
+    Ok(state.prove_eq(request, proof_limits(), PROOF_BUDGET)?.bytes)
+}
+
+/// Complete range proof bytes for `request` from its [`Host::proof_state`].
+pub fn range_proof_bytes(
+    state: &arkiv_db::Snapshot,
+    request: &arkiv_db::proof::RangeRequest,
+) -> Result<Vec<u8>> {
+    Ok(state
+        .prove_range(
+            request,
+            crate::simulator::wire::range_proof_limits()?,
+            PROOF_BUDGET,
+        )?
+        .bytes)
 }

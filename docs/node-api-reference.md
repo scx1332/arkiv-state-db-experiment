@@ -72,6 +72,16 @@ answers code `-32001` with message `history pruned: requested N, floor F`
 and hex `data.requested`/`data.floor`. Bodies, headers and transactions stay
 available at every height. See the [pruning design](pruning-design.md).
 
+Entity queries and counts (`arkiv_query`, `arkiv_getEntityCount`), raw proof
+generation (`query/eq`, `query/range`) and tree exploration are detached reads:
+they run against a snapshot pinned under the node lock, outside it. At most
+`--read-concurrency` of them run at once; another answers `429` with
+`{"error":"ServerBusy"}` (JSON-RPC: HTTP 429 for a single request, code
+`-32005`, message `ServerBusy`). One running past `--read-deadline-secs` answers
+`503` with `{"error":"ReadDeadlineExceeded"}` (JSON-RPC: code `-32000`, message
+`ReadDeadlineExceeded`). Both are safe to retry; a deadline usually means the
+read itself is too large for the node's limit.
+
 The existing [tree exploration guide](state-tree-explorer-api.md) explains
 navigating catalog, records, keys, rows, terms and postings. Tree responses are
 diagnostic data, not light-node proofs.

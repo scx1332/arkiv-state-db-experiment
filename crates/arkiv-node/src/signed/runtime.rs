@@ -10,6 +10,7 @@ use super::{
     host::Host,
     light::Light,
     protocol::{SignedBlock, SignedGenesis, SignedHeader, SignedTx},
+    reads::{ReadLimits, Reads},
 };
 use crate::simulator::{
     light::{VerifiedRequest, resolve},
@@ -77,6 +78,8 @@ pub struct Runtime {
     token: Option<String>,
     pub client: reqwest::Client,
     pub(super) slots: Arc<Semaphore>,
+    /// Admission of detached reads (see [`super::reads`]).
+    pub(super) reads: Reads,
     pub(super) rpc: Mutex<super::rpc::RpcState>,
     continuations: Mutex<VecDeque<(String, EqRequest, VerifiedContinuation)>>,
 }
@@ -88,6 +91,16 @@ impl Runtime {
         replication_peer: Option<String>,
         token: Option<String>,
     ) -> Result<Shared> {
+        Self::with_read_limits(node, peer, replication_peer, token, ReadLimits::default())
+    }
+    pub fn with_read_limits(
+        node: Node,
+        peer: Option<String>,
+        replication_peer: Option<String>,
+        token: Option<String>,
+        read_limits: ReadLimits,
+    ) -> Result<Shared> {
+        let reads = Reads::new(read_limits)?;
         for p in [&peer, &replication_peer].into_iter().flatten() {
             crate::simulator::runtime::validate_peer(p)?;
         }
@@ -107,9 +120,17 @@ impl Runtime {
             token,
             client,
             slots: Arc::new(Semaphore::new(4)),
+            reads,
             rpc: Mutex::new(rpc),
             continuations: Mutex::new(VecDeque::new()),
         }))
+    }
+    pub fn read_limits(&self) -> ReadLimits {
+        self.reads.limits()
+    }
+    /// Detached reads currently holding a read permit.
+    pub fn reads_in_flight(&self) -> usize {
+        self.reads.in_flight()
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -248,9 +269,10 @@ fn response_with(result: Result<Json>, refusal: Option<(u64, u64)>) -> Response 
                 "Unauthorized" => StatusCode::UNAUTHORIZED,
                 "HistoryPruned" => StatusCode::GONE,
                 "ServerBusy" | "PoolFull" => StatusCode::TOO_MANY_REQUESTS,
-                "StorageUnavailable" | "HistoryUnavailable" | "CommitUncertain" => {
-                    StatusCode::SERVICE_UNAVAILABLE
-                }
+                "StorageUnavailable"
+                | "HistoryUnavailable"
+                | "CommitUncertain"
+                | super::reads::DEADLINE_EXCEEDED => StatusCode::SERVICE_UNAVAILABLE,
                 _ => StatusCode::UNPROCESSABLE_ENTITY,
             };
             (
@@ -512,14 +534,24 @@ struct TextQuery {
     cursor: Option<String>,
 }
 async fn http_post(State(rt): State<Shared>, Path(path): Path<String>, body: Body) -> Response {
-    let permit = Arc::new(match rt.slots.clone().try_acquire_owned() {
+    let admission = match rt.slots.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => return response(Err(Error("ServerBusy"))),
-    });
+    };
+    // Detached reads hold their admission permit only while the body is
+    // read; they are then evaluated under a read permit, outside the lock.
+    if matches!(path.as_str(), "state/explore" | "query/eq" | "query/range") {
+        let result = match path.as_str() {
+            "state/explore" => state_api::handle(rt.clone(), body, admission).await,
+            "query/range" => range_api::proof(rt.clone(), body, admission).await,
+            _ => eq_proof(rt.clone(), body, admission).await,
+        };
+        return respond(&rt, result);
+    }
+    let permit = Arc::new(admission);
     let shared = rt.clone();
     let result:Result<Json>=async {
-        if path=="state/explore" {return state_api::handle(rt.clone(),body,permit.clone()).await;}
-        if matches!(path.as_str(), "query/range" | "query/range/resolve" | "query/range/verified" | "query/range/inspect") { return range_api::handle(rt.clone(), &path, body, permit.clone()).await; }
+        if matches!(path.as_str(), "query/range/resolve" | "query/range/verified" | "query/range/inspect") { return range_api::handle(rt.clone(), &path, body, permit.clone()).await; }
         if path=="query/account" { let request: AccountQuery = parse(body, REQUEST_CAP).await?; return verified_account(rt.clone(), request).await; }
         if path=="query/classify" {let r:Classify=parse(body,REQUEST_CAP).await?;return Ok(json!(query_language::classify(&r.query)));}
         if path=="query/text" {
@@ -543,13 +575,35 @@ async fn http_post(State(rt): State<Shared>, Path(path): Path<String>, body: Bod
                 let Node::Full(h)=&mut*node else{return Err(Error("ProducerOnly"));};return h.submit(tx);
             }
             let node=rt.node.try_lock().map_err(|_|Error("ServerBusy"))?;
-            if path=="query/eq" {let r:ProofRequest=serde_json::from_slice(&bytes).map_err(|_|Error("InvalidRequest"))?;let request=unpack(&r.request,4096)?;let Node::Full(h)=&*node else{return Err(Error("UnsupportedNodeRole"));};return Ok(json!({"proof":hex(&h.proof(&request)?)}));}
             if path=="query/resolve" {let r:VerifiedRequest=serde_json::from_slice(&bytes).map_err(|_|Error("InvalidRequest"))?;if r.cursor.is_some(){return Err(Error("CursorMismatch"));}let header=node.certificate(number(&r.height)?)?.header;return Ok(json!({"request":pack(&resolve(node.identity(),&header,&r)?)}));}
             Err(Error("InvalidRequest"))
         }).await.map_err(|_|Error("StorageUnavailable"))?
     }.await;
     drop(permit);
     respond(&shared, result)
+}
+/// `query/eq` on a full node, a detached read (see [`super::reads`]).
+async fn eq_proof(
+    rt: Shared,
+    body: Body,
+    admission: tokio::sync::OwnedSemaphorePermit,
+) -> Result<Json> {
+    let r: ProofRequest = parse(body, REQUEST_CAP).await?;
+    let request: EqRequest = unpack(&r.request, 4096)?;
+    let admitted = rt.reads.admit()?;
+    drop(admission);
+    admitted
+        .run("query/eq", move || {
+            let state = {
+                let node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
+                let Node::Full(h) = &*node else {
+                    return Err(Error("UnsupportedNodeRole"));
+                };
+                h.proof_state(&request.snapshot, "CursorMismatch")?
+            };
+            Ok(json!({"proof":hex(&super::host::eq_proof_bytes(&state, &request)?)}))
+        })
+        .await
 }
 async fn verified_account(rt: Shared, request: AccountQuery) -> Result<Json> {
     let actor = actor(&request.actor)?;

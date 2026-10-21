@@ -50,6 +50,11 @@
 //! storage errors, and a storage error poisons a branch (see
 //! [the engine's fallible surface](engine#fallible-surface)).
 //!
+//! A host may stop a read it abandons (a wall-clock deadline, a departed
+//! client) with an [`Interrupt`]: a read whose budget opted in stops at its
+//! next charge inside the interrupt's scope. Block execution never opts in
+//! (see [`interrupt`]).
+//!
 //! [`codec`] is the canonical binary encoding (codec version
 //! [`CODEC_VERSION`]) of the engine's types, with the domain-separated
 //! [`digest`] that every block and state hash uses.
@@ -66,6 +71,7 @@ pub mod codec;
 pub mod durable;
 pub mod engine;
 pub mod host;
+pub mod interrupt;
 mod layout;
 pub mod meter;
 pub mod namespace;
@@ -91,6 +97,7 @@ pub use engine::{
     Snapshot, SnapshotId, WriteOp, WriteResult,
 };
 pub use host::{BlockMap, BlockNumber, ExpiryHalt, HostError, expire_records, try_expire_records};
+pub use interrupt::Interrupt;
 pub use meter::{
     Budget, Cost, Ledger, LedgerEntry, MODEL_VERSION, OperationClass, Outcome, PhysicalTrace,
     PriceSchedule, Receipt, ReceiptKind, Rejection,

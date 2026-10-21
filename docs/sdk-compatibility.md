@@ -91,6 +91,18 @@ on Tokio's blocking pool and waits for the node mutex; concurrent requests do
 not imply parallel state execution. Excess demand can increase queueing latency
 and memory use rather than receiving an immediate `ServerBusy` response.
 Native REST admission and WebSocket connection limits remain separate.
+
+`arkiv_query` and `arkiv_getEntityCount` are the exception: they are detached
+reads. They hold the node mutex only to check the height and pin its snapshot,
+then evaluate on that snapshot after releasing it, so a long count or scan no
+longer delays other requests or block production. At most
+`--read-concurrency` (default 4) detached reads run at once; another is refused
+immediately with code `-32005`, message `ServerBusy`, and a single HTTP request
+also gets status 429 (a batch keeps per-entry errors). A detached read running
+longer than `--read-deadline-secs` (default 30) answers code `-32000`, message
+`ReadDeadlineExceeded`; one whose HTTP client disconnects is abandoned. Either
+way its walk stops at the next metering charge. Results, budgets and cursors
+are otherwise unchanged.
 HTTP batches contain at most 64 requests and total
 JSON responses are capped at 8 MiB. WebSocket sessions and subscriptions have
 additional bounded limits and disconnect rather than silently skip blocks if

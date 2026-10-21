@@ -293,7 +293,8 @@ impl PriceSchedule {
     }
 }
 
-/// A spending limit for one operation, plus whether to record a debug ledger.
+/// A spending limit for one operation, plus whether to record a debug ledger
+/// and whether a host [`Interrupt`](crate::Interrupt) may stop it.
 ///
 /// Budgets are optional for reads (a local RPC decides), but counting is not:
 /// every operation produces a receipt whether or not it had a limit. Tracing
@@ -302,6 +303,7 @@ impl PriceSchedule {
 pub struct Budget {
     limit: Option<Cost>,
     trace: bool,
+    interruptible: bool,
 }
 
 impl Budget {
@@ -310,6 +312,7 @@ impl Budget {
         Self {
             limit: Some(Cost(units)),
             trace: false,
+            interruptible: false,
         }
     }
 
@@ -318,12 +321,22 @@ impl Budget {
         Self {
             limit: None,
             trace: false,
+            interruptible: false,
         }
     }
 
     /// Requests a debug ledger in the receipt.
     pub const fn traced(mut self) -> Self {
         self.trace = true;
+        self
+    }
+
+    /// Lets the [`Interrupt`](crate::Interrupt) of an enclosing scope stop
+    /// the operation at its next charge (see [`crate::interrupt`]). Charges
+    /// are unchanged unless the flag is raised. Only for reads a host
+    /// abandons; block execution must never opt in.
+    pub const fn interruptible(mut self) -> Self {
+        self.interruptible = true;
         self
     }
 
@@ -335,6 +348,11 @@ impl Budget {
     /// Whether a ledger was requested.
     pub const fn is_traced(&self) -> bool {
         self.trace
+    }
+
+    /// Whether a host interrupt may stop the operation.
+    pub const fn is_interruptible(&self) -> bool {
+        self.interruptible
     }
 }
 
@@ -515,6 +533,8 @@ pub(crate) struct Meter<'s> {
     spent: Cost,
     ledger: Option<Vec<LedgerEntry>>,
     physical: PhysicalTrace,
+    /// The enclosing scope's flag, for an interruptible budget only.
+    interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl<'s> Meter<'s> {
@@ -536,6 +556,11 @@ impl<'s> Meter<'s> {
             spent: Cost::ZERO,
             ledger: budget.trace.then(Vec::new),
             physical: PhysicalTrace::default(),
+            interrupt: if budget.interruptible {
+                crate::interrupt::active()
+            } else {
+                None
+            },
         }
     }
 
@@ -566,6 +591,15 @@ impl<'s> Meter<'s> {
         &mut self,
         items: &[(OperationClass, u64)],
     ) -> Result<(), Rejection> {
+        // An abandoned read stops before the work this group covers; the
+        // host discards its receipt (see `crate::interrupt`).
+        if self
+            .interrupt
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            return Err(Rejection::OutOfBudget);
+        }
         let mut total = Cost::ZERO;
         let mut subtotals = [Cost::ZERO; OperationClass::ALL.len()];
         for &(class, count) in items {

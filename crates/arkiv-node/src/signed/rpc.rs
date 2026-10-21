@@ -1129,7 +1129,8 @@ fn error_with(id: Value, e: Error, pruned: Option<(u64, u64)>) -> Value {
         "InsufficientBalance" => "insufficient funds for gas * price + value",
         _ => e.0,
     };
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":match e.0{"MethodNotFound"=>-32601,"InvalidParams"=>-32602,"InvalidRequest"=>-32600,"ExecutionReverted"=>3,_=>-32000},"message":message}})
+    // A refused detached read is a retryable limit (EIP-1474 "limit exceeded").
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":match e.0{"MethodNotFound"=>-32601,"InvalidParams"=>-32602,"InvalidRequest"=>-32600,"ExecutionReverted"=>3,"ServerBusy"=>-32005,_=>-32000},"message":message}})
 }
 async fn single(rt: &Shared, request: Value) -> Value {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
@@ -1141,10 +1142,41 @@ async fn single(rt: &Shared, request: Value) -> Value {
         _ => return error(id, Error("InvalidRequest")),
     };
     let params = request.get("params").cloned().unwrap_or_else(|| json!([]));
+    let local = if super::rpc_reads::detached(&method) {
+        detached(rt, method, params, id.clone()).await
+    } else {
+        locked(rt, method, params, id.clone()).await
+    };
+    let result = match local {
+        Ok(Some(result)) => Ok(result),
+        Ok(None) => match rt.peer.as_ref() {
+            Some(peer) => {
+                super::runtime::fetch::<Value>(
+                    &rt.client,
+                    peer,
+                    "/",
+                    Some(request.clone()),
+                    None,
+                    8 * 1024 * 1024,
+                )
+                .await
+            }
+            None => Err(Error("FullNodeRequired")),
+        },
+        Err(e) => Err(e),
+    };
+    if request.get("id").is_none() {
+        Value::Null
+    } else {
+        result.unwrap_or_else(|e| error(id, e))
+    }
+}
+/// A response computed under the node lock, or `None` to forward the request.
+async fn locked(rt: &Shared, method: String, params: Value, id: Value) -> Result<Option<Value>> {
     // RPC bursts wait for the node mutex in the blocking pool instead of
     // competing for the native REST API's four admission permits.
     let runtime = rt.clone();
-    let response_id = id.clone();
+    let response_id = id;
     let job = tokio::task::spawn_blocking(move || {
         let mut node = runtime
             .node
@@ -1176,30 +1208,42 @@ async fn single(rt: &Shared, request: Value) -> Value {
         Ok::<_, Error>(local)
     })
     .await;
-    let result = match job {
-        Ok(Ok(Some(result))) => result,
-        Ok(Ok(None)) => match rt.peer.as_ref() {
-            Some(peer) => {
-                super::runtime::fetch::<Value>(
-                    &rt.client,
-                    peer,
-                    "/",
-                    Some(request.clone()),
-                    None,
-                    8 * 1024 * 1024,
-                )
-                .await
-            }
-            None => Err(Error("FullNodeRequired")),
-        },
+    match job {
+        Ok(Ok(local)) => local.transpose(),
         Ok(Err(e)) => Err(e),
         Err(_) => Err(Error("StorageUnavailable")),
-    };
-    if request.get("id").is_none() {
-        Value::Null
-    } else {
-        result.unwrap_or_else(|e| error(id, e))
     }
+}
+/// `arkiv_query` and `arkiv_getEntityCount` on a full node, as detached reads
+/// (see [`super::reads`]): admitted before touching the node lock, planned
+/// under it, and evaluated against the pinned snapshot after releasing it.
+/// `None` forwards the request (a light node).
+async fn detached(rt: &Shared, method: String, params: Value, id: Value) -> Result<Option<Value>> {
+    let admitted = rt.reads.admit()?;
+    let runtime = rt.clone();
+    let label = method.clone();
+    admitted
+        .run(&label, move || {
+            let planned = {
+                let node = runtime
+                    .node
+                    .lock()
+                    .map_err(|_| Error("StorageUnavailable"))?;
+                let Node::Full(h) = &*node else {
+                    return Ok(None);
+                };
+                match super::rpc_reads::plan(h, &method, &params) {
+                    Some(Ok(planned)) => planned,
+                    Some(Err(e)) => return Ok(Some(error_with(id, e, h.refusal.take()))),
+                    None => return Err(Error("MethodNotFound")),
+                }
+            };
+            Ok(Some(match planned.run() {
+                Ok(v) => json!({"jsonrpc":"2.0","id":id,"result":v}),
+                Err(e) => error(id, e),
+            }))
+        })
+        .await
 }
 pub async fn handle_request(rt: &Shared, request: Value) -> Value {
     const CAP: usize = 8 * 1024 * 1024;
@@ -1245,7 +1289,7 @@ pub async fn http(State(rt): State<Shared>, body: Body) -> Response {
         Ok(Err(_)) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
         Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
     };
-    let request =
+    let request: Value =
         match serde_json::from_slice(&input) {
             Ok(v) => v,
             Err(_) => return axum::Json(
@@ -1253,9 +1297,14 @@ pub async fn http(State(rt): State<Shared>, body: Body) -> Response {
             )
             .into_response(),
         };
+    let batch = request.is_array();
     let result = handle_request(&rt, request).await;
     if result.is_null() {
         StatusCode::NO_CONTENT.into_response()
+    } else if !batch && result["error"]["message"] == "ServerBusy" {
+        // A single refused request also carries HTTP 429, so client
+        // transports back off and retry; a batch keeps per-entry errors.
+        (StatusCode::TOO_MANY_REQUESTS, axum::Json(result)).into_response()
     } else {
         axum::Json(result).into_response()
     }

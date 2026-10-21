@@ -12,6 +12,7 @@ use axum::body::Body;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 use std::{ops::Bound, sync::Arc};
+use tokio::sync::OwnedSemaphorePermit;
 
 pub(super) const PROFILE: &str = RANGE_PROOF_PROFILE;
 
@@ -84,26 +85,35 @@ fn resolve(identity: &Identity, header: &crate::Header, query: &Query) -> Result
     Ok(request)
 }
 
+/// `query/range` on a full node, a detached read (see
+/// [`super::super::reads`]): the proof is generated from the pinned state
+/// after the node lock is released.
+pub(super) async fn proof(rt: Shared, body: Body, admission: OwnedSemaphorePermit) -> Result<Json> {
+    let raw: CanonicalRequest = parse(body, REQUEST_CAP).await?;
+    let request: RangeRequest = unpack(&raw.request, 4096)?;
+    let admitted = rt.reads.admit()?;
+    drop(admission);
+    admitted
+        .run("query/range", move || {
+            let state = {
+                let node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
+                let Node::Full(host) = &*node else {
+                    return Err(Error("UnsupportedNodeRole"));
+                };
+                host.proof_state(&request.snapshot, "InvalidRequest")?
+            };
+            Ok(json!({"proof":hex(&crate::signed::host::range_proof_bytes(&state, &request)?)}))
+        })
+        .await
+}
+
+/// The light-node range flows: resolve, verify and inspect.
 pub(super) async fn handle(
     rt: Shared,
     path: &str,
     body: Body,
-    permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+    permit: Arc<OwnedSemaphorePermit>,
 ) -> Result<Json> {
-    if path == "query/range" {
-        let raw: CanonicalRequest = parse(body, REQUEST_CAP).await?;
-        let request: RangeRequest = unpack(&raw.request, 4096)?;
-        return tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            let node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
-            let Node::Full(host) = &*node else {
-                return Err(Error("UnsupportedNodeRole"));
-            };
-            Ok(json!({"proof":hex(&host.range_proof(&request)?)}))
-        })
-        .await
-        .map_err(|_| Error("StorageUnavailable"))?;
-    }
     let inspect = path == "query/range/inspect";
     let query: Query = parse(body, REQUEST_CAP).await?;
     let (request, header, identity) = {

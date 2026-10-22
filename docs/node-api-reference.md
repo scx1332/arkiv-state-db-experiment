@@ -82,6 +82,18 @@ they run against a snapshot pinned under the node lock, outside it. At most
 `ReadDeadlineExceeded`). Both are safe to retry; a deadline usually means the
 read itself is too large for the node's limit.
 
+`arkiv_query` and `arkiv_getEntityCount` use planned evaluation: each
+AND-group is driven by its smallest index posting and checks the other
+postings by id, so `scope AND address = X` costs what `address = X AND scope`
+does; counts of one posting, a match-all, a `!=`, a prefix or a union of
+distinct values are answered from stored posting sizes. Results, cursors and
+counts are exactly those of the clause-order evaluation. Queries are admitted
+with the genesis group and literal bounds (8 and 8) unless the node runs with
+`--read-max-groups N` (1–64) or `--read-max-literals N` (1–256); a larger
+query still takes the bounded scan fallback (`arkiv_query`) or is refused
+(`arkiv_getEntityCount`, `QueryRejected`). These bounds are node-local: block
+execution never evaluates an SDK query.
+
 The existing [tree exploration guide](state-tree-explorer-api.md) explains
 navigating catalog, records, keys, rows, terms and postings. Tree responses are
 diagnostic data, not light-node proofs.

@@ -111,7 +111,7 @@ use crate::{
     query::{Cursor, CursorContext, Projection, Query, QueryPage},
     record::{Cell, CellName, Limits, RecordId, RecordKey, Row, TypeTag, Value},
     state::{MapKind, NamespaceRoots, STATE_FORMAT, StagedObject, StateHeader},
-    typed::{self, TypedState},
+    typed::{self, Evaluation, TypedState},
 };
 
 /// Default directory capacity: the largest number of namespaces an engine
@@ -2794,12 +2794,30 @@ struct QueryRequest<'r> {
     context: CursorContext,
 }
 
+/// The limits a query or count read is admitted against: the instance's,
+/// with `max_groups` and `max_literals` replaced by the budget's read-side
+/// bounds when it carries them ([`Budget::with_query_limits`]).
+fn query_admission(limits: &Limits, budget: Budget) -> Limits {
+    match budget.query_limits() {
+        Some(bounds) => Limits {
+            max_groups: bounds.max_groups,
+            max_literals: bounds.max_literals,
+            ..*limits
+        },
+        None => *limits,
+    }
+}
+
 impl QueryRequest<'_> {
     /// Admission: the query shape and the projection against the limits,
     /// then the cursor binding. All are decided before any charge.
-    fn validate(&self) -> Result<Option<RecordId>, Rejection> {
-        typed::validate_query(self.limits, self.query, self.limit)
-            .map_err(Rejection::InvalidQuery)?;
+    fn validate(&self, budget: Budget) -> Result<Option<RecordId>, Rejection> {
+        typed::validate_query(
+            &query_admission(self.limits, budget),
+            self.query,
+            self.limit,
+        )
+        .map_err(Rejection::InvalidQuery)?;
         typed::validate_projection(self.limits, self.projection)
             .map_err(Rejection::InvalidQuery)?;
         let Some(cursor) = self.cursor else {
@@ -2841,7 +2859,7 @@ fn read_query(
     request: &QueryRequest<'_>,
     budget: Budget,
 ) -> Result<ReadResult<QueryPage>, StorageError> {
-    let after = match request.validate() {
+    let after = match request.validate(budget) {
         Ok(after) => after,
         Err(reason) => return Ok(Err(zero_cost(pricing, budget, ReceiptKind::Read, reason))),
     };
@@ -2859,6 +2877,7 @@ fn read_query(
                 request.projection,
                 request.limit,
                 after,
+                Evaluation::of(budget),
                 &mut meter,
             )
         })
@@ -2878,7 +2897,7 @@ fn read_count(
     query: &Query,
     budget: Budget,
 ) -> Result<ReadResult<u64>, StorageError> {
-    if let Err(fault) = typed::validate_query(limits, query, 1) {
+    if let Err(fault) = typed::validate_query(&query_admission(limits, budget), query, 1) {
         let reason = Rejection::InvalidQuery(fault);
         return Ok(Err(zero_cost(pricing, budget, ReceiptKind::Read, reason)));
     }
@@ -2888,7 +2907,15 @@ fn read_count(
         .charge(OperationClass::DirectoryLookup, 1)
         .map_err(Fault::from)
         .and_then(|()| resolve(state, nodes, namespace, &mut meter))
-        .and_then(|existing| typed::count(&existing.typed, &loaders, query, &mut meter));
+        .and_then(|existing| {
+            typed::count(
+                &existing.typed,
+                &loaders,
+                query,
+                Evaluation::of(budget),
+                &mut meter,
+            )
+        });
     finish_read(meter, outcome)
 }
 

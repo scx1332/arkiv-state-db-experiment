@@ -53,7 +53,11 @@
 //! A host may stop a read it abandons (a wall-clock deadline, a departed
 //! client) with an [`Interrupt`]: a read whose budget opted in stops at its
 //! next charge inside the interrupt's scope. Block execution never opts in
-//! (see [`interrupt`]).
+//! (see [`interrupt`]). A local query or count read may also opt in to
+//! planned evaluation ([`Budget::planned`]: each AND-group is driven by its
+//! cheapest index source, with the same results) and to read-side admission
+//! bounds ([`Budget::with_query_limits`]); block execution never opts in to
+//! either.
 //!
 //! [`codec`] is the canonical binary encoding (codec version
 //! [`CODEC_VERSION`]) of the engine's types, with the domain-separated
@@ -100,7 +104,7 @@ pub use host::{BlockMap, BlockNumber, ExpiryHalt, HostError, expire_records, try
 pub use interrupt::Interrupt;
 pub use meter::{
     Budget, Cost, Ledger, LedgerEntry, MODEL_VERSION, OperationClass, Outcome, PhysicalTrace,
-    PriceSchedule, Receipt, ReceiptKind, Rejection,
+    PriceSchedule, QueryLimits, Receipt, ReceiptKind, Rejection,
 };
 pub use namespace::{NamespaceDescriptor, NamespaceId, NamespaceName, OwnerId, Revision};
 pub use query::{CellSelect, Cursor, Literal, Projection, Query, QueryFault, QueryPage, Term};

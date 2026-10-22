@@ -18,7 +18,9 @@
 //!   engine; no engine index is consulted), in ascending id, page after page
 //!   under varying limits, with `next` present iff a further match exists,
 //!   with the projected rows equal to the model's, and with `count` equal to
-//!   the number of matches.
+//!   the number of matches. Every such check runs twice: as written (the
+//!   canonical evaluation) and planned (`Budget::planned`), which must return
+//!   exactly the same pages and counts.
 //! - Fields never match; a cell of another type is absent; `NotEq` needs the
 //!   attribute; `lower > upper` is empty; an empty prefix matches every `Str`
 //!   attribute of the name; negation is the complement over live records.
@@ -897,22 +899,19 @@ fn combined_queries(pool: &[Literal]) -> Vec<Query> {
 
 /// A read handle: a snapshot or a branch.
 trait Reader {
-    fn page(
+    #[allow(clippy::too_many_arguments)]
+    fn page_with(
         &self,
         ns: NamespaceId,
         query: &Query,
         projection: &Projection,
         limit: usize,
         cursor: Option<&Cursor>,
+        budget: Budget,
     ) -> ReadResult<QueryPage>;
 
-    fn total(&self, ns: NamespaceId, query: &Query) -> ReadResult<u64>;
+    fn total_with(&self, ns: NamespaceId, query: &Query, budget: Budget) -> ReadResult<u64>;
 
-    /// The snapshot a cursor of this reader must name.
-    fn pinned(&self) -> Option<SnapshotId>;
-}
-
-impl Reader for Snapshot {
     fn page(
         &self,
         ns: NamespaceId,
@@ -921,11 +920,28 @@ impl Reader for Snapshot {
         limit: usize,
         cursor: Option<&Cursor>,
     ) -> ReadResult<QueryPage> {
-        self.query(ns, query, projection, limit, cursor, Budget::unlimited())
+        self.page_with(ns, query, projection, limit, cursor, Budget::unlimited())
     }
 
-    fn total(&self, ns: NamespaceId, query: &Query) -> ReadResult<u64> {
-        self.count(ns, query, Budget::unlimited())
+    /// The snapshot a cursor of this reader must name.
+    fn pinned(&self) -> Option<SnapshotId>;
+}
+
+impl Reader for Snapshot {
+    fn page_with(
+        &self,
+        ns: NamespaceId,
+        query: &Query,
+        projection: &Projection,
+        limit: usize,
+        cursor: Option<&Cursor>,
+        budget: Budget,
+    ) -> ReadResult<QueryPage> {
+        self.query(ns, query, projection, limit, cursor, budget)
+    }
+
+    fn total_with(&self, ns: NamespaceId, query: &Query, budget: Budget) -> ReadResult<u64> {
+        self.count(ns, query, budget)
     }
 
     fn pinned(&self) -> Option<SnapshotId> {
@@ -934,25 +950,29 @@ impl Reader for Snapshot {
 }
 
 impl Reader for Branch {
-    fn page(
+    fn page_with(
         &self,
         ns: NamespaceId,
         query: &Query,
         projection: &Projection,
         limit: usize,
         cursor: Option<&Cursor>,
+        budget: Budget,
     ) -> ReadResult<QueryPage> {
-        self.query(ns, query, projection, limit, cursor, Budget::unlimited())
+        self.query(ns, query, projection, limit, cursor, budget)
     }
 
-    fn total(&self, ns: NamespaceId, query: &Query) -> ReadResult<u64> {
-        self.count(ns, query, Budget::unlimited())
+    fn total_with(&self, ns: NamespaceId, query: &Query, budget: Budget) -> ReadResult<u64> {
+        self.count(ns, query, budget)
     }
 
     fn pinned(&self) -> Option<SnapshotId> {
         None
     }
 }
+
+/// Both evaluations: as written (the canonical charges) and planned.
+const EVALUATIONS: [Budget; 2] = [Budget::unlimited(), Budget::unlimited().planned()];
 
 /// Walks every page of `query`, page `i` with limit `limits[i % len]`, and
 /// checks the paging contract on the way: ids ascend past the cursor, a
@@ -964,6 +984,7 @@ fn walk<R: Reader>(
     query: &Query,
     projection: &Projection,
     limits: &[usize],
+    budget: Budget,
 ) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     let mut cursor: Option<Cursor> = None;
@@ -971,7 +992,7 @@ fn walk<R: Reader>(
         assert!(page_index < 1_000, "runaway walk of {query:?}");
         let limit = limits[page_index % limits.len()];
         let page = reader
-            .page(ns, query, projection, limit, cursor.as_ref())
+            .page_with(ns, query, projection, limit, cursor.as_ref(), budget)
             .unwrap_or_else(|rejected| panic!("{query:?} page {page_index}: {rejected}"))
             .value;
         assert!(page.rows.len() <= limit, "{query:?}: page over limit");
@@ -1008,7 +1029,8 @@ fn walk<R: Reader>(
     unreachable!("the walk returns from inside the loop")
 }
 
-/// Rows and count of `query` on the engine equal the model's full scan.
+/// Rows and count of `query` on the engine equal the model's full scan,
+/// under both evaluations.
 fn check_query<R: Reader>(
     reader: &R,
     model: &Model,
@@ -1022,25 +1044,31 @@ fn check_query<R: Reader>(
         .iter()
         .map(|&id| model.row(id, projection))
         .collect();
-    let rows = walk(reader, ns, query, projection, limits);
-    assert_eq!(
-        ordinals(&rows),
-        expected_ids
-            .iter()
-            .map(|id| id.ordinal())
-            .collect::<Vec<_>>(),
-        "{query:?} with limits {limits:?}"
-    );
-    assert_eq!(rows, expected_rows, "{query:?}: projected rows");
-    let count = reader
-        .total(ns, query)
-        .unwrap_or_else(|rejected| panic!("count {query:?}: {rejected}"))
-        .value;
-    assert_eq!(
-        count,
-        u64::try_from(expected_ids.len()).expect("counts fit u64"),
-        "count {query:?}"
-    );
+    for budget in EVALUATIONS {
+        let planned = budget.is_planned();
+        let rows = walk(reader, ns, query, projection, limits, budget);
+        assert_eq!(
+            ordinals(&rows),
+            expected_ids
+                .iter()
+                .map(|id| id.ordinal())
+                .collect::<Vec<_>>(),
+            "{query:?} with limits {limits:?} (planned: {planned})"
+        );
+        assert_eq!(
+            rows, expected_rows,
+            "{query:?}: projected rows (planned: {planned})"
+        );
+        let count = reader
+            .total_with(ns, query, budget)
+            .unwrap_or_else(|rejected| panic!("count {query:?}: {rejected}"))
+            .value;
+        assert_eq!(
+            count,
+            u64::try_from(expected_ids.len()).expect("counts fit u64"),
+            "count {query:?} (planned: {planned})"
+        );
+    }
 }
 
 const LIMIT_PATTERNS: [&[usize]; 4] = [&[1], &[2, 3], &[5, 1, 200], &[200]];

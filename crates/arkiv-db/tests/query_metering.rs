@@ -4748,3 +4748,57 @@ fn range_walk_pages_revisit_every_term_of_the_run() {
     assert_eq!(walked, [1, 2, 3]);
     assert!(cursor.is_none(), "the third page is terminal");
 }
+
+#[test]
+fn planned_reads_match_the_plans_worked_vectors() {
+    let (engine, ns, model) = fixture();
+    let snapshot = engine.head_snapshot();
+    let planned = Budget::unlimited().planned();
+    let count = |query: &Query| {
+        let metered = snapshot.count(ns, query, planned).expect("applies");
+        (metered.value, metered.receipt.spent.units())
+    };
+    // The plan's vectors: match-all is the live row count, one posting its
+    // stored size, a NotEq its existence posting less its value posting.
+    assert_eq!(count(&Query::match_all()), (3, 1 + 5));
+    assert_eq!(
+        count(&Query::term(exists("price", TypeTag::I64))),
+        (3, 1 + 5 + 4)
+    );
+    assert_eq!(
+        count(&Query::term(not_eq("kind", Value::str("pen")))),
+        (2, 1 + 5 + 4 + 4)
+    );
+    // The written charges of the same reads are untouched: 9 and 13.
+    assert_eq!(
+        snapshot
+            .count(ns, &Query::match_all(), Budget::unlimited())
+            .expect("applies")
+            .receipt
+            .spent
+            .units(),
+        9
+    );
+    // A page: the one-entry posting of price 20 drives, kind = book follows
+    // with one repositioning; 1 + 5 + two seeks 8 + PostingEntry 1 +
+    // RecordProbe 2 + ResultRow 3 = 20, in either literal order.
+    for literals in [
+        vec![
+            Literal::of(eq("kind", Value::str("book"))),
+            Literal::of(eq("price", Value::I64(20))),
+        ],
+        vec![
+            Literal::of(eq("price", Value::I64(20))),
+            Literal::of(eq("kind", Value::str("book"))),
+        ],
+    ] {
+        let query = Query::all(literals);
+        let page = snapshot
+            .query(ns, &query, &Projection::ID_ONLY, 10, None, planned)
+            .expect("applies");
+        assert_eq!(ids_of(&page.value.rows), vec![2]);
+        assert_eq!(model.ids(&query), vec![id(2)]);
+        assert!(page.value.next.is_none());
+        assert_eq!(page.receipt.spent.units(), 20);
+    }
+}

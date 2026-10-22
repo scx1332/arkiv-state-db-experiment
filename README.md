@@ -24,7 +24,11 @@ implementation. Full nodes keep every state snapshot by default;
 before it and refuses older reads with `HistoryPruned`. Nothing is deleted
 yet; see the [pruning design](docs/pruning-design.md). Entity queries and
 counts, proofs and tree exploration run against a pinned snapshot outside the
-node lock, bounded by `--read-concurrency` and `--read-deadline-secs`.
+node lock, bounded by `--read-concurrency` and `--read-deadline-secs`. Entity
+queries and counts are planned: each AND-group is driven by its smallest
+index posting whatever the clause order, and counts use stored posting sizes;
+`--read-max-groups` and `--read-max-literals` raise their genesis query bounds
+for these reads only (see the [query plan](docs/snapshot-query-plan.md)).
 
 The target is Arkiv's blockchain workload: many ordered operations per block,
 one completed block state, and historical queries with proofs. The engine

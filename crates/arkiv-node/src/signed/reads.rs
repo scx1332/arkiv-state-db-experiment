@@ -49,14 +49,22 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 /// The error of a detached read that ran past its deadline.
 pub const DEADLINE_EXCEEDED: &str = "ReadDeadlineExceeded";
 
-/// Bounds of detached reads, set by `--read-concurrency` and
-/// `--read-deadline-secs`.
+/// Bounds of detached reads, set by `--read-concurrency`,
+/// `--read-deadline-secs`, `--read-max-groups` and `--read-max-literals`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReadLimits {
     /// Detached reads evaluated at once (1 to [`Self::MAX_CONCURRENCY`]).
     pub concurrency: usize,
     /// Wall-clock limit of one detached read (1 s to [`Self::MAX_DEADLINE`]).
     pub deadline: Duration,
+    /// Most AND-groups `arkiv_query` and `arkiv_getEntityCount` evaluate on
+    /// the index (1 to [`Self::MAX_GROUPS`]); `None` keeps the genesis
+    /// `max_groups`. A node-local admission bound of reads only: block
+    /// execution never runs these queries, so it changes no consensus rule.
+    pub max_groups: Option<usize>,
+    /// Most literals in one AND-group of those reads (1 to
+    /// [`Self::MAX_LITERALS`]); `None` keeps the genesis `max_literals`.
+    pub max_literals: Option<usize>,
 }
 
 impl Default for ReadLimits {
@@ -64,6 +72,8 @@ impl Default for ReadLimits {
         Self {
             concurrency: 4,
             deadline: Duration::from_secs(30),
+            max_groups: None,
+            max_literals: None,
         }
     }
 }
@@ -71,14 +81,33 @@ impl Default for ReadLimits {
 impl ReadLimits {
     pub const MAX_CONCURRENCY: usize = 64;
     pub const MAX_DEADLINE: Duration = Duration::from_secs(3600);
+    /// The SDK query parser's own bounds: a query expands to at most 64
+    /// groups and 256 literals in all.
+    pub const MAX_GROUPS: usize = 64;
+    pub const MAX_LITERALS: usize = 256;
 
     pub fn validate(&self) -> Result<()> {
         if !(1..=Self::MAX_CONCURRENCY).contains(&self.concurrency)
             || !(Duration::from_secs(1)..=Self::MAX_DEADLINE).contains(&self.deadline)
+            || self
+                .max_groups
+                .is_some_and(|groups| !(1..=Self::MAX_GROUPS).contains(&groups))
+            || self
+                .max_literals
+                .is_some_and(|literals| !(1..=Self::MAX_LITERALS).contains(&literals))
         {
             return Err(Error("InvalidRequest"));
         }
         Ok(())
+    }
+
+    /// The query bounds an SDK read is admitted against: `genesis` with
+    /// `max_groups` and `max_literals` replaced where these limits set them.
+    pub fn query_limits(&self, genesis: &arkiv_db::Limits) -> arkiv_db::QueryLimits {
+        arkiv_db::QueryLimits {
+            max_groups: self.max_groups.unwrap_or(genesis.max_groups),
+            max_literals: self.max_literals.unwrap_or(genesis.max_literals),
+        }
     }
 }
 

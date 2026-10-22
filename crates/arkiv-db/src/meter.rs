@@ -85,7 +85,7 @@ impl fmt::Display for Cost {
 /// | patch record | `DirectoryLookup` 1, `PointRead` 1, then one group: `RecordPatch` 1 + `CellWrite` per set cell + `CellByte` b + `CellRemove` per removed name + `RowByte` n + `RootUpdate` 2, then per changed name in order: one group `IndexRemove` 1 + `RootUpdate` 2 per term no longer held, then per term newly held one group `IndexInsert` 1 + `IndexTermCreate` 1 if new + `RootUpdate` 2 |
 /// | delete record | `DirectoryLookup` 1, `PointRead` 1, then one group: `RecordDelete` 1 + `CellRemove` c + `RootUpdate` 3, then one group `IndexRemove` 1 + `RootUpdate` 2 per term held (value then existence, per attribute cell in name order) |
 /// | get record | `DirectoryLookup` 1, `PointRead` 1, then (if present) one group: `ResultRow` 1 + `ReadByte` p |
-/// | query | `DirectoryLookup` 1, then per group `QueryGroup` 1 and its enumeration (`TermSeek`, `TermVisit`, `PostingEntry`, `RowVisit`, `RecordProbe` as documented in the plan), then per emitted row one group: `ResultRow` 1 + `ReadByte` p |
+/// | query | `DirectoryLookup` 1, then per group `QueryGroup` 1 and its enumeration (`TermSeek`, `TermVisit`, `PostingEntry`, `RowVisit`, `RecordProbe` as documented in the plan; a [planned](Budget::planned) read plans and enumerates by its own rules over the same classes), then per emitted row one group: `ResultRow` 1 + `ReadByte` p |
 ///
 /// A "group" is charged atomically: either every class in it fits the budget
 /// and is charged, or nothing in the group is charged and the operation stops.
@@ -135,7 +135,8 @@ pub enum OperationClass {
     IndexRemove,
     /// Each AND-group a query evaluates.
     QueryGroup,
-    /// Positioning the index for a group's first literal.
+    /// Positioning the index for a group's first literal; in a
+    /// [planned](Budget::planned) read, each term lookup of its plan.
     TermSeek,
     /// Each distinct term key visited inside a range or prefix run.
     TermVisit,
@@ -143,7 +144,9 @@ pub enum OperationClass {
     PostingEntry,
     /// Each live row enumerated for a match-all group or a negated literal.
     RowVisit,
-    /// Each evaluation of a literal against one candidate record's cells.
+    /// Each evaluation of a literal against one candidate record's cells;
+    /// in a [planned](Budget::planned) read also each membership probe or
+    /// repositioning of a posting for one candidate id.
     RecordProbe,
     /// Each row emitted by a record read or a query page.
     ResultRow,
@@ -293,8 +296,9 @@ impl PriceSchedule {
     }
 }
 
-/// A spending limit for one operation, plus whether to record a debug ledger
-/// and whether a host [`Interrupt`](crate::Interrupt) may stop it.
+/// A spending limit for one operation, plus whether to record a debug ledger,
+/// whether a host [`Interrupt`](crate::Interrupt) may stop it and, for a
+/// local query or count read, how it is evaluated and admitted.
 ///
 /// Budgets are optional for reads (a local RPC decides), but counting is not:
 /// every operation produces a receipt whether or not it had a limit. Tracing
@@ -304,6 +308,18 @@ pub struct Budget {
     limit: Option<Cost>,
     trace: bool,
     interruptible: bool,
+    planned: bool,
+    query_limits: Option<QueryLimits>,
+}
+
+/// Read-side admission bounds of a query or count: the most AND-groups and
+/// the most literals in one group. See [`Budget::with_query_limits`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueryLimits {
+    /// Most AND-groups in a query.
+    pub max_groups: usize,
+    /// Most literals in one AND-group.
+    pub max_literals: usize,
 }
 
 impl Budget {
@@ -313,6 +329,8 @@ impl Budget {
             limit: Some(Cost(units)),
             trace: false,
             interruptible: false,
+            planned: false,
+            query_limits: None,
         }
     }
 
@@ -322,6 +340,8 @@ impl Budget {
             limit: None,
             trace: false,
             interruptible: false,
+            planned: false,
+            query_limits: None,
         }
     }
 
@@ -340,6 +360,28 @@ impl Budget {
         self
     }
 
+    /// Lets a query or count read evaluate each AND-group by estimated cost
+    /// instead of in written order (see [`crate::query`], "Planned
+    /// evaluation"). Rows, their order, cursors, `next` and counts are
+    /// exactly those of the written evaluation; only the charges, and so the
+    /// point where a budget ends the read, differ. No other operation reads
+    /// the flag. Only for local reads; block execution, the host's expiry
+    /// sweep included, must never opt in.
+    pub const fn planned(mut self) -> Self {
+        self.planned = true;
+        self
+    }
+
+    /// Admits a query or count read against `limits` instead of the
+    /// instance's `max_groups` and `max_literals`. Every other admission
+    /// rule (page size, values, projection) is unchanged, and no other
+    /// operation reads the bounds. Only for local reads, whose admission no
+    /// consensus rule depends on; block execution must never opt in.
+    pub const fn with_query_limits(mut self, limits: QueryLimits) -> Self {
+        self.query_limits = Some(limits);
+        self
+    }
+
     /// The configured limit, if any.
     pub const fn limit_units(&self) -> Option<Cost> {
         self.limit
@@ -353,6 +395,16 @@ impl Budget {
     /// Whether a host interrupt may stop the operation.
     pub const fn is_interruptible(&self) -> bool {
         self.interruptible
+    }
+
+    /// Whether a query or count read is evaluated by estimated cost.
+    pub const fn is_planned(&self) -> bool {
+        self.planned
+    }
+
+    /// The read-side admission bounds, when they replace the instance's.
+    pub const fn query_limits(&self) -> Option<QueryLimits> {
+        self.query_limits
     }
 }
 

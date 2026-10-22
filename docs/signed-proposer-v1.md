@@ -191,6 +191,15 @@ long count. Those other requests, and every write, remain serialized under the
 node lock as before; writers still answer `ServerBusy` when the lock is
 momentarily held.
 
+`arkiv_query` and `arkiv_getEntityCount` evaluate with planned read budgets
+(`arkiv_db::Budget::planned`, see the [query plan](snapshot-query-plan.md)):
+each AND-group is driven by its smallest index posting and counts use stored
+posting sizes, with the same results as the written evaluation. Their group
+and literal bounds are the genesis limits unless `--read-max-groups` (1–64)
+or `--read-max-literals` (1–256) raise them for these reads; consensus never
+sees either option, since block execution (the expiry sweep included) only
+runs unplanned single-literal reads under the genesis limits.
+
 A pinned snapshot is consistent while blocks are produced: it fixes one
 published state header, every trie node below it is a committed,
 content-addressed and hash-verified object that later commits never change or

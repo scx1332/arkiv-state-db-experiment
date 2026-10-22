@@ -6,6 +6,18 @@
 //! reordered or planned, so the charged cost and the abort point are a pure
 //! function of the state and the query text. The only result order is the
 //! record id (creation order within the namespace).
+//!
+//! # Planned evaluation
+//!
+//! A local read may opt in with [`Budget::planned`](crate::Budget::planned):
+//! each AND-group is then driven by its smallest index source (by the
+//! posting sizes stored in the term leaves), its other positive postings are
+//! checked by id in a leapfrog intersection instead of on loaded rows, and a
+//! count answers from stored sizes where they decide it. Rows, their order,
+//! cursors, `next` and counts are exactly the written evaluation's; charges
+//! remain a pure function of the state and the query, but no longer of the
+//! literal order. Block execution never opts in. The rules are those of the
+//! planner module in `typed`, summarized in `docs/snapshot-query-plan.md`.
 
 use std::{collections::BTreeSet, fmt, ops::Bound, sync::Arc};
 

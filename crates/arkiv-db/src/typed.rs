@@ -28,11 +28,39 @@ use arkiv_db_trie::{Probe, Range};
 
 use crate::{
     layout::{Keys, Member, Posting, PostingMap, Rows, StoredRecord, TermKey, Terms},
-    meter::{Meter, OperationClass, Rejection},
+    meter::{Budget, Meter, OperationClass, Rejection},
     nodes::{Fault, Loader, NamespaceLoaders, corrupt},
     query::{CellSelect, Literal, Projection, Query, QueryFault, Term},
     record::{ArgumentFault, Cell, CellName, Limits, RecordId, RecordKey, Row, TypeTag, Value},
 };
+
+mod planner;
+
+use planner::PostingCursor;
+
+/// How a query or count read evaluates its AND-groups.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Evaluation {
+    /// As written: each group is driven by its first literal and probes the
+    /// rest on rows in order. These are the canonical counting rules of the
+    /// plan (`docs/snapshot-query-plan.md`); every read that does not opt in
+    /// uses them, block execution's expiry sweep included.
+    Written,
+    /// By estimated cost (see [`planner`]): the same rows, order, cursors
+    /// and counts under different charges. Local reads only.
+    Planned,
+}
+
+impl Evaluation {
+    /// The evaluation a read's budget asks for ([`Budget::planned`]).
+    pub(crate) const fn of(budget: Budget) -> Self {
+        if budget.is_planned() {
+            Self::Planned
+        } else {
+            Self::Written
+        }
+    }
+}
 
 /// The typed state of one namespace.
 #[derive(Clone, Debug)]
@@ -838,6 +866,9 @@ enum Source<'a> {
     },
     /// Every live row (match-all, or the domain of a negated literal).
     Rows(Range<'a, RecordId, StoredRecord, Loader<'a>>),
+    /// A planned group's driving posting, which its leapfrog may move
+    /// forward (see [`planner`]).
+    Cursor(PostingCursor<'a>),
     /// Nothing: the cursor is past every possible id.
     Empty,
 }
@@ -872,7 +903,24 @@ impl Source<'_> {
                 meter.charge(OperationClass::RowVisit, 1)?;
                 Ok(Some((id, Some(row))))
             }
+            Self::Cursor(cursor) => Ok(cursor.step(meter)?.map(|id| (id, None))),
             Self::Empty => Ok(None),
+        }
+    }
+
+    /// The first candidate at or after `floor`, for a planned group whose
+    /// follower showed that nothing below `floor` matches. A driving posting
+    /// gallops (see [`PostingCursor::seek`]); every other source steps,
+    /// charging each candidate it passes as [`Self::next`] does.
+    fn seek(&mut self, floor: RecordId, meter: &mut Meter<'_>) -> Result<Option<Candidate>, Fault> {
+        if let Self::Cursor(cursor) = self {
+            return Ok(cursor.seek(floor, meter)?.map(|id| (id, None)));
+        }
+        loop {
+            match self.next(meter)? {
+                Some((id, _)) if id < floor => {}
+                other => return Ok(other),
+            }
         }
     }
 
@@ -884,6 +932,7 @@ impl Source<'_> {
                 meter.note_index_nodes(postings.iter().map(|range| range.probe().nodes).sum());
             }
             Self::Rows(range) => meter.note_record_nodes(range.probe().nodes),
+            Self::Cursor(cursor) => cursor.note_physical(meter),
             Self::Empty => {}
         }
     }
@@ -993,9 +1042,18 @@ fn open_posting<'a>(
 /// One AND-group as a lazy stream of its matches in id order.
 struct GroupStream<'a, 'q> {
     source: Source<'a>,
-    /// Literals probed against every candidate, in order: the first literal
-    /// itself when its source is only a domain (NotEq, negation), then the
-    /// rest of the group.
+    /// Planned groups only: the postings of further positive literals, each
+    /// moved to every candidate in turn (a leapfrog intersection with the
+    /// source), smallest first. Written groups have none.
+    followers: Vec<PostingCursor<'a>>,
+    /// Planned groups only: postings a match must not be in (negated
+    /// `Eq`/`Exists`, the value term of a `NotEq`), probed by id. Written
+    /// groups have none.
+    absent: Vec<PostingMap>,
+    /// Literals probed against every candidate's row, in order. Written: the
+    /// first literal itself when its source is only a domain (NotEq,
+    /// negation), then the rest of the group. Planned: only the literals no
+    /// posting decides.
     probes: Vec<&'q Literal>,
     head: Option<RecordId>,
     /// The head's row when a probe or a row-map source already loaded it.
@@ -1074,15 +1132,40 @@ impl<'a, 'q> GroupStream<'a, 'q> {
         probes.extend(group.iter().skip(1));
         Ok(Self {
             source,
+            followers: Vec::new(),
+            absent: Vec::new(),
             probes,
             head: None,
             head_row: None,
         })
     }
 
+    /// Opens one group as `evaluation` asks.
+    fn open_as(
+        evaluation: Evaluation,
+        state: &TypedState,
+        loaders: &'a NamespaceLoaders<'a>,
+        group: &'q [Literal],
+        from: Option<RecordId>,
+        meter: &mut Meter<'_>,
+    ) -> Result<Self, Fault> {
+        match evaluation {
+            Evaluation::Written => Self::open(state, loaders, group, from, meter),
+            Evaluation::Planned => planner::open_group(state, loaders, group, from, meter),
+        }
+    }
+
     /// Advances to the group's next match: candidates come from the source
     /// in id order and each is probed by the group's literals in order until
     /// one fails (candidate-major).
+    ///
+    /// A planned group first moves each follower to the candidate: one with
+    /// no entry left ends the group, and one whose next entry lies beyond
+    /// the candidate moves the source to that entry (no id in between is in
+    /// that posting). The candidate is then probed against the absent
+    /// postings and last against the remaining literals on its row. A
+    /// written group has neither, so its candidates come from
+    /// [`Source::next`] alone and its charges are exactly the written rules.
     fn pull(
         &mut self,
         state: &TypedState,
@@ -1091,10 +1174,31 @@ impl<'a, 'q> GroupStream<'a, 'q> {
     ) -> Result<(), Fault> {
         self.head = None;
         self.head_row = None;
-        loop {
-            let Some((id, row)) = self.source.next(meter)? else {
+        let mut floor = None;
+        'candidates: loop {
+            let next = match floor.take() {
+                None => self.source.next(meter)?,
+                Some(floor) => self.source.seek(floor, meter)?,
+            };
+            let Some((id, row)) = next else {
                 return Ok(());
             };
+            for follower in &mut self.followers {
+                match follower.seek(id, meter)? {
+                    None => return Ok(()),
+                    Some(at) if at > id => {
+                        floor = Some(at);
+                        continue 'candidates;
+                    }
+                    Some(_) => {}
+                }
+            }
+            for posting in &self.absent {
+                meter.charge(OperationClass::RecordProbe, 1)?;
+                if planner::holds(posting, loaders, id, meter)? {
+                    continue 'candidates;
+                }
+            }
             let mut loaded = row;
             let mut matched = true;
             for literal in &self.probes {
@@ -1113,6 +1217,14 @@ impl<'a, 'q> GroupStream<'a, 'q> {
                 self.head_row = loaded;
                 return Ok(());
             }
+        }
+    }
+
+    /// Physical node visits of the group's traversals so far.
+    fn note_physical(&self, meter: &mut Meter<'_>) {
+        self.source.note_physical(meter);
+        for follower in &self.followers {
+            follower.note_physical(meter);
         }
     }
 }
@@ -1137,6 +1249,7 @@ impl<'a, 'q> Evaluator<'a, 'q> {
         loaders: &'a NamespaceLoaders<'a>,
         query: &'q Query,
         after: Option<RecordId>,
+        evaluation: Evaluation,
         meter: &mut Meter<'_>,
     ) -> Result<(), Fault> {
         // The first id a source may yield; `None` when the cursor is past
@@ -1149,8 +1262,9 @@ impl<'a, 'q> Evaluator<'a, 'q> {
                 .and_then(RecordId::from_ordinal),
         };
         for group in &query.groups {
-            self.groups
-                .push(GroupStream::open(state, loaders, group, from, meter)?);
+            self.groups.push(GroupStream::open_as(
+                evaluation, state, loaders, group, from, meter,
+            )?);
         }
         for group in &mut self.groups {
             group.pull(state, loaders, meter)?;
@@ -1191,7 +1305,7 @@ impl<'a, 'q> Evaluator<'a, 'q> {
     /// after the last traversal step.
     fn note_physical(&self, meter: &mut Meter<'_>) {
         for group in &self.groups {
-            group.source.note_physical(meter);
+            group.note_physical(meter);
         }
     }
 }
@@ -1207,11 +1321,13 @@ impl<'a, 'q> Evaluator<'a, 'q> {
 /// [`open_run`]. Every visited node is therefore noted exactly once. Noting
 /// is not metered, so charges are untouched. (A storage failure discards
 /// the trace with the rest of the read.)
+#[allow(clippy::too_many_arguments)]
 fn evaluate<'a, 'q, 'm, T>(
     state: &TypedState,
     loaders: &'a NamespaceLoaders<'a>,
     query: &'q Query,
     after: Option<RecordId>,
+    evaluation: Evaluation,
     meter: &mut Meter<'m>,
     walk: impl FnOnce(&mut Evaluator<'a, 'q>, &mut Meter<'m>) -> Result<T, Fault>,
 ) -> Result<T, Fault> {
@@ -1219,7 +1335,7 @@ fn evaluate<'a, 'q, 'm, T>(
         groups: Vec::with_capacity(query.groups.len()),
     };
     let outcome = evaluator
-        .open(state, loaders, query, after, meter)
+        .open(state, loaders, query, after, evaluation, meter)
         .and_then(|()| walk(&mut evaluator, meter));
     evaluator.note_physical(meter);
     outcome
@@ -1229,7 +1345,9 @@ fn evaluate<'a, 'q, 'm, T>(
 ///
 /// Returns the page rows and the id of the last row when a further match
 /// exists. Every group is positioned at its first match beyond the page
-/// when the page is full, so the terminal claim (`None`) is exact.
+/// when the page is full, so the terminal claim (`None`) is exact. Both
+/// evaluations return the same page; they differ only in charges.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn query<'a>(
     state: &TypedState,
     loaders: &'a NamespaceLoaders<'a>,
@@ -1237,11 +1355,18 @@ pub(crate) fn query<'a>(
     projection: &Projection,
     limit: usize,
     after: Option<RecordId>,
+    evaluation: Evaluation,
     meter: &mut Meter<'_>,
 ) -> Result<(Vec<Row>, Option<RecordId>), Fault> {
-    evaluate(state, loaders, query, after, meter, |evaluator, meter| {
-        page(state, loaders, evaluator, projection, limit, meter)
-    })
+    evaluate(
+        state,
+        loaders,
+        query,
+        after,
+        evaluation,
+        meter,
+        |evaluator, meter| page(state, loaders, evaluator, projection, limit, meter),
+    )
 }
 
 fn page(
@@ -1268,22 +1393,45 @@ fn page(
     Ok((rows, None))
 }
 
-/// Counts every match of `query`: the same enumeration as a page walk with
-/// no row emitted.
+/// Counts every match of `query`. Written: the same enumeration as a page
+/// walk with no row emitted. Planned: see [`planner::count`].
 pub(crate) fn count<'a>(
     state: &TypedState,
     loaders: &'a NamespaceLoaders<'a>,
     query: &Query,
+    evaluation: Evaluation,
     meter: &mut Meter<'_>,
 ) -> Result<u64, Fault> {
-    evaluate(state, loaders, query, None, meter, |evaluator, meter| {
-        let mut total = 0u64;
-        while let Some(id) = evaluator.peek() {
-            total += 1;
-            evaluator.advance_past(state, loaders, id, meter)?;
-        }
-        Ok(total)
-    })
+    match evaluation {
+        Evaluation::Written => enumerate(state, loaders, query, evaluation, meter),
+        Evaluation::Planned => planner::count(state, loaders, query, meter),
+    }
+}
+
+/// Counts the distinct ids every group yields, merged as a page walk.
+fn enumerate<'a>(
+    state: &TypedState,
+    loaders: &'a NamespaceLoaders<'a>,
+    query: &Query,
+    evaluation: Evaluation,
+    meter: &mut Meter<'_>,
+) -> Result<u64, Fault> {
+    evaluate(
+        state,
+        loaders,
+        query,
+        None,
+        evaluation,
+        meter,
+        |evaluator, meter| {
+            let mut total = 0u64;
+            while let Some(id) = evaluator.peek() {
+                total += 1;
+                evaluator.advance_past(state, loaders, id, meter)?;
+            }
+            Ok(total)
+        },
+    )
 }
 
 /// A storage failure of a namespace-local walk outside metered execution.

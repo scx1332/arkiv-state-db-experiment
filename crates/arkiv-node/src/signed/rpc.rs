@@ -1232,7 +1232,7 @@ async fn detached(rt: &Shared, method: String, params: Value, id: Value) -> Resu
                 let Node::Full(h) = &*node else {
                     return Ok(None);
                 };
-                match super::rpc_reads::plan(h, &method, &params) {
+                match super::rpc_reads::plan(h, &method, &params, runtime.reads.limits()) {
                     Some(Ok(planned)) => planned,
                     Some(Err(e)) => return Ok(Some(error_with(id, e, h.refusal.take()))),
                     None => return Err(Error("MethodNotFound")),

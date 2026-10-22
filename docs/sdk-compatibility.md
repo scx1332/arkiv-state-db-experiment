@@ -103,6 +103,13 @@ longer than `--read-deadline-secs` (default 30) answers code `-32000`, message
 `ReadDeadlineExceeded`; one whose HTTP client disconnects is abandoned. Either
 way its walk stops at the next metering charge. Results, budgets and cursors
 are otherwise unchanged.
+
+Both are evaluated by a cost-based plan: each AND-group is driven by its
+smallest index posting whatever the clause order, other postings are checked
+by id instead of loading rows, and counts use the stored posting sizes where
+those decide them. The answers are exactly the clause-order evaluation's. The
+genesis bounds of 8 groups and 8 literals per group apply unless the node sets
+`--read-max-groups` (1–64) or `--read-max-literals` (1–256).
 HTTP batches contain at most 64 requests and total
 JSON responses are capped at 8 MiB. WebSocket sessions and subscriptions have
 additional bounded limits and disconnect rather than silently skip blocks if

@@ -2,10 +2,12 @@
 //! reads evaluated outside the node lock, bounded in concurrency and time.
 //!
 //! The node's state store adds a fixed delay to every object read of a
-//! namespace's maps, and the decoded-node cache is disabled, so a match-all
-//! `arkiv_getEntityCount` over the 256 prefilled entities takes seconds, a
-//! key lookup reads a few dozen objects and status, `eth_blockNumber`,
-//! admission and empty blocks read none.
+//! namespace's maps, and the decoded-node cache is disabled, so a count that
+//! must probe every row (a negated prefix: no posting answers it, so even
+//! the planned evaluation walks the row map) over the 256 prefilled
+//! entities takes seconds, a key lookup reads a few dozen objects and
+//! status, `eth_blockNumber`, admission and empty blocks read none. (A
+//! match-all count is answered from the stored row count.)
 //!
 //! What this file establishes:
 //! - While a heavy count runs, status, `eth_blockNumber`, a key lookup and
@@ -244,6 +246,7 @@ fn limits(concurrency: usize, deadline_secs: u64) -> ReadLimits {
     ReadLimits {
         concurrency,
         deadline: Duration::from_secs(deadline_secs),
+        ..ReadLimits::default()
     }
 }
 
@@ -348,6 +351,10 @@ async fn wait_for(what: &str, limit: Duration, mut condition: impl FnMut() -> bo
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
+/// The parameters of a count whose walk loads and probes every live row.
+fn heavy_count() -> Value {
+    json!([{"query":"NOT (n STARTSWITH str('x'))"}])
+}
 fn key_query(nonce: u64) -> String {
     format!("$key = key({})", hex(&entity_key(nonce)))
 }
@@ -373,13 +380,13 @@ async fn status_and_light_reads_answer_while_a_heavy_count_runs() {
     );
     assert_eq!(expected["data"].as_array().unwrap().len(), 1);
     assert_eq!(
-        in_lock(&node.rt, "arkiv_getEntityCount", json!([])),
+        in_lock(&node.rt, "arkiv_getEntityCount", heavy_count()),
         json!(ENTITIES)
     );
     node.store.delay_us.store(10_000, Relaxed);
     let heavy = tokio::spawn({
         let (client, url) = (client.clone(), node.public.url.clone());
-        async move { timed(rpc(&client, &url, "arkiv_getEntityCount", json!([]))).await }
+        async move { timed(rpc(&client, &url, "arkiv_getEntityCount", heavy_count())).await }
     });
     wait_for("the count's admission", Duration::from_secs(5), || {
         node.rt.reads_in_flight() == 1
@@ -432,7 +439,7 @@ async fn status_and_light_reads_answer_while_a_heavy_count_runs() {
     node.store.delay_us.store(10_000, Relaxed);
     let heavy = tokio::spawn({
         let (client, url) = (client.clone(), node.public.url.clone());
-        async move { rpc(&client, &url, "arkiv_getEntityCount", json!([])).await }
+        async move { rpc(&client, &url, "arkiv_getEntityCount", heavy_count()).await }
     });
     wait_for("the count's admission", Duration::from_secs(5), || {
         node.rt.reads_in_flight() == 1
@@ -458,7 +465,7 @@ async fn saturated_reads_are_refused_at_once_without_blocking_writes() {
     node.store.delay_us.store(10_000, Relaxed);
     let heavy = tokio::spawn({
         let (client, url) = (client.clone(), node.public.url.clone());
-        async move { rpc(&client, &url, "arkiv_getEntityCount", json!([])).await }
+        async move { rpc(&client, &url, "arkiv_getEntityCount", heavy_count()).await }
     });
     wait_for("the count's admission", Duration::from_secs(5), || {
         node.rt.reads_in_flight() == 1
@@ -531,7 +538,7 @@ async fn deadlines_and_departed_clients_stop_the_walk() {
     let client = reqwest::Client::new();
     let before = node.store.reads();
     assert_eq!(
-        in_lock(&node.rt, "arkiv_getEntityCount", json!([])),
+        in_lock(&node.rt, "arkiv_getEntityCount", heavy_count()),
         json!(ENTITIES)
     );
     let full_walk = node.store.reads() - before;
@@ -541,7 +548,7 @@ async fn deadlines_and_departed_clients_stop_the_walk() {
         &client,
         &node.public.url,
         "arkiv_getEntityCount",
-        json!([]),
+        heavy_count(),
     ))
     .await;
     assert_eq!(code, 200);
@@ -571,7 +578,8 @@ async fn deadlines_and_departed_clients_stop_the_walk() {
     // A client that disconnects abandons its read the same way.
     let address = node.public.url.strip_prefix("http://").unwrap();
     let body =
-        json!({"jsonrpc":"2.0","id":9,"method":"arkiv_getEntityCount","params":[]}).to_string();
+        json!({"jsonrpc":"2.0","id":9,"method":"arkiv_getEntityCount","params":heavy_count()})
+            .to_string();
     let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
     stream
         .write_all(

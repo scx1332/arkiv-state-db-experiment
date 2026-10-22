@@ -546,15 +546,61 @@ namespace's own distinct values. Match-all, negated and `NotEq` first
 literals are linear in the namespace's own live rows or existence posting
 per page scanned. None of this depends on other namespaces. A page carries
 no total because a total would need the full walk these rules avoid;
-`count` is the separate metered read for it. Nothing is reordered or planned:
-the charged cost and the abort point are a pure function of the state and the
-query text, so a caller chooses each group's index source by putting the
-selective positive literal first. A budget end anywhere rejects with
+`count` is the separate metered read for it. As written, nothing is
+reordered or planned: the charged cost and the abort point are a pure
+function of the state and the query text, so a caller chooses each group's
+index source by putting the selective positive literal first. A local read
+may instead opt in to planned evaluation (below), which every read of block
+execution, the expiry sweep included, never does. A budget end anywhere rejects with
 `OutOfBudget`, the units spent so far and no partial page. Every per-entry
 class (`PostingEntry`, `TermVisit`, `RowVisit`, `RecordProbe`) is charged one
 unit at a time immediately before the entry is used, after the node step that
 reveals it, like the milestone-1 scan: an `OutOfBudget` at entry k has charged
 exactly k−1 entries of that kind.
+
+Planned evaluation (local reads only). A query or count whose budget opts
+in (`Budget::planned`) returns exactly the rows, order, `next` claims and
+counts above, but chooses each group's index source by size; its charges are
+again a pure function of the state and the query (sizes are the posting entry
+counts stored in the term leaves), under these rules (the full statement is
+the `typed::planner` module documentation):
+
+1. Per group `QueryGroup` 1. A group no record can satisfy by the
+   one-cell-per-name rule (two types of one name, two `Eq` values of one
+   name, `Eq` with `NotEq` of the same value, a literal with its negation, a
+   positive literal with `NOT Exists` of its name and type) costs nothing
+   more. Otherwise, in written order, `TermSeek` 1 per term lookup: positive
+   `Eq`/`Exists` (a missing term empties the group), positive `NotEq` (its
+   existence term, then its value term), negated `Eq`/`Exists`. `Range`
+   literals on one `(name, type)` form one run over their intersected bounds;
+   each run is walked as above (`TermSeek` 1, `TermVisit` 1 per qualifying
+   term) and summed, stopping (the run becomes a row probe) once its matches
+   plus terms reach the cheapest source so far or after 65,536 terms while
+   another source competes.
+2. The driver is the smallest positive posting or the cheapest completed run
+   (ties: a posting, then the earlier literal); with neither, the smallest
+   `NotEq` existence posting, else the row map. Other positive postings
+   follow, smallest first, except one holding every live record; absent
+   postings (negated `Eq`/`Exists`, a `NotEq`'s value term) are probed largest
+   first; the remaining literals are row probes in written order.
+3. Candidates come from the driver as before (`PostingEntry` 1 or
+   `RowVisit` 1 each). Each follower is moved to the candidate by one step
+   (`PostingEntry` 1, only for a follower at most twice the driver's size)
+   and otherwise one repositioning from its root (`RecordProbe` 1); a
+   follower beyond the candidate moves the driver to its entry (a posting
+   driver steps once, then repositions with `RecordProbe` 1), and an
+   exhausted follower ends the group. An absent
+   posting is probed by id (`RecordProbe` 1); row probes load the row once,
+   `RecordProbe` 1 per literal.
+4. `count`: pairwise disjoint groups (by the rule of step 1 on their union)
+   are summed; a group left with its driver alone is its posting size, its
+   run's summed matches or the live row count, less absent postings that are
+   pairwise disjoint and inside the driver; any other group, and overlapping
+   groups, are enumerated as in step 3 without row charges.
+
+Under the vectors below, a planned count of match-all is 1 + 5 = 6, of
+`Exists(price, I64)` 1 + 5 + 4 = 10, and of `NotEq(kind, "pen")` 1 + 5 + 4 + 4
+= 14 (the existence posting of 3 less the value posting of 1: 2).
 
 Covered work. The following bounded steps are not charged separately; each
 is covered by the charge next to it, and none can grow with another

@@ -16,9 +16,12 @@ transaction hash is the Keccak hash of those original bytes. Native wire version
 1 is unchanged. Old binaries cannot replay new Ethereum transactions; upgrade
 all roles before sending them.
 
-Calls to `0x4400000000000000000000000000000000000044` decode the existing SDK's
+Calls to `0x4400000000000000000000000000000000000044` decode the SDK's
 `execute((uint8,bytes)[])` ABI into create, patch, extend, transfer-ownership and
-delete operations. Empty-data transfers to other addresses move native GLM.
+delete operations. Attribute triples follow the user-defined-columns model of
+the SDK's `udc/docs` branch: bit 7 of `typeId` marks an attribute indexed, user
+`bytes` attributes are stored unindexed, and there is no payload or content
+type (see the [node API reference](node-api-reference.md#entities-user-defined-columns)). Empty-data transfers to other addresses move native GLM.
 Execution remains atomic across the operations in one transaction. Failed
 transactions consume their transaction nonce and charge work, but roll back
 entity mutations, creation nonces and emitted events.
@@ -97,7 +100,7 @@ reads. They hold the node mutex only to check the height and pin its snapshot,
 then evaluate on that snapshot after releasing it, so a long count or scan no
 longer delays other requests or block production. At most
 `--read-concurrency` (default 4) detached reads run at once; another is refused
-immediately with code `-32005`, message `ServerBusy`, and a single HTTP request
+immediately with code `-32010`, message `ServerBusy`, and a single HTTP request
 also gets status 429 (a batch keeps per-entry errors). A detached read running
 longer than `--read-deadline-secs` (default 30) answers code `-32000`, message
 `ReadDeadlineExceeded`; one whose HTTP client disconnects is abandoned. Either
@@ -130,7 +133,7 @@ production. Rebuilding this derived index adds work proportional to retained
 history at startup. It does not replace the
 retained canonical data. Bodies are never pruned, so the index covers every
 block; with `--state-retention` logs and receipts below `receiptFloor` are
-refused with JSON-RPC error -32001 (see the [pruning design](pruning-design.md)).
+refused with JSON-RPC error -32006 (see the [pruning design](pruning-design.md)).
 There is no snapshot bootstrap.
 
 ## Validation

@@ -1,5 +1,61 @@
 # Changelog
 
+## Unreleased
+
+**Breaking:** user-defined columns (UDC), the entity model of the JS SDK's
+`udc/docs` branch. Protocol version 2. Genesis files, prefill streams, stores
+and SDK clients from earlier builds are refused; start a fresh chain.
+
+### Entity model
+- An entity is its seven system cells plus named, typed user attributes. The
+  payload and content type are gone: `$payload` and `$contentType` are no
+  longer created, writable, removable, queryable or returned.
+- Bit 7 (`0x80`) of an ABI attribute `typeId` marks the attribute indexed;
+  the low seven bits keep the type IDs 1–10. Indexed attributes are stored
+  as engine attributes (queryable), unindexed ones as fields (stored and
+  returned only). `bytes` is a user type, never indexed (`0x87` is refused).
+  Type 0 stays the patch-only tombstone and may not carry the flag.
+- A patch stores each attribute with the flag of its new triple.
+- Entity operations carry each attribute as an engine `Cell` (kind ‖ value),
+  so the flag is signed, encoded in blocks and replayed.
+- Each `bytes` value is at most 128 KiB, and the `bytes` values of the
+  resulting entity, after a create or patch, at most 128 KiB together
+  (`ArkivFault::EntityTooLarge`, tag 16).
+- At most 32 triples per create or patch. Signed genesis now requires
+  `max_cells` between 39 and 64, so the system cells always leave room for 32
+  user attributes; the default and preset profiles use 39.
+
+### JSON-RPC
+- `arkiv_query` entities match the SDK's `RpcEntity`: `attributeSchema`
+  entries are `{name, type, indexed}`, and `attributes` include unindexed
+  attributes, `bytes` values too. `select` takes the SDK's `RpcSelect` keys;
+  `payload` and `contentType` are refused as unknown keys.
+- Query refusals use the SDK's code table: -32001 parse (with `data`
+  `{position, expected, got}`), -32002 type, -32003 literal, -32004 limits,
+  -32005 cursor, -32006 block. `HistoryPruned` moves from -32001 to -32006 on
+  every method, `ServerBusy` from -32005 to -32010, and the WebSocket
+  subscription limit from -32005 to -32011.
+- Predicates never match unindexed attributes.
+- Verified equality pages list every attribute of each proven entity with its
+  `indexed` flag; the entity profile is `arkiv-entity-v3`.
+
+### Gas
+- Storage units count every cell's name, value and two tag bytes, whatever its
+  name; only indexed cells add the 128-unit posting reservation. The
+  calibration in `docs/glm-gas-v1.md` is regenerated.
+
+### Genesis
+- Prefill rows use row codec 3 in both framings (`ARKPFL01 ‖ u32(3)` and
+  `ARKPFL02 ‖ u32(3)`): each attribute is `CellName ‖ Cell`, with kind `01`
+  indexed and `02` unindexed; no payload or content type; at most 32
+  attributes and 128 KiB of `bytes` per row. See `docs/genesis-bundle-v1.md`.
+- Authored entities give each attribute exactly one typed value and an
+  explicit `indexed`; `bytes`, `bytes_text` and `bytes_file` spell bytes
+  values. Dataset formats are `arkiv-entities-toml-v2` and
+  `arkiv-entities-jsonl-v2`; the preset is `arkiv-entity-v3/glm-v2@1`.
+- `arkiv-proposer create` takes `--data-file` (an unindexed `bytes`
+  attribute `data`) instead of `--payload-file`.
+
 ## 0.1.0-alpha.2 — 2026-10-11
 
 Alpha pre-release. **Breaking:** state layout 2. Stores, genesis files and

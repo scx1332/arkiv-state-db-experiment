@@ -60,7 +60,8 @@ badge or unverified replacement rows. Invalid language returns
 
 The parser is pinned to the current reference node grammar, not every SDK
 helper. In particular `$updatedAt` and `$creationFlags` are projection-only in
-that grammar and `$payload` is not queryable, even though the playground has
+that grammar, entities have no `$payload` or `$contentType`, and predicates on
+user names match only indexed attributes, even though the playground has
 additional internal indexed fields exposed by the typed debug controls.
 This deliberate distinction is reported by the classifier, not silently
 expanded into an incompatible text language.

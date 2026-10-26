@@ -90,13 +90,15 @@ while the peer is offline; network availability is needed only to advance or
 fetch proofs. A changed signer or pinned identity is rejected.
 
 The `create` helper reads a public canonical genesis, local signer, explicit
-nonce/request ID and payload file, and writes a complete signed transaction:
+nonce/request ID and a data file (stored as an unindexed `bytes` attribute
+`data` beside an indexed `u64` attribute `group = 1`), and writes a complete
+signed transaction:
 
 ```sh
 target/debug/arkiv-proposer create \
   --key-file /tmp/user.key --genesis-file /tmp/signed-producer/genesis.bin \
   --nonce 0 --request-id 0xREQUEST_ID_64_HEX \
-  --payload-file /tmp/payload --out /tmp/create.tx
+  --data-file /tmp/payload --out /tmp/create.tx
 target/debug/arkiv-proposer submit \
   --peer http://127.0.0.1:9500 --transaction-file /tmp/create.tx
 ```
@@ -182,7 +184,7 @@ heights and pin a snapshot (plus identity and limits), then evaluates on a
 blocking thread after releasing it. A REST read gives back its admission slot
 once admitted. At most `--read-concurrency` (1–64, default 4) detached reads
 run at once; another is refused at once with `ServerBusy` (HTTP 429, JSON-RPC
-code `-32005`). A detached read running past `--read-deadline-secs` (1–3600,
+code `-32010`). A detached read running past `--read-deadline-secs` (1–3600,
 default 30) answers `ReadDeadlineExceeded` (HTTP 503, JSON-RPC code `-32000`),
 and one whose client disconnects is abandoned; its metered walk stops at the
 next charge and releases its permit. Status, headers, accounts, `eth_*` reads,

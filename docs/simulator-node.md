@@ -61,7 +61,8 @@ and optional expected head. Pause/resume acknowledge volatile desired runtime st
 Step commits its command digest/result height atomically with one normal block.
 Configuration is one bounded pending request, adopted by the next normal block;
 its revision and command inclusion survive restart. Only `payloadBytes`
-(0–131072) may change. Version, seed and logical period remain
+(0–131072, the size of the workload entities' unindexed `bytes` attribute
+`data`) may change. Version, seed and logical period remain
 immutable. Duplicate committed commands return the original height, including
 after a lost acknowledgement and restart; changed content conflicts.
 

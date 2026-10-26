@@ -122,7 +122,7 @@ recorded as a backstop.
 | `arkiv_query` with `atBlock` | state floor, checked on every page before the cursor lookup (a cursor is not a lease) |
 | `eth_getLogs` | receipt floor, the whole range up front |
 | `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getBlockByHash`, `eth_getFilterLogs`, `eth_getFilterChanges` | receipt floor |
-| WebSocket `logs`/`newHeads` replay | if the next height is refused, one `eth_subscription` notification carries `params.error` (code -32001) and the subscription is dropped |
+| WebSocket `logs`/`newHeads` replay | if the next height is refused, one `eth_subscription` notification carries `params.error` (code -32006) and the subscription is dropped |
 | Signed REST `accounts/{a}[?height]`, `accounts/{a}/proof`, `query/eq`, `query/range`, `state/explore` | state floor |
 | Simulator REST `query/eq` | state floor |
 | Light verified, inspect and account endpoints | relay the full peer's refusal as `HistoryPruned` |
@@ -130,7 +130,7 @@ recorded as a backstop.
 
 **Errors.**
 
-- JSON-RPC: code `-32001`, message `history pruned: requested N, floor F`
+- JSON-RPC: code `-32006` (the SDK query table's `block` kind), message `history pruned: requested N, floor F`
   (decimal), `data: {"requested": "0x..", "floor": "0x.."}`.
 - REST (signed and simulator): HTTP `410 Gone`,
   `{"error":"HistoryPruned","requestedHeight":"N","stateFloor":"F"}`. A light

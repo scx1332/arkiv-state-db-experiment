@@ -61,7 +61,10 @@ import the dataset or independently establish dataset completeness.
 ## Canonical identity and memory
 
 V2 has an explicit launch version, `ARKPFL02` stream framing and separate hash
-domains. V1 encodings, admission caps and builder behavior remain unchanged.
+domains. Its header is `ARKPFL02 ‖ u32(3) ‖ u64(row_count)`: row codec 3, the
+user-defined-columns row of [the v1 contract](genesis-bundle-v1.md), which both
+framings share (codec 2, the payload-era row, is refused). Each frame is
+`u32(frame_length) ‖ Entity`, exactly the small stream's row encoding.
 Each frame is bounded to 8 MiB and decoded independently. Frames have increasing
 creator addresses and consecutive per-creator creation nonces. Attribute order,
 value encoding, row counts, total length, trailing bytes and the incremental
@@ -92,10 +95,12 @@ history/header stores keep the default 8 MiB redb cache. The installing process
 retains its larger destination cache until exit.
 
 Buffer/cache settings do not enter genesis identity. Roots and accounting are
-compared with the existing v1 builder on compatible fixtures. The v2 frame
-format allows up to 55 user attributes, but current entity-operation validation
-admits at most 32 supplied attributes including payload and content type, hence
-at most 30 user attributes. The real fixture's 29 attributes remain supported.
+compared with the existing v1 builder on compatible fixtures. A frame carries
+at most 32 user attributes, as a live create does; with no payload or content
+type cells, the seven system cells leave all 32 to the user. Indexed
+attributes (cell kind `01`) are posted; unindexed ones (`02`, and every
+`bytes` value) are stored only. A row's `bytes` values hold at most 128 KiB
+together.
 Lifetime is finite in a version-2 launch. A version-4 launch, built on a base
 genesis authored with `[prefill] allow_permanent = true`, also admits rows whose
 expiry is the `u64::MAX` never-expires sentinel. They are created permanent,

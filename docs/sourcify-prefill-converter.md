@@ -1,5 +1,14 @@
 # Sourcify prefill conversion
 
+> **Outdated by user-defined columns.** This converter still emits the
+> payload-era row codec 2 (`ARKPFL02 ‖ u32(2)`, with a content type and
+> payload per row), which current nodes refuse. A converter for this node must
+> emit row codec 3 as specified in
+> [the genesis bundle contract](genesis-bundle-v1.md#versions-and-identity):
+> for example the payload as an unindexed `bytes` attribute and the content
+> type as a `str` attribute, each attribute with its indexed flag. The
+> description below is of the codec-2 converter.
+
 `scripts/sourcify-prefill.py` converts a completed, checksummed Sourcify processor
 or supported helper export into the experimental v2 canonical entity stream. It preserves the
 source's compressed payload bytes, typed attributes, semantic content hashes

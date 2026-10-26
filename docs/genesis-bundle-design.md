@@ -148,20 +148,22 @@ create_nonce = "0"
 salt = "10"
 expires_at_height = "86400"
 flags = 0
-content_type = "text/plain"
-payload_text = "Welcome to Arkiv."
-attributes.title = { str = "Welcome" }
+attributes.body = { bytes_text = "Welcome to Arkiv.", indexed = false }
+attributes.title = { str = "Welcome", indexed = true }
 ```
 
 Authoring permits exactly one inline allocation list or allocation-file
 reference. Inline entities and dataset sources can coexist; the same global
 sorting/duplicate rules apply to their union. Account aliases resolve only
-against unique labels in the current allocations. `payload_text` encodes exact
-decoded UTF-8 bytes. A binary exporter can use `payload_base64` with strict
-standard padded Base64 and no whitespace, keeping large JSONL datasets independent
-of a one-file-per-entity layout. Exactly one of text, Base64 or a payload-file
-reference is allowed; all decode to bytes under the same payload/frame limits.
-The canonical stream has neither aliases nor inline/file distinctions.
+against unique labels in the current allocations. Entities follow the
+user-defined-columns model (entity rules `arkiv-entity-v3`): no payload or
+content type, only attributes, each with exactly one typed value and an
+explicit `indexed` flag. A `bytes` value (never indexed) is spelled `bytes`
+(strict standard padded Base64, no whitespace), `bytes_text` (exact decoded
+UTF-8) or `bytes_file` (a pinned source file), keeping large JSONL datasets
+independent of a one-file-per-entity layout; all decode to bytes under the
+same value/frame limits. The canonical stream has neither aliases nor
+inline/file distinctions.
 
 `genesis lock chain.toml` writes a generated `genesis.lock.toml`: it pins the
 authoring source and every transitive file by hash/length, expands the selected
@@ -240,13 +242,16 @@ genesis hash, so root construction has no circular dependency.
 
 ### Canonical prefill stream
 
-The proposed stream layout is `ASCII("ARKPFL01") || u32(codec_version) ||
-u64(row_count) || repeated(u32(frame_length) || encode(EntityV1))`.
-`EntityV1` fields, in order, are creator `[u8;20]`, creation nonce `u64`, salt
-`u128`, expiry height `u64`, flags `u8`, content type `str`, payload `bytes`, then
-`u32(attribute_count)` pairs of `(CellName, Value)`. Use the pinned engine value
-codec, not public SDK type IDs as internal tags. Payload references and account
-aliases are resolved before encoding. No system attributes appear in this
+The stream layout is `ASCII("ARKPFL01") || u32(codec_version) ||
+u64(row_count) || repeated(u32(frame_length) || encode(Entity))`, with codec
+version 3 (user-defined columns). `Entity` fields, in order, are creator
+`[u8;20]`, creation nonce `u64`, salt `u128`, expiry height `u64`, flags `u8`,
+then `u32(attribute_count)` pairs of `(CellName, Cell)`, where the cell kind is
+the attribute's indexed flag. Use the pinned engine value codec, not public SDK
+type IDs as internal tags; the exact bytes are in
+[the implemented contract](genesis-bundle-v1.md#versions-and-identity). (Codec
+versions 1 and 2 carried a content type and payload and are retired.) File
+references and account aliases are resolved before encoding. No system attributes appear in this
 user-attribute list. Attributes sort by exact name bytes, with duplicates rejected.
 
 Sort the entire logical stream by `(creator address bytes, creation nonce as
@@ -280,7 +285,7 @@ Each row is validated as a whole; any invalid input rejects the entire launch.
 | Entity key | Reuse current `derive_entity_key`: `Keccak256(24 zero bytes || chain_id:u64be || ARKIV_ADDRESS:20 || creator:20 || creation_nonce:u64be || salt:u128be)`. Reject any derived key collision. |
 | Entity ownership | `$creator = $owner = creator`. No genesis transfer shortcut in version 1. A third party installing an entity does not prove the creator signed it: launch authority explicitly assigns these initial entities. |
 | System heights | `$createdAt = $updatedAt = 0`; `$expiresAt` is the explicit finite expiry height. Header timestamp is the configured millisecond timestamp. |
-| Remaining cells | Generate `$key`, `$creationFlags`, `$payload`, `$contentType` with the current types/indexing. Flags permit only bits 0/1. Require explicit flags/content type/payload in canonical rows; empty values are valid. Preserve current total-cell and value limits, including generated cells. |
+| Remaining cells | Generate `$key` and `$creationFlags` with the current types/indexing; there is no payload or content type. Flags permit only bits 0/1. User attributes keep their indexed flag. Preserve current total-cell and value limits, including generated cells: 32 user attributes plus 7 system cells fit the required 39-cell minimum. |
 | Entity nonce | The current `arkiv/nonce/` host counter is `N` for each creator with `N` imported entities; omit zero counters. The next live create uses nonce `N`. Salt need not be unique if its creator/nonce tuple differs. |
 | Account nonce | Every allocation starts at transaction nonce 0; the namespace and entity import consume no account transaction nonce. Omit all default account records except a sponsor with a positive debit. |
 | Expiry state | Materialize exactly the normal due/total counters and indexed `$expiresAt` values. Counts match rows, zero entries are omitted, and every finite height fits the reservation. |

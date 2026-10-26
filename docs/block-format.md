@@ -255,7 +255,7 @@ for the encoding, `crates/arkiv-db/tests/golem_types.rs`
 `crates/arkiv-db/tests/ordered_ranges.rs` for the order of the byte-ordered
 types. The Arkiv entity namespace (`arkiv/schema.rs`, signed JSON-RPC)
 admits only the ten Arkiv SDK types (`bool`, `i32`, `u64`, `u256`, `dec`,
-`bytes32`, `bytes` as payload, `str`, `addr`, `key`).
+`bytes32`, `bytes`, `str`, `addr`, `key`); `bytes` only as an unindexed field.
 
 `CellKind`: 1 `Attribute`, 2 `Field`.
 
@@ -413,10 +413,14 @@ signed proposer add durable node storage.
   with it; another format version is refused (`UnsupportedVersion { kind:
   "block format" }` or `{ kind: "header" }` when decoding,
   `GenesisError::UnsupportedFormat` from `ChainSpec::new`).
-- **Protocol version** `PROTOCOL_VERSION = 1` names the execution rules of
+- **Protocol version** `PROTOCOL_VERSION = 2` names the execution rules of
   this document. The genesis records it; another protocol is refused
   (`UnsupportedVersion { kind: "protocol" }`,
-  `GenesisError::UnsupportedProtocol`).
+  `GenesisError::UnsupportedProtocol`). Version 2 is the user-defined-columns
+  entity model: `ArkivOperation` attributes are cells carrying their indexed
+  flag, user `bytes` exist, and there is no payload or content type. Version
+  1 (attributes as bare values, `$payload` and `$contentType`) is retired, so
+  its genesis files and stores are refused rather than reinterpreted.
 - Every header carries its block's terminal state root; there is one
   header layout.
 - Tags start at 1 (except the two request scopes, fixed at `00`/`01`), are
@@ -479,10 +483,14 @@ creations and patches, an Arkiv entity operation and a native transfer):
 | 9 | `Transfer` | `to: OwnerId ‖ amount: 32 bytes, big-endian` |
 
 `ArkivOperation` (`crates/arkiv-node/src/arkiv`): 1 `Create { salt: 16
-bytes ‖ flags u8 ‖ expiry: Expiry ‖ attributes: Vec<(CellName, Value)> }`,
-2 `Patch { key ‖ set: Vec<(CellName, Value)> ‖ remove: Vec<CellName> }`,
+bytes ‖ flags u8 ‖ expiry: Expiry ‖ attributes: Vec<(CellName, Cell)> }`,
+2 `Patch { key ‖ set: Vec<(CellName, Cell)> ‖ remove: Vec<CellName> }`,
 3 `ExtendExpiry { key ‖ expiry }`, 4 `TransferOwnership { key ‖ owner: 20
-bytes }`, 5 `Delete { key }`.
+bytes }`, 5 `Delete { key }`. A user attribute's `Cell` is `kind ‖ Value`
+(part 1): kind `01` (attribute) is an indexed attribute, the ABI `typeId`
+with bit 7 (`0x80`) set; kind `02` (field) is an unindexed one. `bytes`
+values are always fields. A patch's `set` stores each cell with its own kind,
+so a patch may index or unindex an attribute.
 
 `AdminOutcome`: 1 `Applied`, 2 `Rejected` followed by the `AdminRejection`.
 `AdminRejection`: 1 `ReservationViolated`, 2 `ReservationOverflow`,
@@ -505,7 +513,8 @@ gas schedule cannot be entered or changed through admin repricing).
 
 `HostFault`: 1 `ExpiryCapacityFull`, 2 `ExpiryInvalid` followed by the
 `ExpiryFault`, 3 `ExpiryShortened`, 4 `Arkiv` followed by the `ArkivFault`
-(one byte, 1 `Name` … 15 `UnsupportedGasOperation`), 5 `Account` followed by
+(one byte, 1 `Name` … 15 `UnsupportedGasOperation`, 16 `EntityTooLarge`:
+the `bytes` cells of the resulting entity would exceed 128 KiB), 5 `Account` followed by
 the `AccountFault` (1 `InsufficientBalance`, 2 `Overflow`, 3 `Unsupported`). `ExpiryFault`: 1 `Overflow`,
 2 `DeadOnArrival`, 3 `TooFar`. `Scope`: `00` transaction, `01` admin.
 
@@ -539,7 +548,7 @@ state.
 `ChainSpec::new` accepts a genesis only if (all arithmetic checked; an
 overflow fails the check):
 
-- format version 1 and protocol version 1;
+- format version 1 and protocol version 2;
 - `1 ≤ max_ops_per_tx ≤ max_ops_per_block`, `max_txs_per_block ≥ 1`,
   `expiry_per_block ≥ 1`, `user_budget ≥ 1`;
 - `8 + max_admin_per_block × MAX_ADMIN_BYTES + max_tx_bytes ≤

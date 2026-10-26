@@ -33,6 +33,19 @@ Rust ordering. Catalog and host state matter as much as query indexes: creator
 nonces, expiry counters, namespace/record allocators and sponsor accounting all
 contribute to the final state.
 
+## Row format
+
+Bulk construction consumes the same canonical rows as the small builder:
+`ARKPFL02 ‖ u32(3) ‖ u64(row_count)`, then `u32(frame_length) ‖ Entity` frames
+in row codec 3 (user-defined columns). The exact byte contract a converter must
+emit, including the per-attribute indexed flag (cell kind `01` indexed, `02`
+unindexed), user `bytes` (always unindexed, at most 128 KiB per value and per
+row), at most 32 attributes, and the absence of any payload or content type, is
+in [the genesis bundle contract](genesis-bundle-v1.md#versions-and-identity).
+Each row is validated exactly as a live `Create` of its attributes, and its
+cells are the seven system cells followed by those attributes. Indexed cells
+become term/posting memberships; unindexed cells are written to the row only.
+
 ## Resource and recovery requirements
 
 Memory usage is bounded by configured sorting, merging and object-write buffers,

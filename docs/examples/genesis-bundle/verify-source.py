@@ -81,7 +81,7 @@ require(manifest["chain"]["proposer"] in balances, "example proposer allocation 
 
 rows = []
 for dataset in manifest["prefill"]["dataset"]:
-    require(dataset["format"] == "arkiv-entities-toml-v1", "example selects TOML")
+    require(dataset["format"] == "arkiv-entities-toml-v2", "example selects TOML")
     source = read_toml(pinned(dataset))
     require(source["schema"] == dataset["format"], "dataset schema")
     rows.extend(source["entity"])
@@ -93,7 +93,8 @@ require(rows == alternative, "TOML/JSONL records differ")
 require(len(rows) <= uint(manifest["prefill"]["limits"]["max_entities"]), "row count")
 expiry_counts = Counter()
 nonces = defaultdict(list)
-payload_bytes = 0
+bytes_total = 0
+VALUE_TAGS = {"bool", "i32", "u64", "u256", "dec", "str", "bytes", "bytes_text", "bytes_file", "bytes32", "addr", "key"}
 for row in rows:
     require(re.fullmatch(r"0x[0-9a-f]{40}", row["creator"]), "creator address")
     nonces[row["creator"]].append(uint(row["create_nonce"]))
@@ -104,12 +105,24 @@ for row in rows:
     expiry_counts[expiry] += 1
     require(type(row["flags"]) is int and 0 <= row["flags"] <= 3, "creation flags")
     require(not any(name.startswith("$") for name in row["attributes"]), "system override")
-    require(len(row["attributes"]) + 9 <= profile["engine_limits"]["max_cells"], "total cells")
-    payload_bytes += pinned(row["payload"]).stat().st_size
+    require(not {"content_type", "payload", "payload_text", "payload_base64"} & row.keys(), "payload model")
+    require(len(row["attributes"]) <= 32, "attributes per entity")
+    require(len(row["attributes"]) + 7 <= profile["engine_limits"]["max_cells"], "total cells")
+    entity_bytes = 0
+    for name, attribute in row["attributes"].items():
+        tags = VALUE_TAGS & attribute.keys()
+        require(len(tags) == 1 and set(attribute) == tags | {"indexed"}, f"attribute {name}")
+        require(type(attribute["indexed"]) is bool, f"indexed flag {name}")
+        if "bytes_file" in tags:
+            entity_bytes += pinned(attribute["bytes_file"]).stat().st_size
+        if tags & {"bytes", "bytes_text", "bytes_file"}:
+            require(not attribute["indexed"], f"indexed bytes {name}")
+    require(entity_bytes <= 128 * 1024, "entity bytes")
+    bytes_total += entity_bytes
 for creator, values in nonces.items():
     require(sorted(values) == list(range(len(values))), f"creation nonces: {creator}")
 require(max(expiry_counts.values(), default=0) <= profile["chain_params"]["expiry_per_block"], "expiry reservation")
 
-print(f"Verified example source pins; {len(rows)} equivalent TOML/JSONL entities, {payload_bytes} payload bytes.")
+print(f"Verified example source pins; {len(rows)} equivalent TOML/JSONL entities, {bytes_total} bytes-attribute bytes.")
 print(f"Gross initial supply: {initial_supply} wei. Peak expiry count: {max(expiry_counts.values(), default=0)}.")
 print("No rent debit, canonical encoding, state root or launch certificate is calculated by this source audit.")

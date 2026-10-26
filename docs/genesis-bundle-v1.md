@@ -7,19 +7,23 @@ the machine fields and runtime behavior of the bounded implementation.
 ## Versions and identity
 
 `arkiv-launch-prefill-v1` is a signed genesis (version 1) whose optional
-`PrefillLaunch` is present. It uses the one native block format and protocol
-(version 1), state layout 1 and codec 1, and the `glm-v2` gas profile. A chain
-without a prefill uses the same signed genesis layout with the prefill absent
-and creates its entity namespace in block 1 instead. Prefills require a new
-chain/run directory. The builtin `arkiv-entity-v2/glm-v2@1` expands immutable
-constants; no dynamic base fees are enabled.
+`PrefillLaunch` is present. It uses the one native block format (version 1),
+protocol version 2 (the user-defined-columns entity model), state layout 1
+and codec 1, and the `glm-v2` gas profile. A chain without a prefill uses the
+same signed genesis layout with the prefill absent and creates its entity
+namespace in block 1 instead. Prefills require a new chain/run directory. The
+builtin `arkiv-entity-v3/glm-v2@1` expands immutable constants (entity rules
+`arkiv-entity-v3`, 39 cells per record); no dynamic base fees are enabled.
 
 Integers are checked fixed-width big-endian. Strings and bytes have u32 byte
 lengths. Fixed arrays carry no length; counted sequences have the stated count.
 Digests use `Keccak256(u8(domain.len) || ASCII(domain) || bytes)`.
 
-`prefill.bin` is `"ARKPFL01" || u32(1) || u64(row_count)`, followed by repeated
-`u32(frame_length) || EntityV1`. Entity fields are:
+`prefill.bin` is `"ARKPFL01" || u32(3) || u64(row_count)`, followed by repeated
+`u32(frame_length) || Entity`. The `u32` is the row codec: codec 3 is the
+user-defined-columns row, shared with the file-backed `ARKPFL02` framing.
+Codecs 1 and 2 (rows with a content type and payload) are refused. Entity
+fields are:
 
 | Field | Encoding |
 | --- | --- |
@@ -27,14 +31,51 @@ Digests use `Keccak256(u8(domain.len) || ASCII(domain) || bytes)`.
 | Creation nonce | u64 |
 | Salt | u128 |
 | Expiry height | u64 |
-| Flags | u8 |
-| Content type | string |
-| Payload | bytes |
-| Attributes | u32 count, repeated `(CellName, Value)` using engine codec 2 |
+| Flags | u8 (bits 0 and 1 only) |
+| Attributes | u32 count (at most 32), repeated `CellName ‖ Cell` in the engine codec |
+
+`CellName` is `u32(len) ‖ UTF-8 name`. `Cell` is `kind u8 ‖ Value`, where kind
+`01` is an indexed attribute and `02` an unindexed one (any other kind is
+refused). `Value` is the engine's `tag u8 ‖ payload`, with engine tags, not
+SDK type IDs. Fixed-width payloads are the engine's term bytes: big-endian,
+and for the signed types two's complement with the sign bit flipped.
+
+| SDK type | Tag | Payload |
+| --- | --- | --- |
+| `bool` | `01` | `00` or `01` |
+| `str` | `02` | `u32(len) ‖ UTF-8` |
+| `bytes` | `03` | `u32(len) ‖ bytes` |
+| `addr` | `04` | 20 bytes |
+| `bytes32` | `0b` | 32 bytes |
+| `u64` | `0d` | 8 bytes |
+| `u256` | `0f` | 32 bytes |
+| `i32` | `10` | 4 bytes, sign bit flipped (`-1` is `7fffffff`) |
+| `dec` | `17` | 32 bytes: the 18-decimal-place integer, sign bit flipped |
+| `key` | `40` | 32 bytes |
+
+For example, the indexed attribute `arkiv.schema = "posts"` is
+`0000000c 61726b69762e736368656d61 01 02 00000005 706f737473`.
+`crates/arkiv-node/src/genesis_bundle.rs` pins one complete row in its tests
+(`row_codec_layout_is_pinned`). A frame is exactly one row: a short, long or
+noncanonical frame is refused.
+
+A converter must emit, for each row, the attributes a live SDK create would
+write, with no system names:
+
+- names are SDK names (`^[A-Za-z][A-Za-z0-9._-]*$`, at most 32 bytes, no
+  `--`, no reserved word), strictly ascending by their bytes; `arkiv.schema`
+  is an ordinary name, and a named schema's tag is an indexed `str`;
+- only the ten SDK types: no `I64` or other engine-only types;
+- a `str` of at most 128 UTF-8 bytes without C0 controls or DEL;
+- a `bytes` value of at most 128 KiB, always with kind `02`, and at most
+  128 KiB of `bytes` values in the row together;
+- kind `01` for every attribute the chain must answer queries on: an
+  unindexed attribute is stored and returned but never matched.
 
 Rows sort by creator bytes then numeric creation nonce. Nonces for each creator
-are exactly `0..N-1`. Attribute names sort by their exact bytes. No aliases, source
-paths, caller-provided keys or system attributes enter the canonical rows.
+are exactly `0..N-1`. No aliases, source paths, caller-provided keys or system
+attributes enter the canonical rows. Each row is created exactly as a live
+`Create` with those attributes and the seven system cells.
 `stream_hash = digest("arkiv/prefill-stream/v1", prefill.bin)`.
 
 Recipe fields, in order, are `u32(1), native Genesis, run_id[16], proposer[20],
@@ -131,7 +172,8 @@ installation, but no partial state is published or served. Restart does not
 debit genesis rent again.
 
 Ceilings are 256 rows, 1 MiB canonical stream, 8 MiB logical storage units,
-128 KiB per value, 23 user attributes (32 total cells), 256 positive allocations,
+128 KiB per value and per row's `bytes` values together, 32 user attributes
+(39 total cells), 256 positive allocations,
 1 MiB per source, 8 MiB aggregate sources and 512 source files. Durable defaults
 add 32 MiB prepared bytes, 100,000 objects and 1,000,000 visits. Any exceeded bound
 fails explicitly. This implementation uses bounded memory sorting and one atomic

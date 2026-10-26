@@ -36,12 +36,20 @@ For the complete committed entity, including its system attributes:
 
 ```
 units = 512
-      + payload byte length
-      + sum(non-payload cell name UTF-8 bytes + value encoded bytes + 2 tags)
+      + sum(cell name UTF-8 bytes + value encoded bytes + 2 tags)
       + 128 × indexed cell count
 
 create rent = ceil(units × lifetime blocks × 8 / 17280)
 ```
+
+Every cell's data is storage, whatever its name or type: a 1 KiB `bytes`
+attribute costs its name, 1,024 value bytes and two tags like any other cell.
+Only indexed cells (`CellKind::Attribute`: the system cells except
+`$creationFlags`, and user attributes written with the `0x80` indexed flag)
+add the 128-unit posting reservation; an unindexed attribute, and every
+`bytes` value, pays storage only. Under the user-defined-columns model no name
+is special-cased (the former `$payload` exemption from name and tag bytes is
+gone with the payload itself).
 
 The 512-unit base reserves entity/key and fixed bookkeeping overhead. Each
 128-unit indexed-cell allowance covers its value and typed-presence posting
@@ -101,24 +109,25 @@ The full price array lives in `crates/arkiv-node/src/gas.rs`. Invalid operations
 still consume their preceding work; gas is a capacity budget, not only a count
 of successfully written entities.
 
-The executable calibration creates real entities, with generated system
-attributes and `application/json` content type, runs the actual engine/host
-meter, and reports actual gas. Its sizes below include only the indicated user
-payload; its attribute count excludes system attributes and content type.
+The executable calibration creates real user-defined-columns entities: the
+generated system attributes, an unindexed `bytes` attribute `body` of the
+indicated size, an unindexed `str` attribute `format` (`application/json`)
+and the indicated number of indexed `u64` attributes. It runs the actual
+engine/host meter and reports actual gas.
 
-| Payload | User attributes | Lifetime at 5 s/block | Execution gas | Rent gas | Total gas | GLM at 1 gwei |
+| `body` bytes | Indexed `u64` attributes | Lifetime at 5 s/block | Execution gas | Rent gas | Total gas | GLM at 1 gwei |
 | --- | ---: | --- | ---: | ---: | ---: | ---: |
-| 256 B | 2 | 1 day | 59,818 | 17,280 | 77,098 | 0.000077098 |
-| 1 KiB | 4 | 7 days | 67,882 | 179,984 | 247,866 | 0.000247866 |
-| 1 KiB | 4 | 30 days | 67,882 | 771,360 | 839,242 | 0.000839242 |
-| 16 KiB | 4 | 7 days | 160,042 | 1,040,144 | 1,200,186 | 0.001200186 |
-| 128 KiB | 4 | 30 days | 848,170 | 31,982,880 | 32,831,050 | 0.03283105 |
+| 256 B | 2 | 1 day | 58,358 | 16,256 | 74,614 | 0.000074614 |
+| 1 KiB | 4 | 7 days | 66,422 | 172,816 | 239,238 | 0.000239238 |
+| 1 KiB | 4 | 30 days | 66,422 | 740,640 | 807,062 | 0.000807062 |
+| 16 KiB | 4 | 7 days | 158,582 | 1,032,976 | 1,191,558 | 0.001191558 |
+| 128 KiB | 4 | 30 days | 846,710 | 31,952,160 | 32,798,870 | 0.03279887 |
 
 Thus small ordinary transactions land in the requested approximately 50,000–
 1,000,000 gas range. Large or long-lived entities deliberately cost more; there
 is no arbitrary cap forcing them into the standard range. A standard 1 KiB
-entity's canonical key-and-cells encoding is 1,401 bytes and its logical
-occupancy is 3,214 units; these measurements are not a physical trie/disk/RAM
+entity's canonical key-and-cells encoding is 1,391 bytes and its logical
+occupancy is 3,086 units; these measurements are not a physical trie/disk/RAM
 benchmark. Hardware-based calibration remains future work.
 
 Reproduce the table:

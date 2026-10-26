@@ -60,6 +60,7 @@ def main():
             os.environ,
             ARKIV_PROPOSER_TOKEN=secrets.token_hex(32),
             SDK_RPC_URL=endpoints["producer"],
+            SDK_PRIVATE_URL=endpoints["private"],
             SDK_REPORT_FILE=str(work / "sdk-report.json"),
         )
         # Keep the three prefills alive during the SDK run and speed up isolated blocks.
@@ -70,6 +71,19 @@ def main():
             source = source.replace(
                 f'expires_at_height = "{old}"', f'expires_at_height = "{new}"'
             )
+        # The preset with a 200,000-unit storage cap per block: one full
+        # 128 KiB entity fits a block, two do not.
+        profile = (ROOT / "docs/examples/genesis-bundle/profiles/fixed-glm-v2.toml").read_text()
+        assert 'max_new_storage_units_per_block = "1500000"' in profile
+        (work / "profile.toml").write_text(
+            profile.replace(
+                'max_new_storage_units_per_block = "1500000"',
+                'max_new_storage_units_per_block = "200000"',
+            )
+        )
+        preset = 'profile = { preset = "arkiv-entity-v3/glm-v2@4" }'
+        assert preset in source
+        source = source.replace(preset, 'profile = { path = "profile.toml" }')
         (work / "chain.toml").write_text(source)
         (work / "proposer.key").write_text("0x" + "01" * 32)
         (work / "proposer.key").chmod(0o600)

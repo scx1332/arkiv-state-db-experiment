@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync } from "node:fs"
 import { createPublicClient, createWalletClient, ExpirationTime } from "@arkiv-network/sdk"
 import { and, eq, gt } from "@arkiv-network/sdk/query"
 import { addr, bytes, dec, defineSchema, str, u64 } from "@arkiv-network/sdk/schema"
-import { bytesToHex, http } from "viem"
+import { bytesToHex, http, toFunctionSelector } from "viem"
 import { privateKeyToAccount } from "viem/accounts"
 
 const url = process.env.SDK_RPC_URL!
@@ -267,8 +267,13 @@ assert.equal(carols.expiresAt, PERMANENT)
 assert.equal(await nonceOf(carol.address), 1n)
 step("topped up with gas plus rent, the same call commits")
 
-// Only the owner makes an entity permanent: a permissionless-extension entity
-// takes anyone's finite extension, never another account's permanence.
+const status = (await (await fetch(`${url}/signed/v1/status`)).json()) as any
+const gas = status.capabilities.gas
+
+// A permissionless-extension entity takes anyone's extension up to one rent
+// cap ahead; further, permanence included, is its owner's alone.
+const cap = BigInt(gas.maxRentLifetimeBlocks)
+const permanenceOwnerOnly = toFunctionSelector("PermanenceOwnerOnly(bytes32,uint64,uint64)")
 const open = await write.createEntity(
   Probe,
   { purpose: "permissionless" },
@@ -279,20 +284,76 @@ const farther = await carolWrite.extendEntity({
   expiration: ExpirationTime.fromBlocks(20_000),
 })
 assert.ok(farther.expiresAt > open.expiresAt)
-await assert.rejects(
-  carolWrite.extendEntity({ entityKey: open.entityKey, expiration: ExpirationTime.permanent() }),
-  (e: any) => /owned by|NotOwner/i.test(describe(e)) || assert.fail(describe(e)),
-)
-assert.equal((await read.getEntity(open.entityKey)).$expiresAt, farther.expiresAt)
+const atCap = await carolWrite.extendEntity({
+  entityKey: open.entityKey,
+  expiration: ExpirationTime.fromBlocks(Number(cap)),
+})
+assert.ok(atCap.expiresAt > farther.expiresAt)
+for (const expiration of [
+  ExpirationTime.fromBlocks(Number(cap) + 100),
+  ExpirationTime.permanent(),
+]) {
+  await assert.rejects(
+    carolWrite.extendEntity({ entityKey: open.entityKey, expiration }),
+    (e: any) => describe(e).toLowerCase().includes(permanenceOwnerOnly) || assert.fail(describe(e)),
+  )
+}
+assert.equal((await read.getEntity(open.entityKey)).$expiresAt, atCap.expiresAt)
 const owned = await write.extendEntity({
   entityKey: open.entityKey,
   expiration: ExpirationTime.permanent(),
 })
 assert.equal(owned.expiresAt, PERMANENT)
-step("anyone extends a permissionless entity finitely; only its owner makes it permanent")
+step(
+  `anyone extends a permissionless entity up to ${cap} blocks ahead; further and permanence are the owner's (${permanenceOwnerOnly})`,
+)
 
-const status = (await (await fetch(`${url}/signed/v1/status`)).json()) as any
-const gas = status.capabilities.gas
+// The per-block storage cap (200,000 units here): two full 128 KiB entities
+// submitted together land in consecutive blocks, the second deferred, not
+// dropped. The producer is paused while both enter the pool.
+assert.equal(gas.maxNewStorageUnitsPerBlock, "200000")
+// Native REST answers 429 while busy, before doing anything: retry that only.
+const control = async (action: string) => {
+  for (let tries = 0; ; tries++) {
+    const response = await fetch(`${process.env.SDK_PRIVATE_URL}/signed/v1/control`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.ARKIV_PROPOSER_TOKEN}`,
+      },
+      body: JSON.stringify({ action }),
+    })
+    if (response.ok) return
+    assert.ok(response.status === 429 && tries < 100, `${action}: ${response.status}`)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+}
+const pendingNonce = async (who: string) =>
+  BigInt(await call("eth_getTransactionCount", [who, "pending"]))
+const bob = privateKeyToAccount(`0x${"03".repeat(32)}`)
+const bobWrite = createWalletClient({ chain, transport, account: bob, pollingInterval: 100 })
+const before = [await pendingNonce(alice.address), await pendingNonce(bob.address)]
+await control("pause")
+const pair = [write, bobWrite].map((client) =>
+  client.createEntity(Blob, { body: maxBody }, { expiration }),
+)
+for (let tries = 0; ; tries++) {
+  const now = [await pendingNonce(alice.address), await pendingNonce(bob.address)]
+  if (now[0] > before[0] && now[1] > before[1]) break
+  assert.ok(tries < 200, "both creates reach the pool")
+  await new Promise((resolve) => setTimeout(resolve, 50))
+}
+await control("resume")
+const landed = await Promise.all(
+  (await Promise.all(pair)).map(async ({ txHash }) => {
+    const receipt = await read.getTransactionReceipt({ hash: txHash })
+    assert.equal(receipt.status, "success")
+    return receipt.blockNumber
+  }),
+)
+const [first, second] = landed.sort((a, b) => (a < b ? -1 : 1))
+assert.equal(second - first, 1n, `blocks ${landed}`)
+step(`storage cap: two 128 KiB creates sent together landed in blocks ${first} and ${second}`)
 assert.equal(gas.permanentEntitiesSupported, true)
 assert.equal(gas.rentRule, "glm-rent-v3")
 assert.equal(gas.rentCharging, "sender-balance-outside-gas")
@@ -300,6 +361,7 @@ assert.equal(gas.rentReceiptField, "rentFee")
 // A year in seconds; 63,072,000 blocks at this chain's 500 ms.
 assert.equal(gas.maxRentLifetimeSeconds, "31536000")
 assert.equal(gas.maxRentLifetimeBlocks, "63072000")
+assert.equal(gas.rentBound, "sender-balance")
 step(
   `status: rent ${gas.rentWeiPerStorageUnitDay} wei/unit/day outside gas, capped at ${gas.maxRentLifetimeSeconds} s`,
 )

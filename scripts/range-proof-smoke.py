@@ -70,7 +70,7 @@ def main():
                 payload.write_text(f"range-proof-row-{nonce}")
                 output = directory / f"transaction-{nonce}"
                 cli("create", "--key-file", directory / "owner.key", "--genesis-file", directory / "producer/genesis.bin",
-                    "--nonce", nonce, "--request-id", "0x" + f"{nonce:02x}" * 32, "--payload-file", payload,
+                    "--nonce", nonce, "--request-id", "0x" + f"{nonce:02x}" * 32, "--data-file", payload,
                     "--salt", nonce, "--out", output)
                 request(endpoints["producer"], "transactions", {"transactionBytes": "0x" + output.read_bytes().hex()})
             head = step()

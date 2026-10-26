@@ -54,7 +54,7 @@ def main():
             try:
                 result = status(port)
                 capabilities = result["capabilities"]
-                if capabilities["profile"] != "arkiv-entity-v2" or "entityNamespace" not in capabilities:
+                if capabilities["profile"] != "arkiv-entity-v3" or "entityNamespace" not in capabilities:
                     raise RuntimeError("Unexpected node or occupied port")
                 return result
             except (OSError, ValueError):
@@ -74,7 +74,7 @@ def main():
         ready(base+2, light)
         ready(base+3, full)
         (directory / "identity.json").write_text(json.dumps({key: identity[key] for key in ("sourceId", "runId", "genesisHash", "chainId")}, indent=2) + "\n")
-        print(json.dumps({"profile": "arkiv-entity-v2", "producer": base, "light": base+2, "full": base+3, "runDir": str(directory)}), flush=True)
+        print(json.dumps({"profile": "arkiv-entity-v3", "producer": base, "light": base+2, "full": base+3, "runDir": str(directory)}), flush=True)
         while all(process.poll() is None for process in processes):
             time.sleep(1)
         raise RuntimeError("A node exited; inspect logs")

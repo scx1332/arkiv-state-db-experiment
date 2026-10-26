@@ -112,7 +112,7 @@ def main():
                 answer = request(url, {'jsonrpc':'2.0','id':1,'method':method,'params':params})
                 assert 'error' not in answer, answer
                 return answer['result']
-            options = {'atBlock':hex(head),'limit':200,'select':{'key':True,'owner':True,'creator':True,'attributes':True,'contentType':True,'createdAt':True,'updatedAt':True,'expiresAt':True,'creationFlags':True}}
+            options = {'atBlock':hex(head),'limit':200,'select':{'key':True,'owner':True,'creator':True,'attributeSchema':True,'attributes':True,'createdAt':True,'updatedAt':True,'expiresAt':True,'creationFlags':True}}
             expected = rpc_call(rpc, 'arkiv_query', ['*', options])['data']
             actual = rpc_call(api + '/shadow-rpc/experimental', 'arkiv_query', ['*', options])['data']
             ordered = lambda rows: sorted(rows, key=lambda row: row['key'])

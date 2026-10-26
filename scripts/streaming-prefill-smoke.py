@@ -21,7 +21,7 @@ ADDRESS = '0x1a642f0e3c3af545e7acbd38b07251b3990914f1'
 BASE = '''schema = "arkiv-genesis-bundle-v1"
 protocol = "arkiv-launch-prefill-v1"
 name = "Streaming acceptance"
-profile = { preset = "arkiv-entity-v2/glm-v2@1" }
+profile = { preset = "arkiv-entity-v3/glm-v2@1" }
 [chain]
 id = "7706815"
 run_id = "0x00000000000000000000000077068150"
@@ -220,7 +220,7 @@ def main():
         assert bytes.fromhex(live_genesis['genesisBytes'].removeprefix('0x')) == read_bounded(bundle / 'genesis.bin', 65536)
         with (bundle / 'prefill.bin').open('rb') as stream:
             framing = stream.read(20)
-        assert len(framing) == 20 and framing[:12] == b'ARKPFL02' + (2).to_bytes(4, 'big')
+        assert len(framing) == 20 and framing[:12] == b'ARKPFL02' + (3).to_bytes(4, 'big')
         entity_count = int.from_bytes(framing[12:], 'big')
         assert entity_count == int(bundle_report['rowCount']), 'report/canonical row count mismatch'
         assert (bundle / 'prefill.bin').stat().st_size == int(bundle_report['canonicalBytes'])
@@ -270,7 +270,7 @@ def main():
         rid = '0x' + secrets.token_hex(32)
         tx = work / 'live.tx'
         cli('create', '--key-file', key, '--genesis-file', bundle / 'genesis.bin',
-            '--nonce', '0', '--request-id', rid, '--payload-file', payload, '--out', tx,
+            '--nonce', '0', '--request-id', rid, '--data-file', payload, '--out', tx,
             '--gas-limit', '1000000', '--lifetime-blocks', '1000')
         admitted = request('producer', 'transactions', {'transactionBytes': '0x' + tx.read_bytes().hex()})
         assert admitted.get('status') == 'pending', admitted

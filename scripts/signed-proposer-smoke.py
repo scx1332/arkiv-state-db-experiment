@@ -106,7 +106,7 @@ def main():
                 (directory / "payload").write_bytes(b"signed-history-smoke-payload")
                 out = directory / (name + ".tx")
                 cli("create", "--key-file", directory / (name + ".key"), "--genesis-file", directory / "producer/genesis.bin",
-                    "--nonce", "0", "--request-id", "0x" + request_id * 32, "--payload-file", directory / "payload", "--out", out)
+                    "--nonce", "0", "--request-id", "0x" + request_id * 32, "--data-file", directory / "payload", "--out", out)
                 body = {"transactionBytes": "0x" + out.read_bytes().hex()}
                 assert request(endpoints["producer"], "transactions", body)["status"] == "pending"
                 request(endpoints["private"], "control", {"action": "step"}, token)

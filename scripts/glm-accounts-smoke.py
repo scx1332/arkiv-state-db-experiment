@@ -78,7 +78,7 @@ def main():
             assert initial_proof["verificationStatus"]["status"] == "verified"
             step()
             (directory / "payload").write_bytes(b"GLM fee settlement and replay")
-            unfunded = transaction("create", "bob", "0", "01", "1000000", ["--payload-file", directory / "payload"])
+            unfunded = transaction("create", "bob", "0", "01", "1000000", ["--data-file", directory / "payload"])
             try:
                 request(endpoints["producer"], "transactions", unfunded)
                 raise AssertionError("unfunded transaction accepted")
@@ -99,7 +99,7 @@ def main():
             created = request(endpoints["producer"], "transactions", unfunded)
             assert created["executionStatus"] == "committed"
             assert account("bob")["balanceWei"] == str(10**18 - int(created["feeChargedWei"]))
-            poor_gas = transaction("create", "bob", "1", "03", "21000", ["--payload-file", directory / "payload", "--salt", "1"])
+            poor_gas = transaction("create", "bob", "1", "03", "21000", ["--data-file", directory / "payload", "--salt", "1"])
             request(endpoints["producer"], "transactions", poor_gas)
             height = step()
             failed = request(endpoints["producer"], "transactions", poor_gas)

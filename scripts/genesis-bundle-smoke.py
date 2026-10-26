@@ -4,7 +4,7 @@
 The fixed keys are disposable fixture identities, never deployment credentials.
 Expected entity keys were independently calculated from the documented Keccak
 preimage (chain ID, Arkiv address, creator, creation nonce, salt). Rent vectors
-use independent integer arithmetic: storage units 1910/1908/1910, rent 4/5/6 gas.
+use independent integer arithmetic: storage units 1764/1762/1764, rent 4/5/5 gas.
 """
 
 import json
@@ -24,7 +24,7 @@ B = Path(os.environ.get("ARKIV_PROPOSER_BIN", ROOT / "target/debug/arkiv-propose
 FIXTURE = """schema = "arkiv-genesis-bundle-v1"
 protocol = "arkiv-launch-prefill-v1"
 name = "Independent prefill end-to-end"
-profile = { preset = "arkiv-entity-v2/glm-v2@1" }
+profile = { preset = "arkiv-entity-v3/glm-v2@1" }
 
 [chain]
 id = "9405"
@@ -68,10 +68,9 @@ create_nonce = "0"
 salt = "10"
 expires_at_height = "4"
 flags = 0
-content_type = "text/plain"
-payload_text = "prefilled alpha"
-attributes.title = { str = "alpha" }
-attributes.group = { u64 = "42" }
+attributes.body = { bytes_text = "prefilled alpha", indexed = false }
+attributes.title = { str = "alpha", indexed = true }
+attributes.group = { u64 = "42", indexed = true }
 
 [[prefill.entity]]
 creator = "@alice"
@@ -79,10 +78,9 @@ create_nonce = "1"
 salt = "11"
 expires_at_height = "5"
 flags = 0
-content_type = "text/plain"
-payload_text = "prefilled beta"
-attributes.title = { str = "beta" }
-attributes.group = { u64 = "42" }
+attributes.body = { bytes_text = "prefilled beta", indexed = false }
+attributes.title = { str = "beta", indexed = true }
+attributes.group = { u64 = "42", indexed = true }
 
 [[prefill.entity]]
 creator = "@bob"
@@ -90,10 +88,9 @@ create_nonce = "0"
 salt = "12"
 expires_at_height = "6"
 flags = 0
-content_type = "text/plain"
-payload_text = "prefilled gamma"
-attributes.title = { str = "gamma" }
-attributes.group = { u64 = "42" }
+attributes.body = { bytes_text = "prefilled gamma", indexed = false }
+attributes.title = { str = "gamma", indexed = true }
+attributes.group = { u64 = "42", indexed = true }
 """
 
 WALLETS = {
@@ -111,7 +108,7 @@ EXPECTED = {
             "expiry": 4,
             "title": "alpha",
             "key": "0x223fd62733c4f6d95ecf8d6201f89d15197e6b29b86b2a7be7f985e2227aabfc",
-            "storageUnits": 1910,
+            "storageUnits": 1764,
             "rentGas": 4,
         },
         {
@@ -121,7 +118,7 @@ EXPECTED = {
             "expiry": 5,
             "title": "beta",
             "key": "0xa4c5ac5a9730d7f3d2598e88b53abdf3639a71475a43ffb3171631fbd225882c",
-            "storageUnits": 1908,
+            "storageUnits": 1762,
             "rentGas": 5,
         },
         {
@@ -131,11 +128,11 @@ EXPECTED = {
             "expiry": 6,
             "title": "gamma",
             "key": "0xffe39c77fb98cdc8510526936c4ab7f3a25a24fe2fd946926312678ca7f2a6b0",
-            "storageUnits": 1910,
-            "rentGas": 6,
+            "storageUnits": 1764,
+            "rentGas": 5,
         },
     ],
-    "burnedWei": "15000000000",
+    "burnedWei": "14000000000",
     "nextAliceKey": "0xb6efeb844b48b2758358c68bea181dae6c6e6f653349ba2edf53aa16a9fd555a",
 }
 
@@ -305,7 +302,7 @@ def main():
             if kind == "create":
                 (D / "live-payload.txt").write_text("post-genesis entity")
                 args += [
-                    "--payload-file",
+                    "--data-file",
                     D / "live-payload.txt",
                     "--salt",
                     "99",
@@ -426,10 +423,9 @@ def main():
                     and entity["owner"] == row["creator"]
                 )
                 assert entity["expiresAt"] == str(row["expiry"])
-                assert (
-                    bytes.fromhex(entity["payload"][2:])
-                    == ("prefilled " + row["title"]).encode()
-                )
+                body = next(a for a in entity["attributes"] if a["name"] == "body")
+                assert body["type"] == "bytes" and body["indexed"] is False
+                assert bytes.fromhex(body["value"][2:]) == ("prefilled " + row["title"]).encode()
             reports["genesisAccounts"] = {name: account(name, 0) for name in wallets}
             for name, value in reports["genesisAccounts"].items():
                 assert value["nextNonce"] == "0"

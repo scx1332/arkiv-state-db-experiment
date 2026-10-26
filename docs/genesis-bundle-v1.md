@@ -7,15 +7,17 @@ the machine fields and runtime behavior of the bounded implementation.
 ## Versions and identity
 
 `arkiv-launch-prefill-v1` is a signed genesis (version 1) whose optional
-`PrefillLaunch` is present. It uses the one native block format (version 4),
-protocol version 4 (user-defined columns with live permanent entities and
-capped rent per second, charged outside gas), state layout 2 and codec 1, and
+`PrefillLaunch` is present. It uses the one native block format (version 5),
+protocol version 5 (user-defined columns with live permanent entities, capped
+rent per second charged outside gas, and a per-block storage cap), state
+layout 2 and codec 1, and
 the `glm-v2` gas profile with rent rule `glm-rent-v3`. A chain without a
 prefill uses the same signed genesis layout with the prefill absent and creates
 its entity namespace in block 1 instead. Prefills require a new chain/run
-directory. The builtin `arkiv-entity-v3/glm-v2@3` expands immutable constants
+directory. The builtin `arkiv-entity-v3/glm-v2@4` expands immutable constants
 (entity rules `arkiv-entity-v3`, 39 cells per record, a one-year rent cap, a
-384 KiB signed transaction cap); no dynamic base fees are enabled.
+384 KiB signed transaction cap, a 1,500,000-unit per-block storage cap); no
+dynamic base fees are enabled.
 
 The rent cap is set in the profile's `[chain_params]` in seconds and stored in
 the genesis in seconds (`ChainParams::max_rent_lifetime_seconds`), beside the
@@ -26,6 +28,15 @@ from the two:
 ```toml
 [chain_params]
 max_rent_lifetime_seconds = "31536000" # 365 days: 15,768,000 blocks at 2 s
+```
+
+The per-block storage cap is `max_new_storage_units_per_block` in the same
+section (at least 1; the preset's 1,500,000 binds no block the 786,432-byte
+input cap admits; see [GLM gas](glm-gas-v1.md#storage-per-block)):
+
+```toml
+[chain_params]
+max_new_storage_units_per_block = "300000" # at most two full 128 KiB entities a block
 ```
 
 The preset uses this year. A custom profile (`profile = { path = ... }`) may

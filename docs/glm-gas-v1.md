@@ -33,8 +33,10 @@ The status response advertises `capabilities.gas`: profile `glm-v2`, exact
 limits, gas price, `rentRule: "glm-rent-v3"`,
 `rentCharging: "sender-balance-outside-gas"`, `rentWeiPerStorageUnitDay`,
 `rentBlockPeriodMs`, `maxRentLifetimeSeconds` and the `maxRentLifetimeBlocks`
-it applies as, `rentReceiptField: "rentFee"`, `permanentEntitiesSupported:
-true`, the `permanentEntities` rules and `feesDebited: true`.
+it applies as, `rentReceiptField: "rentFee"`, `rentBound: "sender-balance"`,
+`rentQuoteMarginBlocks`, `maxNewStorageUnitsPerBlock`,
+`permanentEntitiesSupported: true`, the `permanentEntities` rules and
+`feesDebited: true`.
 
 ## Storage units and rent
 
@@ -118,11 +120,17 @@ that does not shorten it, and its horizon cannot grow), and a finite expiry is
 refused with `ExpiryShortened`. A finite entity may be extended to permanent:
 it pays the capped horizon increase.
 
-**Only the owner makes an entity permanent.** An entity created with the
-permissionless-extension flag (creation flag 2) takes finite extensions from
-anyone, however far; an extension to `u64::MAX` (or a minimum lifetime that
-resolves to it) by anyone but the owner is refused with `NotOwner`, and so is
-any extension of an already permanent entity by another account.
+**Only the owner extends beyond one cap.** An entity created with the
+permissionless-extension flag (creation flag 2) takes anyone's extension up to
+one rent cap ahead, `h + cap_blocks`; anything further, a far-future finite
+expiry, `u64::MAX`, or a minimum lifetime that resolves to either, is the
+owner's alone, and anyone else is refused with
+`ArkivFault::PermanenceOwnerOnly` (revert `PermanenceOwnerOnly(bytes32
+entityKey, uint64 requested, uint64 limit)`). Rent stops at the cap, so
+without the limit an extender could buy a near-permanent lifetime for the
+price of one cap. Since a permanent entity cannot be shortened, another
+account cannot extend it at all. An entity without the flag takes extensions
+from its owner only (`NotOwner`).
 
 **No discount on permanence.** Whatever the sequence of creates, extensions and
 size changes, every storage unit an entity holds has paid at least
@@ -159,25 +167,43 @@ Rent is **not gas**. It counts against neither the transaction's gas limit nor
 the block gas limit; only the sender's balance limits it.
 
 - **Execution.** Each Arkiv operation quotes its rent before the engine write.
-  The sender must hold it after its transaction's gas reservation
-  (`gas limit × 1 gwei` plus value, debited up front); otherwise the operation
-  fails with `ArkivFault::InsufficientRentBalance` before anything is written.
-  After a successful write the rent is debited and burned, like the fee. A
+  The sender must hold it after its transaction's gas reservation (the fee at
+  the declared gas, `gas limit × 1 gwei`, reserved up front; transferred value
+  is debited by its transfer operation); otherwise the operation fails with
+  `ArkivFault::InsufficientRentBalance` before anything is written. After a
+  successful write the rent is debited and burned, like the fee. A
   transaction is atomic: when any operation fails, the rollback restores every
   rent debit and burn of the transaction, its gas stays charged as for any
   failure, and its outcome records `rent_wei = 0`.
-- **Admission.** The pool admits a transaction only if the sender's balance
-  covers every pending reservation plus its fee at the declared gas, its value
-  and its quoted rent: each Arkiv operation priced alone on the head state (a
-  create reads nothing, a keyed operation its one entity). Otherwise
-  `eth_sendRawTransaction` (and native submission) refuses it with
-  `insufficient funds for gas * price + value + rent`: no transaction, no nonce,
-  no fee. An operation building on a pending one (a patch of an entity not yet
-  created) quotes what the head shows; execution then checks the real rent.
-- **Production.** If rent an earlier transaction paid exceeded its quote and
-  leaves a later transaction of the same sender unable to cover its gas
-  reservation, that transaction would invalidate the block. The producer
-  evicts it and its successors from the pool and builds the block again.
+- **Admission.** The cheap checks come first, before any state is read:
+  identity, the nonce window, sizes, pool capacity, and funds for every
+  pending reservation of the sender plus the fee at the declared gas and the
+  value. Only then is the transaction's rent quoted: its Arkiv operations in
+  order, each seeing what the earlier ones of the same transaction created or
+  changed (so `[create E, patch E]` quotes the patch on the new entity), with
+  each operation reserved at the larger of its rent at the next height and
+  `RENT_QUOTE_MARGIN_BLOCKS` (64) later. A create reads nothing and a keyed
+  operation its one entity (in full: the engine has no size-only read). A
+  sender who cannot cover the quote too is refused with `insufficient funds
+  for gas * price + value + rent`: no transaction, no nonce, no fee. An
+  operation building on another *pending* transaction (a patch of an entity
+  created by an earlier, uncommitted one) quotes what the head shows, nothing
+  for an entity not created yet; execution then checks the real rent.
+- **Production.** Rent can exceed its quote (the cases below), and a later
+  transaction of the same sender may then be unable to cover its gas
+  reservation, which would invalidate a block. The producer builds each
+  block in one execution: such a transaction, and its sender's later ones,
+  are left out where they stand instead of the block being rebuilt, and
+  after every commit each sender's pending transactions are checked in nonce
+  order against its new balance; the first that no longer fits leaves the
+  pool with its successors. Every candidate executes at most once per block.
+- **Dropped transactions.** A transaction evicted this way (or one that
+  alone exceeds the storage cap, below) is remembered in a bounded volatile
+  registry: `eth_getTransactionByHash` and `eth_getTransactionReceipt` answer
+  `-32000` / `transaction dropped: insufficient funds for gas * price + value
+  + rent` (or `... adds more storage units than a block may`), so viem's
+  `waitForTransactionReceipt` fails instead of waiting, and native request
+  status reports `"status": "dropped"` with the reason.
 - **Estimation.** `eth_estimateGas` returns execution gas only, without
   checking affordability, so the SDK's ordinary create, extend and patch calls
   work unchanged: a full 128 KiB entity made permanent executes in about
@@ -185,12 +211,64 @@ the block gas limit; only the sender's balance limits it.
 - **Visibility.** `eth_getTransactionReceipt` adds `rentFee`, the wei the
   transaction burned beside `gasUsed × effectiveGasPrice` (like an L2
   receipt's separate `l1Fee`; viem passes unknown receipt fields through).
-  Native request status reports `rentChargedWei` beside `feeChargedWei`, and
-  account responses' `burnedWei` and `totalSupplyWei` include burned rent.
-  Logs are unchanged.
+  Native request status reports `rentChargedWei` beside `feeChargedWei`, read
+  from the block's feed metadata, and account responses' `burnedWei` and
+  `totalSupplyWei` include burned rent. Logs are unchanged.
 
 Chains without accounts (unsigned fixtures) quote and record rent without
 debiting it.
+
+### What bounds rent
+
+Rent is bounded **only by the sender's balance** in this version: nothing the
+transaction signs limits it. A wallet's `gas × price + value`, the total it
+shows and checks, covers the fee and transferred value only; the rent is
+charged on top, from whatever balance is left after the fee reservation.
+
+- **Exposure per operation.** An operation pays at most its entity's size for
+  one cap: at the default one-year cap a full 128 KiB entity costs about
+  0.97 GLM, and a patch growing an entity by the 128 KiB `bytes` limit about
+  the same, so an operation risks about **1 GLM**, and a transaction of at
+  most 16 operations (extensions of 16 full entities, say) about 16 GLM.
+- **Quotes drift with height.** Extending an entity across the cap pays
+  `h + cap − old`, which grows by one block of the entity's size per block,
+  about 62 gwei a block for a full entity at 2-second blocks. The pool's
+  64-block quote margin covers that drift for transactions included within
+  64 blocks of admission; beyond it the real rent is charged.
+- **Concurrent changes raise rent.** An extension pays for the entity's size
+  when it executes. If the owner grows a permissionless-extension entity in
+  the same block, before an extender's transaction, the extender pays the
+  larger size for its extension, many times its quote. The extender never
+  pays more than its balance, and never more than about 1 GLM per extension.
+- **Planned bound.** A signed allowance, such as the transaction's value
+  field, which a transaction to the Arkiv address must now leave at zero,
+  will cap the rent once the SDK can set it.
+
+### Storage per block
+
+`ChainParams::max_new_storage_units_per_block` caps the storage units the
+committed transactions of one block add: a create adds its entity's units, a
+patch its positive growth; extensions, transfers, shrinks, deletes and expiry
+add nothing and free nothing against it. A block over the cap is invalid, and
+followers refuse it (`ExecError::StorageCapExceeded`). Building a block, the
+producer estimates each candidate's addition on the state it will see (exact
+when it commits; a transaction that fails adds nothing) and leaves a candidate
+that would cross the cap, with its sender's later ones, in the pool for a
+later block; one that alone exceeds the cap can never fit and is dropped. At
+admission a transaction that alone exceeds it is refused with `transaction
+adds more storage units than a block may`.
+
+The default, **1,500,000 units**, binds no block the default input cap admits.
+Every user cell costs at most its encoded input bytes (its name, value and two
+tags against a length prefix, a kind and a value tag) plus 128 if indexed, and
+each operation adds at most an empty entity (1,460 units: 512 overhead, 180
+system-cell bytes, 6 × 128 indexed system cells) and 32 index reservations.
+So a block adds at most `max_block_input_bytes + max_ops_per_block × (1,460 +
+32 × 128)` = 786,432 + 128 × 5,556 = **1,497,600** units, which the default
+rounds up. A block of five full 128 KiB native creates adds about 666,000
+units, 128 one-kilobyte entities about 395,000. A genesis lowers the cap to
+throttle storage growth, for example 300,000 for at most two full entities a
+block.
 
 **Size, not gas, bounds an entity.** A permanent (or year-long) entity of
 `units` costs `units × 7,300` gwei of rent. A full entity, 128 KiB of `bytes`
@@ -278,16 +356,22 @@ transaction, a live permanent create paying exactly a year of rent within an
 ordinary gas budget, a 128 KiB permanent create in one transaction, admission
 refusing a sender short of gas plus rent by one wei, an execution-time
 `InsufficientRentBalance` rolling its transaction back (gas charged, rent not),
-the producer evicting a transaction whose reservation an earlier rent consumed,
-batch rollback and nonce behavior, growth/shrink/extension/delete accounting,
-restart of durable full and light stores, proof verification after restart, and
-expiry processing alongside the maximum declared user gas budget. Unit tests in
-`gas.rs` cover storage-unit arithmetic, the clock bounds, a year costing the
-same at five block periods, equal rent at the cap, twice the cap and
-permanent, extension pricing below, at and beyond the cap, the exhaustive and
-random no-discount checks above, saturation near `u64::MAX`, rounding and exact
-GLM formatting; `arkiv` unit tests check the rent of live creates, extensions
-(including after time has passed), growth and transfers of permanent entities,
-debits and burns outside the gas budget, refusal without the balance before any
-write, rolled-back batches, owner-only permanence, the prefill waiver and the
-admission quote against execution.
+poisoned senders costing one block execution per block (left out, then
+dropped with a status), a `[create E, patch E]` transaction quoting its own
+patch so 32 senders behind a heavy prefix never poison, the per-block storage
+cap (a deferred transaction, a follower refusing a forged block over the cap,
+admission refusing and production dropping transactions that alone exceed
+it), batch rollback and nonce behavior, growth/shrink/extension/delete
+accounting, restart of durable full and light stores, proof verification after
+restart, and expiry processing alongside the maximum declared user gas budget.
+Unit tests in `gas.rs` cover storage-unit arithmetic, the clock bounds, a year
+costing the same at five block periods, the default storage cap against the
+input-cap bound, equal rent at the cap, twice the cap and permanent, extension
+pricing below, at and beyond the cap, the exhaustive and random no-discount
+checks above, saturation near `u64::MAX`, rounding and exact GLM formatting;
+`arkiv` unit tests check the rent of live creates, extensions (including after
+time has passed), growth and transfers of permanent entities, debits and burns
+outside the gas budget, refusal without the balance before any write,
+rolled-back batches, the one-cap limit of non-owner extensions, the prefill
+waiver, the transaction quote against execution (rent and storage units, its
+own earlier operations included) and the quote margin across the cap.

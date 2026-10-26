@@ -4,11 +4,12 @@
 
 ### Live permanent entities and rent outside gas
 
-**Breaking:** block format version 4 (the genesis gains the rent clock,
-`block_period_ms` and `max_rent_lifetime_seconds`, under digest domain
-`arkiv/genesis/v3`; each transaction outcome gains `rent_wei`, under
-`arkiv/outcomes/v2`) and protocol version 4. Earlier genesis files and stores
-are refused; format and protocol 3 were never released.
+**Breaking:** block format version 5 (the genesis gains the rent clock,
+`block_period_ms` and `max_rent_lifetime_seconds`, and the storage cap
+`max_new_storage_units_per_block`, under digest domain `arkiv/genesis/v4`;
+each transaction outcome gains `rent_wei`, under `arkiv/outcomes/v2`) and
+protocol version 5. Earlier genesis files and stores are refused; formats and
+protocols 3 and 4 were never released.
 
 - Live creates and extensions accept `expiresAt = 2^64 − 1` (the SDK's
   `ExpirationTime.permanent()`). Such entities are never scheduled or swept;
@@ -33,20 +34,38 @@ are refused; format and protocol 3 were never released.
   advertises `rentRule`, `rentCharging`, `rentWeiPerStorageUnitDay`,
   `rentBlockPeriodMs`, `maxRentLifetimeSeconds` and `maxRentLifetimeBlocks`.
   Profiles set `max_rent_lifetime_seconds`; the preset is
-  `arkiv-entity-v3/glm-v2@3`. A producer without a bundle uses a year.
+  `arkiv-entity-v3/glm-v2@4`. A producer without a bundle uses a year.
+- Rent is bounded only by the sender's balance: a wallet's `gas × price +
+  value` does not cover it. An operation risks about 1 GLM at most; a signed
+  allowance is planned for when the SDK can set one.
 - An operation whose rent the sender cannot pay after its gas reservation
   fails with `ArkivFault::InsufficientRentBalance` (tag 17); its transaction
-  rolls back, gas charged, no rent. Admission adds each transaction's quoted
-  rent to its reservation and refuses a sender who cannot cover it with
-  `insufficient funds for gas * price + value + rent`. The producer evicts a
-  transaction whose gas reservation an earlier rent consumed instead of
-  building an invalid block. `eth_estimateGas` returns execution gas only.
-- Receipts add `rentFee` (wei); native request status adds `rentChargedWei`.
-- Only the owner makes an entity permanent: a permissionless-extension entity
-  takes anyone's finite extension, but another account's `u64::MAX` is
-  `NotOwner`. Extending a permanent entity to permanent is a no-op success; a
-  finite expiry is `ExpiryShortened`. `PermanentStorageUnsupported` (fault 14)
-  is no longer produced.
+  rolls back, gas charged, no rent. Admission checks nonce, sizes, capacity,
+  fee and value first, then quotes the transaction's rent (its operations in
+  order, each seeing the earlier ones, with a 64-block height margin) and
+  refuses a sender who cannot cover it with `insufficient funds for gas *
+  price + value + rent`. `eth_estimateGas` returns execution gas only.
+- The producer builds each block in one execution: a transaction whose gas
+  reservation an earlier rent consumed is left out with its sender's later
+  ones, and after each commit pending transactions their senders can no
+  longer cover are dropped. A dropped transaction answers
+  `eth_getTransactionByHash`/`eth_getTransactionReceipt` with `transaction
+  dropped: ...` and native status `dropped` with the reason.
+- `max_new_storage_units_per_block` caps the storage units a block's
+  committed transactions add (default 1,500,000, the most the default input
+  cap admits, so nothing changes by default). The producer defers what would
+  cross it; a transaction that alone exceeds it is refused at admission;
+  followers refuse a block over it. Status advertises
+  `maxNewStorageUnitsPerBlock`.
+- Receipts add `rentFee` (wei); native request status adds `rentChargedWei`,
+  and the block feed's transactions `rentWei`.
+- Only the owner extends an entity beyond one rent cap ahead: a
+  permissionless-extension entity takes anyone's extension up to `height +
+  cap`, and another account asking further, permanence included, is refused
+  with `ArkivFault::PermanenceOwnerOnly` (tag 18). Extending a permanent
+  entity to permanent is a no-op success; a finite expiry is
+  `ExpiryShortened`. `PermanentStorageUnsupported` (fault 14) is no longer
+  produced.
 - Entity expiries are no longer bounded by `max_lifetime` (no `TooFar`);
   `max_lifetime` now bounds generic records only. Finite prefill rows burn the
   capped rent in wei; sponsored permanent rows are waived before any quote.

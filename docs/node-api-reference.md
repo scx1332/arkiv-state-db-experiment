@@ -105,7 +105,7 @@ so paging is unchanged).
 ## Entities: user-defined columns
 
 The node serves the SDK's user-defined-columns (UDC) entity model (protocol
-version 4, entity rules `arkiv-entity-v3`). An entity is its system fields
+version 5, entity rules `arkiv-entity-v3`). An entity is its system fields
 plus named, typed user attributes; there is no payload or content type.
 
 - **Writes.** Each ABI attribute triple is `(bytes32 name, uint8 typeId,
@@ -153,16 +153,41 @@ plus named, typed user attributes; there is no payload or content type.
   - `eth_estimateGas` returns execution gas only and ignores affordability, so
     the SDK's ordinary calls work unchanged; a 128 KiB permanent create
     executes in under a million gas.
-  - `eth_sendRawTransaction` (and native submission) refuses a sender whose
-    balance does not cover its pending reservations, the fee at the declared
-    gas, the value and the quoted rent: `-32000` / `insufficient funds for gas
-    * price + value + rent`, with no transaction, nonce or fee.
+  - **Rent is bounded only by the sender's balance.** A wallet's `gas × price
+    + value` covers the fee and value, not the rent, which is charged on top
+    from the balance left after the fee reservation. An operation risks about
+    1 GLM at most (a full 128 KiB entity for the one-year cap), and the rent
+    charged can exceed the quote: an extension across the cap costs one block
+    of its entity more each block, and an extender pays the entity's size
+    when it executes, so the owner growing a permissionless entity in the
+    same block, first, raises it. A signed allowance (the transaction value)
+    is planned for when the SDK can set it
+    ([what bounds rent](glm-gas-v1.md#what-bounds-rent)).
+  - `eth_sendRawTransaction` (and native submission) first checks the nonce,
+    sizes, pool capacity and the fee and value against the sender's balance
+    and pending reservations, then quotes the transaction's rent (its
+    operations in order, each seeing the earlier ones of the same
+    transaction, with a 64-block height margin) and refuses a sender who
+    cannot cover that too: `-32000` / `insufficient funds for gas * price +
+    value + rent`, with no transaction, nonce or fee.
   - Execution checks rent again. An operation whose rent the sender cannot pay
     after its gas reservation fails with `InsufficientRentBalance`; its
-    transaction rolls back (status `0x0`, gas charged, no rent).
+    transaction rolls back (status `0x0`, gas charged, no rent). A pending
+    transaction its sender can no longer cover once an earlier one paid more
+    rent than quoted is dropped: `eth_getTransactionByHash` and
+    `eth_getTransactionReceipt` then answer `-32000` / `transaction dropped:
+    insufficient funds for gas * price + value + rent`, and native request
+    status reports `"status": "dropped"` with the reason.
   - `eth_getTransactionReceipt` adds `rentFee`, the wei the transaction burned
     beside `gasUsed × effectiveGasPrice` (`0x0` when it failed); native request
     status adds `rentChargedWei`. Logs are unchanged.
+  - **Storage per block.** A block may add at most
+    `maxNewStorageUnitsPerBlock` storage units (creates' entities, patches'
+    growth; default 1,500,000, which no block the default input cap admits
+    reaches). A transaction that would cross it waits for a later block; one
+    that alone exceeds it is refused at admission with `-32000` /
+    `transaction adds more storage units than a block may
+    (max_new_storage_units_per_block)` ([storage per block](glm-gas-v1.md#storage-per-block)).
   - A signed transaction may hold 384 KiB, its native envelope 256 KiB, so an
     Ethereum transaction (whose original bytes travel beside the envelope)
     carries a full 128 KiB entity.
@@ -177,8 +202,11 @@ plus named, typed user attributes; there is no payload or content type.
   year; `maxRentLifetimeBlocks` is that at the chain's block period), so a
   year, two years and permanence cost the same
   ([rent cap](glm-gas-v1.md#the-rent-cap)). Only the owner may extend an
-  entity to permanent: a permissionless-extension entity takes anyone's
-  finite extension, but another account's `u64::MAX` is `NotOwner`. Extending
+  entity beyond one rent cap ahead: a permissionless-extension entity takes
+  anyone's extension up to `height + maxRentLifetimeBlocks`, but another
+  account asking further, permanence included, is refused with the revert
+  `PermanenceOwnerOnly(bytes32 entityKey, uint64 requested, uint64 limit)`
+  (the SDK's ABI does not name it yet, so it reports the selector). Extending
   a permanent entity to permanent is a no-op success that stamps
   `$updatedAt`; any finite expiry is `ExpiryShortened`. A finite entity may be
   extended to permanent, paying the growth of its capped horizon. Patches,

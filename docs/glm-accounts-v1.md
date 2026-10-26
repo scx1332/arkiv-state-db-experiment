@@ -79,14 +79,18 @@ are 1 insufficient balance, 2 overflow, and 3 unsupported. The status field
 
 The volatile pool reserves the sum of maximum fees **plus gross non-self outgoing
 transfer values plus quoted rent** for every pending transaction from a sender,
-including nonce gaps. The rent quote prices each entity operation alone on the
-head state; execution checks the real rent, and the producer evicts a
-transaction whose gas reservation an earlier transaction's rent consumed rather
-than build an invalid block. It does not count uncommitted incoming transfers or prospective fee refunds
+including nonce gaps. The rent quote prices the transaction's entity
+operations in order on the head state, each seeing the earlier ones of the
+same transaction, with a 64-block height margin; execution checks the real
+rent. A transaction whose gas reservation an earlier transaction's rent
+consumed is left out of the block being built, and after every commit each
+sender's pending transactions that its new balance no longer covers are
+dropped, with a status and receipt error naming the reason
+([charging rent](glm-gas-v1.md#charging-rent)). It does not count uncommitted incoming transfers or prospective fee refunds
 as funds. This conservative rule can reject a sequence that would eventually be
 affordable, but prevents accepted transactions from overcommitting a balance.
 Duplicate submissions do not reserve twice. Entries are removed only after an
-acknowledged commit or such an eviction. Full nodes independently perform the same execution and fee
+acknowledged commit or such a drop. Full nodes independently perform the same execution and fee
 settlement; transaction admission or a producer signature cannot authorize an
 invalid debit. State, burn counters, nonces and receipts share the existing atomic
 publication/recovery boundary, including lost-ack recovery.

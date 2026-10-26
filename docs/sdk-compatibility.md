@@ -68,8 +68,14 @@ ABI-encoded revert data.
 Contract creation, arbitrary EVM calls, unprotected legacy transactions,
 nonempty access lists and other typed transaction formats are unsupported.
 Expiry arguments retain the SDK's exact block-height/minimum-lifetime
-semantics; `ExpirationTime.permanent()` (`u64::MAX`) is a live, owner-only
-permanent lifetime that pays a year of rent. Existing native limits still apply,
+semantics; `ExpirationTime.permanent()` (`u64::MAX`) is a live permanent
+lifetime that pays a year of rent. Another account may extend a
+permissionless-extension entity up to one rent cap ahead only: further,
+permanence included, is the owner's (revert `PermanenceOwnerOnly`, which the
+SDK's ABI does not name yet). A transaction that alone adds more storage units
+than a block may is refused at submission, and one dropped from the pool
+answers `eth_getTransactionReceipt` with `transaction dropped: ...`, so
+`waitForTransactionReceipt` fails instead of waiting. Existing native limits still apply,
 including operation, attribute, namespace, lifetime and expiry bucket limits.
 
 ## Reads and subscriptions

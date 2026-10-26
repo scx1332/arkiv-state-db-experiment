@@ -49,6 +49,9 @@ use std::{
 
 const READ_BUDGET: u64 = 25_000_000;
 const RESPONSE_CAP: usize = 8 * 1024 * 1024;
+/// The bytes a page's entities may take: the response cap less room for the
+/// page envelope, its cursor and the JSON-RPC envelope around it.
+const PAGE_BYTES: usize = RESPONSE_CAP - 4096;
 const CURSOR_CAP: usize = 1024;
 const GROUP_CAP: usize = 64;
 const LITERAL_CAP: usize = 256;
@@ -274,15 +277,19 @@ impl Planned {
                 query,
                 bounds,
             } => {
-                let n = snapshot
+                let n = match snapshot
                     .try_count(
                         arkiv::entity_namespace(),
                         &query,
                         read_budget(READ_BUDGET, bounds),
                     )
                     .map_err(Error::from)?
-                    .map_err(read_error)?
-                    .value;
+                {
+                    Ok(count) => count.value,
+                    // Before the entity namespace exists there are no entities.
+                    Err(r) if r.reason == arkiv_db::Rejection::UnknownNamespace => 0,
+                    Err(r) => return Err(read_error(r)),
+                };
                 if n > 9_007_199_254_740_991 {
                     return Err(limits("the count exceeds the JSON safe-integer range").into());
                 }
@@ -353,10 +360,28 @@ fn quantity(value: &Json) -> Result<u64> {
     u64::from_str_radix(s, 16).map_err(|_| Error("InvalidParams"))
 }
 fn read_error(error: arkiv_db::Rejected) -> ReadError {
-    match error.reason {
-        arkiv_db::Rejection::CursorMismatch => cursor_mismatch(),
-        arkiv_db::Rejection::OutOfBudget => limits("the read budget is exhausted").into(),
-        _ => limits("the query exceeds the node's query bounds").into(),
+    rejection(&error.reason)
+}
+/// An engine read rejection in the SDK's table. The callers answer a missing
+/// entity namespace (a chain before its first entity) as no entities, so it
+/// does not reach here; anything that is no fault of the query is `-32000`.
+fn rejection(reason: &arkiv_db::Rejection) -> ReadError {
+    use arkiv_db::{QueryFault as F, Rejection as R};
+    match reason {
+        R::CursorMismatch => cursor_mismatch(),
+        R::OutOfBudget => limits("the read budget is exhausted").into(),
+        R::InvalidQuery(F::TooManyGroups | F::TooManyLiterals) => {
+            limits("the query exceeds the node's query bounds").into()
+        }
+        R::InvalidQuery(F::ValueTooLarge) => QueryError::new(
+            QueryErrorKind::Literal,
+            "a str value or prefix exceeds the indexed-string limit",
+        )
+        .into(),
+        R::InvalidQuery(
+            fault @ (F::NotIndexable | F::NotOrdered | F::MixedBounds | F::UnboundedRange),
+        ) => QueryError::new(QueryErrorKind::Type, fault.to_string()).into(),
+        _ => Error("ReadRejected").into(),
     }
 }
 /// The `select` object: every key one of [`FIELDS`] with a boolean, except
@@ -486,21 +511,46 @@ impl PageRead {
             binding,
             height,
         } = self;
-        let page = read_page(&snapshot, &query, &limits, bounds, limit, cursor)?;
-        page_result(page, &selected, binding, height)
+        let mut page = read_page(&snapshot, &query, &limits, bounds, limit, cursor.clone())?;
+        let mut data = page
+            .rows
+            .iter()
+            .map(|row| project(row, &selected))
+            .collect::<Result<Vec<_>>>()?;
+        let fit = rows_within(&data, PAGE_BYTES)?;
+        if fit < data.len() {
+            if fit == 0 {
+                return Err(self::limits("one entity alone exceeds the 8 MiB response cap").into());
+            }
+            // A shorter page: re-read the same pinned snapshot with the
+            // shorter limit, so its cursor follows the last row returned.
+            page = read_page(&snapshot, &query, &limits, bounds, fit, cursor)?;
+            if page.rows.len() != fit {
+                return Err(Error("StorageCorrupt").into());
+            }
+            data.truncate(fit);
+        }
+        page_result(data, page.next, binding, height)
     }
 }
+/// How many of `rows`, in order, fit in `budget` bytes of a JSON array.
+fn rows_within(rows: &[Json], budget: usize) -> Result<usize> {
+    let mut used = 2;
+    for (i, row) in rows.iter().enumerate() {
+        let bytes = serde_json::to_vec(row).map_err(|_| Error("ResourceLimit"))?;
+        used += bytes.len() + usize::from(i > 0);
+        if used > budget {
+            return Ok(i);
+        }
+    }
+    Ok(rows.len())
+}
 fn page_result(
-    page: arkiv_db::QueryPage,
-    selected: &Json,
+    data: Vec<Json>,
+    next: Option<Cursor>,
     binding: [u8; 32],
     height: u64,
 ) -> Read<Json> {
-    let data = page
-        .rows
-        .iter()
-        .map(|row| project(row, selected))
-        .collect::<Result<Vec<_>>>()?;
     let mut result = json!({"data":data,"blockNumber":format!("0x{height:x}")});
     if serde_json::to_vec(&result)
         .map_err(|_| Error("ResourceLimit"))?
@@ -509,7 +559,7 @@ fn page_result(
     {
         return Err(limits("the response exceeds 8 MiB; lower the limit or select less").into());
     }
-    if let Some(cursor) = page.next {
+    if let Some(cursor) = next {
         let mut cache = CURSORS
             .get_or_init(Default::default)
             .lock()
@@ -562,7 +612,7 @@ fn read_page(
         if page_size == 0 {
             return Err(exhausted());
         }
-        let metered = snapshot
+        let metered = match snapshot
             .try_query(
                 arkiv::entity_namespace(),
                 native,
@@ -572,7 +622,14 @@ fn read_page(
                 read_budget(remaining, bounds),
             )
             .map_err(Error::from)?
-            .map_err(read_error)?;
+        {
+            Ok(metered) => metered,
+            // Before the entity namespace exists there are no entities.
+            Err(r) if r.reason == arkiv_db::Rejection::UnknownNamespace => {
+                return Ok(arkiv_db::QueryPage { rows, next: None });
+            }
+            Err(r) => return Err(read_error(r)),
+        };
         remaining = remaining
             .checked_sub(metered.receipt.spent.units())
             .ok_or_else(exhausted)?;
@@ -1554,6 +1611,190 @@ mod tests {
             query(&host, &json!(["*", {"limit": 0}])),
             Err(ReadError::Node(Error("InvalidParams")))
         ));
+    }
+    /// A chain without a prefill: its entity namespace only appears with
+    /// the proposer's bootstrap transaction in block 1.
+    fn bare_fixture() -> Host {
+        use crate::{
+            accounts::AccountConfig,
+            signed::{crypto::Signer, history::History, protocol::*},
+        };
+        use arkiv_db_memory::MemoryVersionedStore;
+        use std::sync::Arc;
+        let signer = Signer::from_bytes([1; 32]).unwrap();
+        let genesis = SignedGenesis {
+            genesis: crate::signed::protocol::default_native_genesis(9515, 1_000),
+            run_id: [8; 16],
+            proposer: *signer.address().as_bytes(),
+            block_period_ms: 1_000,
+            limits: Default::default(),
+            accounts: AccountConfig::new(vec![(
+                signer.address(),
+                U256::from(1_000_000_000_000_000_000u64),
+            )])
+            .unwrap(),
+            prefill: None,
+        };
+        Host::create(
+            Arc::new(MemoryVersionedStore::new()),
+            History::create(Arc::new(MemoryVersionedStore::new()), genesis.hash()).unwrap(),
+            genesis.clone(),
+            [4; 16],
+            SignedHeader::sign(&genesis, genesis.header(), &signer).unwrap(),
+            Some(signer),
+            arkiv_db::durable::Options::default(),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn a_chain_without_its_entity_namespace_has_no_entities() {
+        let host = bare_fixture();
+        assert_eq!(host.head.height, 0);
+        for params in [
+            json!(["*", {"atBlock":"0x0"}]),
+            json!(["*"]),
+            json!(["n = u64(1)", {"atBlock":"0x0","select":sdk_select(json!(true))}]),
+        ] {
+            assert_eq!(
+                query(&host, &params).unwrap(),
+                json!({"data":[],"blockNumber":"0x0"}),
+                "{params}"
+            );
+        }
+        for params in [
+            json!([{"block":0}]),
+            json!([]),
+            json!([{"query":"n = u64(1)"}]),
+        ] {
+            assert_eq!(entity_count(&host, &params).unwrap(), json!(0), "{params}");
+        }
+    }
+    #[test]
+    fn engine_rejections_map_onto_the_sdk_table() {
+        use arkiv_db::{QueryFault as F, Rejection as R};
+        let kind_of = |reason: R| match rejection(&reason) {
+            ReadError::Query(q) => Some(q.kind),
+            ReadError::Node(e) => {
+                assert_eq!(e, Error("ReadRejected"));
+                None
+            }
+        };
+        assert_eq!(kind_of(R::CursorMismatch), Some(QueryErrorKind::Cursor));
+        assert_eq!(kind_of(R::OutOfBudget), Some(QueryErrorKind::Limits));
+        assert_eq!(
+            kind_of(R::InvalidQuery(F::TooManyGroups)),
+            Some(QueryErrorKind::Limits)
+        );
+        assert_eq!(
+            kind_of(R::InvalidQuery(F::TooManyLiterals)),
+            Some(QueryErrorKind::Limits)
+        );
+        assert_eq!(
+            kind_of(R::InvalidQuery(F::ValueTooLarge)),
+            Some(QueryErrorKind::Literal)
+        );
+        for fault in [
+            F::NotIndexable,
+            F::NotOrdered,
+            F::MixedBounds,
+            F::UnboundedRange,
+        ] {
+            assert_eq!(kind_of(R::InvalidQuery(fault)), Some(QueryErrorKind::Type));
+        }
+        // No fault of the query: a server error, never a query kind.
+        for reason in [
+            R::Unauthorized,
+            R::CostOverflow,
+            R::InvalidQuery(F::NoGroups),
+            R::InvalidQuery(F::ProjectionTooLarge),
+        ] {
+            assert_eq!(kind_of(reason), None);
+        }
+    }
+    #[test]
+    fn a_page_past_the_response_cap_is_shortened_and_its_cursor_continues() {
+        use crate::{
+            TxEnvelope, TxOp,
+            signed::{crypto::Signer, protocol::SignedTx},
+        };
+        use arkiv_db::Cell;
+        let mut host = fixture();
+        let signer = Signer::from_bytes([1; 32]).unwrap();
+        const BIG: u64 = 40;
+        for nonce in 0..BIG {
+            let mut request_id = [0x55; 32];
+            request_id[24..].copy_from_slice(&nonce.to_be_bytes());
+            let tx = TxEnvelope {
+                chain_id: host.genesis.genesis.chain_id,
+                actor: signer.address(),
+                request_id,
+                tx_budget: 2_000_000,
+                ops: vec![TxOp::Arkiv {
+                    namespace: arkiv::entity_namespace(),
+                    operation: arkiv::ArkivOperation::Create {
+                        salt: 100 + nonce as u128,
+                        flags: 0,
+                        expiry: crate::Expiry {
+                            expires_at: 0,
+                            min_lifetime: 100,
+                        },
+                        attributes: vec![
+                            (
+                                CellName::new("blob").unwrap(),
+                                Cell::field(Value::bytes(&vec![nonce as u8; 128 * 1024])),
+                            ),
+                            (
+                                CellName::new("big").unwrap(),
+                                Cell::attribute(Value::Bool(true)),
+                            ),
+                        ],
+                    },
+                }],
+            };
+            host.submit(SignedTx::sign(&host.genesis, nonce, tx, &signer).unwrap())
+                .unwrap();
+            if nonce % 4 == 3 {
+                host.produce().unwrap();
+            }
+        }
+        host.produce().unwrap();
+        assert_eq!(
+            entity_count(&host, &json!([{"query":"big = true"}])).unwrap(),
+            json!(BIG)
+        );
+        let at = format!("0x{:x}", host.head.height);
+        let options = json!({"atBlock":at,"limit":"0xc8","select":sdk_select(json!(true))});
+        let first = query(&host, &json!(["big = true", options])).unwrap();
+        let first_rows = first["data"].as_array().unwrap().clone();
+        let size = serde_json::to_vec(&first).unwrap().len();
+        // Each entity is about 256 KiB of JSON: the page stops below 8 MiB.
+        assert!(size <= RESPONSE_CAP, "{size}");
+        assert!(size > RESPONSE_CAP - 300 * 1024, "{size}");
+        assert!(first_rows.len() < BIG as usize && !first_rows.is_empty());
+        // The cursor follows the last row returned: the walk sees every
+        // entity exactly once.
+        let mut keys: Vec<_> = first_rows.iter().map(|e| e["key"].clone()).collect();
+        let mut cursor = first.get("cursor").cloned();
+        assert!(cursor.is_some());
+        while let Some(token) = cursor {
+            let mut more = options.clone();
+            more["cursor"] = token;
+            let page = query(&host, &json!(["big = true", more])).unwrap();
+            keys.extend(
+                page["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|e| e["key"].clone()),
+            );
+            cursor = page.get("cursor").cloned();
+        }
+        let distinct: std::collections::BTreeSet<_> = keys.iter().map(|k| k.to_string()).collect();
+        assert_eq!((keys.len(), distinct.len()), (BIG as usize, BIG as usize));
+        // A row that cannot fit even alone keeps the error.
+        assert_eq!(rows_within(&[json!("x".repeat(64))], 16).unwrap(), 0);
+        assert_eq!(rows_within(&[json!(1), json!(2)], 5).unwrap(), 2);
+        assert_eq!(rows_within(&[json!(1), json!(2)], 4).unwrap(), 1);
     }
     #[test]
     fn timing_uses_numeric_height_and_observed_whole_seconds() {

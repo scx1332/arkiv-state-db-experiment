@@ -91,8 +91,16 @@ counts are exactly those of the clause-order evaluation. Queries are admitted
 with the genesis group and literal bounds (8 and 8) unless the node runs with
 `--read-max-groups N` (1–64) or `--read-max-literals N` (1–256); a larger
 query still takes the bounded scan fallback (`arkiv_query`) or is refused
-(`arkiv_getEntityCount`, `QueryRejected`). These bounds are node-local: block
-execution never evaluates an SDK query.
+(`arkiv_getEntityCount`, code `-32004`, kind `limits`). These bounds are
+node-local: block execution never evaluates an SDK query.
+
+Before the entity namespace exists (a chain without a prefill, at height 0,
+before the proposer's bootstrap in block 1) `arkiv_query` answers an empty
+page and `arkiv_getEntityCount` answers `0`. A page whose entities would
+exceed the 8 MiB response cap is shortened instead: it returns the entities
+that fit, in order, with a cursor that continues right after the last one
+returned (the node re-reads the same pinned snapshot with the shorter limit,
+so paging is unchanged).
 
 ## Entities: user-defined columns
 
@@ -150,11 +158,12 @@ table (`src/query/errors.ts`), with a message naming the kind:
 | `-32001` | `parse` | The query does not parse. `data` is `{position, expected, got}`: the UTF-8 byte offset, what the parser expected, and the source text there (`end of query` at the end). |
 | `-32002` | `type` | A predicate is ill-typed: a range operator on an equality-only type, an unknown or unindexable type tag (`TYPEOF(x) = bytes`), a system attribute compared against the wrong type, `EXISTS($owner)`, or an unknown system attribute such as `$payload` or `$contentType`. `data` is `{position, got}`. |
 | `-32003` | `literal` | A literal fails validation: an `i32` out of range, a bad checksum, more than 18 decimal places. `data` is `{position, got}`. |
-| `-32004` | `limits` | A node budget is exceeded: more than 8192 bytes, 64 predicates or 32 levels of nesting, a Boolean expansion beyond 64 groups or 256 literals, a count beyond the read's group/literal bounds, an exhausted read budget or an 8 MiB response. |
+| `-32004` | `limits` | A node budget is exceeded: more than 8192 bytes, 64 predicates or 32 levels of nesting, a Boolean expansion beyond 64 groups or 256 literals, a count beyond the read's group/literal bounds, an exhausted read budget, or a single entity whose JSON alone exceeds the 8 MiB response cap. |
 | `-32005` | `cursor` | The cursor expired, is malformed, or belongs to another query, block or selection (cursors also need an explicit `atBlock`). |
 | `-32006` | `block` | The requested height is above the head or below the state floor (`HistoryPruned`, with `data.requested`/`data.floor`). |
 
-No other error uses these codes: invalid parameters are `-32602`,
+An engine refusal that is not the query's fault answers `-32000`
+(`ReadRejected`). No other error uses these codes: invalid parameters are `-32602`,
 `ServerBusy` is `-32010`, a WebSocket subscription past its per-connection
 cap is `-32011`, `ReadDeadlineExceeded` and other runtime errors are
 `-32000`. Cursor paging is unchanged by the UDC model.

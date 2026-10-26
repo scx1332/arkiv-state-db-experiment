@@ -16,9 +16,9 @@
 //! | Hash | Preimage |
 //! | --- | --- |
 //! | block hash | `digest("arkiv/header/v1", encode(header))` |
-//! | `inputs_digest` | `digest("arkiv/inputs/v1", encode(inputs))` |
+//! | `inputs_digest` | `digest("arkiv/inputs/v2", encode(inputs))` |
 //! | `outcomes_digest` | `digest("arkiv/outcomes/v1", encode(outcomes))` |
-//! | transaction digest | `digest("arkiv/tx/v1", encode(envelope))` |
+//! | transaction digest | `digest("arkiv/tx/v2", encode(envelope))` |
 //! | admin input digest | `digest("arkiv/admin/v1", encode(admin_input))` |
 //! | genesis `inputs_digest` | `digest("arkiv/genesis/v1", encode(genesis))` |
 //!
@@ -37,7 +37,9 @@ use arkiv_db::{
 
 /// Version of the block format: the layouts and tag tables of this module.
 /// Headers carry it, so a decoder never reinterprets another layout.
-pub const FORMAT_VERSION: u32 = 1;
+/// Version 2 carries entity attributes as cells (`kind ‖ value`) in
+/// `ArkivOperation`; version 1 carried bare values.
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Version of the execution rules a genesis selects. Version 2 is the
 /// user-defined-columns entity model: per-attribute indexed flags, user
@@ -47,11 +49,11 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// Domain of the block hash.
 pub const HEADER_DOMAIN: &str = "arkiv/header/v1";
 /// Domain of a block's inputs digest.
-pub const INPUTS_DOMAIN: &str = "arkiv/inputs/v1";
+pub const INPUTS_DOMAIN: &str = "arkiv/inputs/v2";
 /// Domain of a block's outcomes digest.
 pub const OUTCOMES_DOMAIN: &str = "arkiv/outcomes/v1";
 /// Domain of a transaction envelope's digest.
-pub const TX_DOMAIN: &str = "arkiv/tx/v1";
+pub const TX_DOMAIN: &str = "arkiv/tx/v2";
 /// Domain of an admin input's digest.
 pub const ADMIN_DOMAIN: &str = "arkiv/admin/v1";
 /// Domain of the genesis digest (the genesis block's inputs digest).
@@ -307,7 +309,7 @@ pub struct Header {
     /// Producer-chosen timestamp in milliseconds, never before the
     /// parent's. Execution never reads it.
     pub timestamp_ms: u64,
-    /// `digest("arkiv/inputs/v1", encode(inputs))`; the genesis digest for
+    /// `digest("arkiv/inputs/v2", encode(inputs))`; the genesis digest for
     /// the genesis block.
     pub inputs_digest: B256,
     /// `digest("arkiv/outcomes/v1", encode(outcomes))`.
@@ -807,7 +809,7 @@ pub struct TxEnvelope {
 }
 
 impl TxEnvelope {
-    /// `digest("arkiv/tx/v1", encode(self))`.
+    /// `digest("arkiv/tx/v2", encode(self))`.
     pub fn digest(&self) -> B256 {
         digest(TX_DOMAIN, &encode(self))
     }
@@ -849,7 +851,7 @@ pub struct BlockInputs {
 }
 
 impl BlockInputs {
-    /// `digest("arkiv/inputs/v1", encode(self))`.
+    /// `digest("arkiv/inputs/v2", encode(self))`.
     pub fn digest(&self) -> B256 {
         digest(INPUTS_DOMAIN, &encode(self))
     }

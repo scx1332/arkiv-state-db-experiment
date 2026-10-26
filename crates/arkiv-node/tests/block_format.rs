@@ -149,7 +149,8 @@ fn params_bytes() -> Vec<u8> {
 
 fn genesis_bytes() -> Vec<u8> {
     cat(&[
-        &be32(1),
+        // Format 2: entity operations carry attributes as cells.
+        &be32(2),
         // Protocol 2: the user-defined-columns entity rules.
         &be32(2),
         &be64(CHAIN),
@@ -198,7 +199,8 @@ fn chain_params_and_genesis() {
 #[test]
 fn genesis_versions_are_checked() {
     let mut bytes = genesis_bytes();
-    for version in [0u32, 2, u32::MAX] {
+    // Format 1 is the retired bare-value entity operation layout.
+    for version in [0u32, 1, 3, u32::MAX] {
         bytes[..4].copy_from_slice(&version.to_be_bytes());
         rejects::<Genesis>(
             &bytes,
@@ -245,7 +247,7 @@ fn headers_and_block_hashes() {
         state_root: hash(0x44),
     };
     let bytes = cat(&[
-        &be32(1),
+        &be32(2),
         &be64(CHAIN),
         &be64(5),
         &[0x11; 32],
@@ -257,7 +259,7 @@ fn headers_and_block_hashes() {
     assert_eq!(bytes.len(), 156);
     golden(&header, &bytes);
     assert_eq!(header.hash(), digest_of("arkiv/header/v1", &bytes));
-    for version in [0u32, 2, u32::MAX] {
+    for version in [0u32, 1, 3, u32::MAX] {
         let mut other = bytes.clone();
         other[..4].copy_from_slice(&version.to_be_bytes());
         rejects::<Header>(
@@ -292,7 +294,7 @@ fn genesis_block_header() {
     };
     assert_eq!(header, expected);
     let header_bytes = cat(&[
-        &be32(1),
+        &be32(2),
         &be64(CHAIN),
         &be64(0),
         &[0; 32],
@@ -311,7 +313,7 @@ fn genesis_block_header() {
 
 /// The hash of `support::genesis()`, pinned so a change to any genesis or
 /// header byte is deliberate.
-const GENESIS_HASH: &str = "dcae870e9fb324f007644ee4de69eb0306f04cc4a9e1078ebb5a0dad5e0d3ae9";
+const GENESIS_HASH: &str = "a09c4855b7d6b7fa87d47727d492ff1ea46b409ef3adc17657d30e90bd6520b8";
 
 #[test]
 fn admin_inputs() {
@@ -473,11 +475,11 @@ fn transaction_operations_and_envelopes() {
         &seq(&op_bytes),
     ]);
     golden(&envelope, &envelope_bytes);
-    assert_eq!(envelope.digest(), digest_of("arkiv/tx/v1", &envelope_bytes));
+    assert_eq!(envelope.digest(), digest_of("arkiv/tx/v2", &envelope_bytes));
 
     let empty = BlockInputs::default();
     golden(&empty, &[0; 8]);
-    assert_eq!(empty.digest(), digest_of("arkiv/inputs/v1", &[0; 8]));
+    assert_eq!(empty.digest(), digest_of("arkiv/inputs/v2", &[0; 8]));
     let admin = AdminInput {
         actor: ADMIN,
         request_id: request(3),
@@ -490,7 +492,7 @@ fn transaction_operations_and_envelopes() {
     };
     let inputs_bytes = cat(&[&seq(&[admin_bytes]), &seq(&[envelope_bytes])]);
     golden(&inputs, &inputs_bytes);
-    assert_eq!(inputs.digest(), digest_of("arkiv/inputs/v1", &inputs_bytes));
+    assert_eq!(inputs.digest(), digest_of("arkiv/inputs/v2", &inputs_bytes));
 }
 
 #[test]
@@ -667,12 +669,12 @@ fn blocks() {
         height: 1,
         parent_hash: hash(0x11),
         timestamp_ms: 2_000,
-        inputs_digest: digest_of("arkiv/inputs/v1", &[0; 8]),
+        inputs_digest: digest_of("arkiv/inputs/v2", &[0; 8]),
         outcomes_digest: digest_of("arkiv/outcomes/v1", &[0; 20]),
         state_root: hash(0x44),
     };
     let header_bytes = cat(&[
-        &be32(1),
+        &be32(2),
         &be64(CHAIN),
         &be64(1),
         &[0x11; 32],

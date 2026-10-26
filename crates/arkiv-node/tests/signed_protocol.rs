@@ -186,31 +186,31 @@ fn preimages_are_explicit_and_golden() {
     // Explicit byte-layout vectors pinned across dependency changes.
     assert_eq!(
         hex(g.hash().as_slice()),
-        "9331a53f8d5b6e4ced56215a834c1b098daae6072bc52c9148dcb49ba22d897a"
+        "38ebd02dac59bdedca688ce2d82bb2581c647e7d1be47acbcb49122bb89fd398"
     );
     assert_eq!(
         hex(tx.intent_digest().as_slice()),
-        "89d9bd0c4530d2ab793cd6bb382fd99290fe7cb602a81fdd98aff56f788eaaf0"
+        "1a6274a51077832220ac7f6d18345699cbba67f520967ca5c14ed29e32f26130"
     );
     assert_eq!(
         hex(tx.hash().as_slice()),
-        "0b2e91dcfbecfd1a587e2641ebf77b93f679b6802fa49e6f0000212b7d401aa5"
+        "7d079d3025be445738aef281a9f85258db2203192ba187211fe7be4973839f5b"
     );
     assert_eq!(
         hex(inputs.digest().as_slice()),
-        "f2d2b2ef095d4b51ee1df89759aa2ae30e41f980b526d0a12b50a683265e086d"
+        "6df081d271978bebdf7a483c6a282ef72418953953f3fbfe2b9fc5b4fec9b8b9"
     );
     assert_eq!(
         hex(header.intent_digest().as_slice()),
-        "9122f7a381e222bbc0da11a70b7e7f5d971bd084e3da1de27a9aa467b5259ae0"
+        "b1804acbe7474343ba77f46bf28cf8e8e2ffeaa709121aa7dfba931acdff36a3"
     );
     assert_eq!(
         hex(&tx.signature),
-        "81458b2697a790375f286a4b518e9d2900a2bde6988c9aa95fb68e3c46dfb5a62bc89410f171d36086f60e81631b6bed57862b8c4c5ab275dd93d956d5e40f3501"
+        "5556f5ecada2367b7996af3f5924452ccf52e7c2efcd202d6f1b9623942909cf1d8cde61a5e863a5b53b0f0d637ce988d1c0e65f0e5b17bf77f37a1519856fe101"
     );
     assert_eq!(
         hex(&header.signature),
-        "93361d8d67cb512e3bc37094884564ef44ec3f1d2456f6decdce7d2f70d039726e6ec66d429de0e8e1d30a3d7f025167e2a743116276bd3ac8a6fd8a5564873a00"
+        "94e90c0dcdcc744e2c55889707ad3a9fb6807f6e3eb6c005a725e12a6f11364852e4e9489f32d4b166c97fe682c7fdb1ed78d68a1769516f7a44e158ce952d4f01"
     );
 }
 

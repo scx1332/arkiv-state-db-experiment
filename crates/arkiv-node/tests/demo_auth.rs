@@ -62,7 +62,8 @@ fn literal_authentication_layout_vectors() {
     let signed = SignedHeader::sign(trust.genesis_hash, header, &key);
     // Hand-built widths/layout, independent of the authentication encoder.
     let mut header_bytes = Vec::new();
-    header_bytes.extend(1u32.to_be_bytes());
+    // Block format 2.
+    header_bytes.extend(2u32.to_be_bytes());
     header_bytes.extend(7u64.to_be_bytes());
     header_bytes.extend(0u64.to_be_bytes());
     header_bytes.extend([0; 32]);
@@ -95,15 +96,15 @@ fn literal_authentication_layout_vectors() {
     );
     assert_eq!(
         trust.genesis_hash.to_string(),
-        "0xb054edd5133f5bb0950183f81c6f736795a460f27fccdb50225e7ccf802b2218"
+        "0xd64d5a7e89d1cf43a868cbe54d117841c78f03c5146c7496e8f14ada11a90a89"
     );
     assert_eq!(
         signing_message(trust.genesis_hash, &header).to_string(),
-        "0x8f5a9335f973ccf0f4247c3b8fac3984937a73374b2ad05f090d63f8a1945b56"
+        "0x4e05e60ef3e86a74a1c85e0d0c3a891cdb8c909a45dbdcccb0a6966d25ee92af"
     );
     assert_eq!(
         wire::hex(&signed.signature),
-        "0x9fde4861b345e2305ac92ae8b2cb97ed6075efde423448640b813157ea582219a67fba9997eec7ecae3d48e44f4c0e9565cc431a009896688ed3fb10ff4a420c"
+        "0xac86157d912f2666a1e37c40794d91196e079c84f3ba682d4eb4a30e222b894d10cf3e619ab9d22b7c5672579f38460681adb460bae56cfbaaa99d26131d0604"
     );
     assert_eq!(decode_exact::<SignedHeader>(&envelope).unwrap(), signed);
     let mut bad = envelope.clone();

@@ -123,7 +123,7 @@ arkiv-node                        (library, volatile demo, durable simulator/sig
   vendored `alloy-trie` and `alloy-rlp`.
 
 - `arkiv-node` (node step N0b-3) is the host above the engine: block
-  format version 1 (genesis, headers, inputs, envelopes, outcomes) with
+  format version 2 (genesis, headers, inputs, envelopes, outcomes) with
   canonical encodings and hashes, the genesis invariants and the expiry
   reservation, static validation of requests, block selection, request
   identities with the pending/inclusion index, `execute_block` (admin

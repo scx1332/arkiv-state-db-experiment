@@ -10,7 +10,7 @@ compares between runs. It has two parts:
    engine type the node will put into blocks, receipts and state, and the
    domain-separated digest. Golden vectors are in
    [`crates/arkiv-db/tests/codec.rs`](../crates/arkiv-db/tests/codec.rs).
-2. **Block format version 1 and block execution** (node step N0b-3,
+2. **Block format version 2 and block execution** (node step N0b-3,
    implemented in the `arkiv-node` library): genesis, headers, block
    inputs, transaction envelopes and outcomes built from the codec in
    part 1, their hashes, the genesis invariants, the successor rule, and
@@ -371,9 +371,9 @@ root since node step N3b; see `docs/architecture.md`):
 | Domain | Hashes | Step |
 | --- | --- | --- |
 | `arkiv/header/v1` | encoded header (with the state root): the block hash | in use |
-| `arkiv/inputs/v1` | encoded block inputs | in use |
+| `arkiv/inputs/v2` | encoded block inputs (format 2: entity attributes as cells) | in use; `v1` retired |
 | `arkiv/outcomes/v1` | encoded block outcomes | in use |
-| `arkiv/tx/v1` | encoded transaction envelope | in use |
+| `arkiv/tx/v2` | encoded transaction envelope (format 2) | in use; `v1` retired |
 | `arkiv/admin/v1` | encoded admin input | in use |
 | `arkiv/genesis/v1` | encoded genesis | in use |
 | `arkiv/state/v1` | encoded state header: the state root | in use |
@@ -393,7 +393,7 @@ accepted short inputs matches the tag tables); and digests against
 `keccak256` over hand-assembled preimages. A unit test in `codec.rs` checks
 that a sequence decoder reserves no more bytes than its remaining input.
 
-## Part 2: block format version 1
+## Part 2: block format version 2
 
 ### Status
 
@@ -408,11 +408,17 @@ signed proposer add durable node storage.
 
 ### Versions
 
-- **Block format version** `FORMAT_VERSION = 1` covers every layout and
+- **Block format version** `FORMAT_VERSION = 2` covers every layout and
   tag table of this part. The genesis records it and every header starts
   with it; another format version is refused (`UnsupportedVersion { kind:
   "block format" }` or `{ kind: "header" }` when decoding,
-  `GenesisError::UnsupportedFormat` from `ChainSpec::new`).
+  `GenesisError::UnsupportedFormat` from `ChainSpec::new`). Format 2 changed
+  the `ArkivOperation` layout (`Create` attributes and `Patch` sets are
+  `(CellName, Cell)` instead of `(CellName, Value)`), so the two hashed
+  objects that contain it, the transaction envelope and the block inputs,
+  moved to the `arkiv/tx/v2` and `arkiv/inputs/v2` digest domains. Header,
+  genesis, outcome and admin layouts are unchanged and keep their domains;
+  the new `ArkivFault` tag 16 is a new variant, not a layout change.
 - **Protocol version** `PROTOCOL_VERSION = 2` names the execution rules of
   this document. The genesis records it; another protocol is refused
   (`UnsupportedVersion { kind: "protocol" }`,
@@ -523,9 +529,9 @@ the `AccountFault` (1 `InsufficientBalance`, 2 `Overflow`, 3 `Unsupported`). `Ex
 | Hash | Preimage |
 | --- | --- |
 | block hash | `digest("arkiv/header/v1", encode(header))` |
-| `inputs_digest` | `digest("arkiv/inputs/v1", encode(inputs))` |
+| `inputs_digest` | `digest("arkiv/inputs/v2", encode(inputs))` |
 | `outcomes_digest` | `digest("arkiv/outcomes/v1", encode(outcomes))` |
-| transaction digest | `digest("arkiv/tx/v1", encode(envelope))` |
+| transaction digest | `digest("arkiv/tx/v2", encode(envelope))` |
 | admin input digest | `digest("arkiv/admin/v1", encode(admin_input))` |
 | genesis digest | `digest("arkiv/genesis/v1", encode(genesis))` |
 
@@ -548,7 +554,7 @@ state.
 `ChainSpec::new` accepts a genesis only if (all arithmetic checked; an
 overflow fails the check):
 
-- format version 1 and protocol version 2;
+- format version 2 and protocol version 2;
 - `1 ≤ max_ops_per_tx ≤ max_ops_per_block`, `max_txs_per_block ≥ 1`,
   `expiry_per_block ≥ 1`, `user_budget ≥ 1`;
 - `8 + max_admin_per_block × MAX_ADMIN_BYTES + max_tx_bytes ≤

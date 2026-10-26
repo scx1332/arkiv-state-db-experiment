@@ -7,8 +7,8 @@ the machine fields and runtime behavior of the bounded implementation.
 ## Versions and identity
 
 `arkiv-launch-prefill-v1` is a signed genesis (version 1) whose optional
-`PrefillLaunch` is present. It uses the one native block format (version 1),
-protocol version 2 (the user-defined-columns entity model), state layout 1
+`PrefillLaunch` is present. It uses the one native block format (version 2),
+protocol version 2 (the user-defined-columns entity model), state layout 2
 and codec 1, and the `glm-v2` gas profile. A chain without a prefill uses the
 same signed genesis layout with the prefill absent and creates its entity
 namespace in block 1 instead. Prefills require a new chain/run directory. The

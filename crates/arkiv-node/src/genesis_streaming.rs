@@ -925,9 +925,9 @@ mod tests {
             build_bundle(&finite_base, &finite_path, &tmp.0.join("v2"), [2; 20], 4096).unwrap();
         assert_eq!(report["version"], 2);
         assert!(report.get("permanentPrefill").is_none());
-        // Pinned at the user-defined-columns row codec (protocol 2) on these
-        // same base and stream bytes, so any later change to how a version-2
-        // launch is built shows up here.
+        // Pinned at the user-defined-columns row codec (block format 2,
+        // protocol 2) on these same base and stream bytes, so any later
+        // change to how a version-2 launch is built shows up here.
         assert_eq!(
             (
                 report["genesisHash"].as_str(),
@@ -936,7 +936,7 @@ mod tests {
                 report["storageUnits"].as_str()
             ),
             (
-                Some("0xc06237facbac9114169341c62a1c6586e5ecc136ca5aec2e6e0d7b9c84191659"),
+                Some("0x7510cd7eb21ca5c8e98a55f02705a8a02b1b5573a0a99f0c1d284ab82eabc935"),
                 Some("0x592448eaf0dbb8695a272c7ece687a4025cf92027d546e9886ac0023fee34dd4"),
                 Some("600000000000"),
                 Some("12888")

@@ -3,8 +3,9 @@
 ## Unreleased
 
 **Breaking:** user-defined columns (UDC), the entity model of the JS SDK's
-`udc/docs` branch. Protocol version 2. Genesis files, prefill streams, stores
-and SDK clients from earlier builds are refused; start a fresh chain.
+`udc/docs` branch. Block format version 2 and protocol version 2. Genesis
+files, prefill streams, stores and SDK clients from earlier builds are
+refused; start a fresh chain.
 
 ### Entity model
 - An entity is its seven system cells plus named, typed user attributes. The
@@ -17,7 +18,9 @@ and SDK clients from earlier builds are refused; start a fresh chain.
   Type 0 stays the patch-only tombstone and may not carry the flag.
 - A patch stores each attribute with the flag of its new triple.
 - Entity operations carry each attribute as an engine `Cell` (kind ‖ value),
-  so the flag is signed, encoded in blocks and replayed.
+  so the flag is signed, encoded in blocks and replayed. This layout change
+  is block format version 2: transaction and block-input digests use the
+  `arkiv/tx/v2` and `arkiv/inputs/v2` domains.
 - Each `bytes` value is at most 128 KiB, and the `bytes` values of the
   resulting entity, after a create or patch, at most 128 KiB together
   (`ArkivFault::EntityTooLarge`, tag 16).

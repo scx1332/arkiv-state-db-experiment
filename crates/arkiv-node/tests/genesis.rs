@@ -239,10 +239,10 @@ fn every_invariant_is_checked() {
 #[test]
 fn versions_are_checked() {
     let mut bad = genesis();
-    bad.format_version = 2;
+    bad.format_version = 1;
     assert_eq!(
         ChainSpec::new(bad).err(),
-        Some(GenesisError::UnsupportedFormat(2))
+        Some(GenesisError::UnsupportedFormat(1))
     );
     // Protocol 1 is the retired payload entity model.
     for protocol in [0, 1, 3] {

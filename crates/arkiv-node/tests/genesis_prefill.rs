@@ -249,7 +249,7 @@ fn empty_prefill_has_namespace_and_ordinary_block_one() {
     );
     assert_eq!(
         g.hash().to_string(),
-        "0xfec5d1e48ded474ee51dacd2b44cf8189dd1f02824d482fc1e3540bbe7efbc9f"
+        "0x8c483d421deeef64bf110a0bcdefc5d93666cb375508e7768643280b3f12c20e"
     );
     assert_eq!(
         p.stream_hash.to_string(),

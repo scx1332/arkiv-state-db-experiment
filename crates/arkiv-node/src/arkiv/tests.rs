@@ -1075,10 +1075,13 @@ fn glm_updates_permanent_entities_with_capped_rent() {
     assert_eq!(rent_of(&late), 0);
     assert_eq!(spent(&late.outcome), spent(&noop.outcome));
     assert_eq!(read(&b, &k).expires_at, u64::MAX);
-    // A permanent entity is never shortened to a finite lifetime, including
-    // by a permissionless extender (creation flag 2), who may not extend it
-    // to permanent either: only the owner makes an entity permanent.
-    for caller in [[1; 20], [3; 20]] {
+    // A permanent entity is never shortened to a finite lifetime. A
+    // permissionless extender (creation flag 2) may not extend it at all:
+    // nothing it could ask is within one cap ahead and not shorter.
+    for (caller, fault) in [
+        ([1; 20], HostFault::ExpiryShortened),
+        ([3; 20], HostFault::Arkiv(ArkivFault::PermanenceOwnerOnly)),
+    ] {
         live.caller = caller;
         assert_eq!(
             run(
@@ -1089,14 +1092,12 @@ fn glm_updates_permanent_entities_with_capped_rent() {
                     expiry: at(u64::MAX - 1),
                 },
             ),
-            OpOutcome::HostRejected {
-                fault: HostFault::ExpiryShortened
-            }
+            OpOutcome::HostRejected { fault }
         );
     }
     assert_eq!(
         run(&mut b, &live, &extend_permanent),
-        rejected(ArkivFault::NotOwner)
+        rejected(ArkivFault::PermanenceOwnerOnly)
     );
     live.caller = [1; 20];
     let transfer = run_rent(
@@ -1399,7 +1400,7 @@ fn glm_failed_batches_roll_back_rent_debits() {
 }
 
 #[test]
-fn only_the_owner_makes_an_entity_permanent() {
+fn only_the_owner_extends_beyond_one_rent_cap() {
     let (_engine, mut b, mut live, _) = glm_permanent();
     let h = live.block_height;
     // A permissionless-extension entity (creation flag 2) of [1; 20].
@@ -1418,14 +1419,20 @@ fn only_the_owner_makes_an_entity_permanent() {
         key: k.clone(),
         expiry,
     };
-    // Anyone may extend it to a finite expiry, however far ...
+    // Anyone may extend it up to one rent cap ahead ...
     live.caller = [3; 20];
     applied(run(&mut b, &live, &extend(at(h + 20))));
-    applied(run(&mut b, &live, &extend(at(u64::MAX - 1))));
-    // ... but not to permanent, whether asked as u64::MAX or as a minimum
-    // lifetime that resolves to it.
+    applied(run(&mut b, &live, &extend(at(h + CAP))));
+    // ... but not further: not one block beyond, not the sentinel's
+    // neighbour, not permanent, however it is asked.
     for expiry in [
+        at(h + CAP + 1),
+        at(u64::MAX - 1),
         Expiry::PERMANENT,
+        Expiry {
+            expires_at: 0,
+            min_lifetime: CAP + 1,
+        },
         Expiry {
             expires_at: 0,
             min_lifetime: u64::MAX - h,
@@ -1433,11 +1440,18 @@ fn only_the_owner_makes_an_entity_permanent() {
     ] {
         assert_eq!(
             run(&mut b, &live, &extend(expiry)),
-            rejected(ArkivFault::NotOwner),
+            rejected(ArkivFault::PermanenceOwnerOnly),
             "{expiry:?}"
         );
     }
-    assert_eq!(read(&b, &k).expires_at, u64::MAX - 1);
+    assert_eq!(read(&b, &k).expires_at, h + CAP);
+    // The limit moves with the height: a cap ahead of the block extending.
+    live.block_height = h + 100;
+    applied(run(&mut b, &live, &extend(at(h + 100 + CAP))));
+    assert_eq!(
+        run(&mut b, &live, &extend(at(h + 101 + CAP))),
+        rejected(ArkivFault::PermanenceOwnerOnly)
+    );
     // The owner may.
     live.caller = [1; 20];
     applied(run(&mut b, &live, &extend(Expiry::PERMANENT)));
@@ -1453,16 +1467,20 @@ fn only_the_owner_makes_an_entity_permanent() {
     ));
     assert_eq!(
         run(&mut b, &live, &extend(Expiry::PERMANENT)),
-        rejected(ArkivFault::NotOwner)
+        rejected(ArkivFault::PermanenceOwnerOnly)
     );
     live.caller = [3; 20];
     applied(run(&mut b, &live, &extend(Expiry::PERMANENT)));
     // An entity without the flag stays owner-only for every extension.
     live.caller = [1; 20];
-    applied(run(&mut b, &live, &create_until(61, at(h + 10))));
+    applied(run(
+        &mut b,
+        &live,
+        &create_until(61, at(live.block_height + 10)),
+    ));
     let own = RecordKey::new(&derive_entity_key(live.chain_id, &live.caller, 3, 61)).unwrap();
     live.caller = [3; 20];
-    for expiry in [at(h + 20), Expiry::PERMANENT] {
+    for expiry in [at(live.block_height + 20), Expiry::PERMANENT] {
         assert_eq!(
             run(
                 &mut b,
@@ -1511,7 +1529,12 @@ fn the_prefill_waiver_precedes_any_quote() {
 fn the_admission_quote_matches_execution() {
     let (_engine, mut b, mut live, permanent) = glm_permanent();
     let quote = |b: &Branch, c: &ArkivExecutionContext, op: &ArkivOperation| {
-        u128::try_from(quote_rent(b, entity_namespace(), c, op).unwrap()).unwrap()
+        u128::try_from(
+            quote_tx(b, c, 0, [(entity_namespace(), op)])
+                .unwrap()
+                .rent_wei,
+        )
+        .unwrap()
     };
     let h = live.block_height;
     let finite = RecordKey::new(&derive_entity_key(live.chain_id, &live.caller, 2, 80)).unwrap();
@@ -1585,4 +1608,116 @@ fn the_admission_quote_matches_execution() {
         0,
         "the finite genesis row expired at 10"
     );
+}
+
+#[test]
+fn a_transaction_quote_sees_its_own_earlier_operations() {
+    let (_engine, mut b, live, permanent) = glm_permanent();
+    let h = live.block_height;
+    // Nonce 0 is the genesis permanent row, 1 the finite one: this is 2.
+    let created = RecordKey::new(&derive_entity_key(live.chain_id, &live.caller, 2, 90)).unwrap();
+    let ops = [
+        create_until(90, Expiry::PERMANENT),
+        ArkivOperation::Patch {
+            key: created.clone(),
+            set: vec![(name("note"), Cell::field(Value::bytes(&[3; 680])))],
+            remove: vec![],
+        },
+        ArkivOperation::Patch {
+            key: permanent.clone(),
+            set: vec![(name("more"), Cell::field(Value::str("grown")))],
+            remove: vec![],
+        },
+        ArkivOperation::ExtendExpiry {
+            key: created.clone(),
+            expiry: Expiry::PERMANENT,
+        },
+        ArkivOperation::Delete {
+            key: created.clone(),
+        },
+        // Deleted earlier in the same transaction: nothing to patch.
+        ArkivOperation::Patch {
+            key: created.clone(),
+            set: vec![(name("late"), Cell::field(Value::bytes(&[4; 64])))],
+            remove: vec![],
+        },
+    ];
+    let quoted = quote_tx(&b, &live, 0, ops.iter().map(|op| (entity_namespace(), op))).unwrap();
+    // Execute the first five as one batch; the last would fail it.
+    let (outcomes, rent) =
+        execute_batch(&mut b, entity_namespace(), &live, &ops[..5], 10_000_000).unwrap();
+    assert!(
+        outcomes
+            .iter()
+            .all(|o| matches!(o, OpOutcome::Applied { .. }))
+    );
+    assert_eq!(quoted.rent_wei, rent);
+    // The create's whole entity and both growths, nothing for the rest.
+    let note = 4 + 680 + 2;
+    let more = 4 + 5 + 2;
+    let entity = crate::gas::storage_units(&create_cells(
+        [0; 32],
+        live.caller,
+        h,
+        u64::MAX,
+        0,
+        &[(name("score"), Cell::attribute(Value::I32(-1)))],
+    ))
+    .unwrap()
+    .total;
+    assert_eq!(quoted.new_units, entity + note + more);
+    // Executed one by one, the operations report the same units.
+    let (_engine, mut b, live, _) = glm_permanent();
+    let added: u64 = ops[..5]
+        .iter()
+        .map(|op| run_rent(&mut b, &live, op).new_units)
+        .sum();
+    assert_eq!(added, quoted.new_units);
+}
+
+#[test]
+fn the_quote_margin_covers_an_extension_crossing_the_cap() {
+    let (_engine, mut b, live, _) = glm_permanent();
+    let h = live.block_height;
+    applied(run(&mut b, &live, &create_until(95, at(h + CAP / 2))));
+    let k = RecordKey::new(&derive_entity_key(live.chain_id, &live.caller, 2, 95)).unwrap();
+    let extend = ArkivOperation::ExtendExpiry {
+        key: k,
+        expiry: Expiry::PERMANENT,
+    };
+    let quote = |margin| {
+        quote_tx(&b, &live, margin, [(entity_namespace(), &extend)])
+            .unwrap()
+            .rent_wei
+    };
+    // Extending to permanent pays h + cap − old: one block more each block.
+    let now = quote(0);
+    let later = quote(64);
+    let units = units_of(
+        &b,
+        &RecordKey::new(&derive_entity_key(live.chain_id, &live.caller, 2, 95)).unwrap(),
+    );
+    assert_eq!(
+        later - now,
+        U256::from(
+            CLOCK
+                .wei(u128::from(units) * u128::from(CAP / 2 + 64))
+                .unwrap()
+                - CLOCK.wei(u128::from(units) * u128::from(CAP / 2)).unwrap()
+        )
+    );
+    // Executed 64 blocks later, it costs exactly the margin quote.
+    let late = ArkivExecutionContext {
+        block_height: h + 64,
+        ..live
+    };
+    assert_eq!(U256::from(rent_charged(&mut b, &late, &extend)), later);
+    // A create's rent only shrinks with time: the margin adds nothing.
+    let create = create_until(96, at(h + CAP / 2));
+    let at_margin = |margin| {
+        quote_tx(&b, &live, margin, [(entity_namespace(), &create)])
+            .unwrap()
+            .rent_wei
+    };
+    assert_eq!(at_margin(64), at_margin(0));
 }

@@ -10,7 +10,7 @@ use arkiv_node::{
         crypto::Signer,
         history::History,
         host::Host,
-        protocol::{SignedGenesis, SignedHeader, SignedTx},
+        protocol::{SignedBlock, SignedGenesis, SignedHeader, SignedInputs, SignedTx},
     },
 };
 use std::sync::Arc;
@@ -599,6 +599,8 @@ fn lifecycle_growth_extension_shrink_and_delete() {
     p.produce().unwrap();
     let shrink_gas = p.block(5).unwrap().outcomes.txs[0].spent;
     assert!(shrink_gas >= 21000);
+    // Writing nothing executes for less than writing 2 KiB.
+    assert!(shrink_gas < grow_gas);
     // No refunds: a shrink pays no rent and gets none back.
     assert_eq!(p.block(5).unwrap().outcomes.txs[0].rent_wei, U256::ZERO);
     p.submit(tx(
@@ -900,4 +902,325 @@ fn named_namespace_entities_preserve_rent_authority_proofs_and_expiry() {
         f.import(p.block(h).unwrap()).unwrap();
     }
     assert_eq!(p.head, f.head);
+}
+
+/// A chain whose blocks may add at most `cap` storage units, funding the
+/// proposer and the signers 2 to 9.
+fn capped(cap: u64) -> SignedGenesis {
+    let mut base = genesis();
+    base.genesis.params.max_new_storage_units_per_block = cap;
+    SignedGenesis::new(
+        base.genesis,
+        base.run_id,
+        base.proposer,
+        base.block_period_ms,
+        signed_support::allocations(&signed_support::actors(&[1, 2, 3, 4, 5, 6, 7, 8, 9])),
+    )
+    .unwrap()
+}
+fn create_bytes(salt: u128, bytes: usize) -> ArkivOperation {
+    create(salt, bytes, 1_000)
+}
+
+#[test]
+fn the_producer_defers_what_would_cross_the_storage_cap_and_followers_check_it() {
+    let g = capped(250_000);
+    let mut p = host_of(g.clone(), true);
+    let mut f = host_of(g.clone(), false);
+    p.produce().unwrap();
+    f.import(p.block(1).unwrap()).unwrap();
+    let s = |n| signed_support::signer(n);
+    // Three 100 KiB creates of about 103,000 units each, then a small one
+    // of the first sender.
+    for n in 2..=4 {
+        p.submit(tx_by(
+            &p,
+            &s(n),
+            0,
+            2_000_000,
+            vec![create_bytes(1, 100 * 1024)],
+        ))
+        .unwrap();
+    }
+    p.submit(tx_by(&p, &s(2), 1, 1_000_000, vec![create_bytes(2, 64)]))
+        .unwrap();
+    assert_eq!(p.pool.len(), 4);
+    let executions = p.block_executions;
+    p.produce().unwrap();
+    assert_eq!(p.block_executions, executions + 1);
+    let block = p.block(2).unwrap();
+    // The third large create would cross the cap: it waits; the small one
+    // after it still fits.
+    let actors: Vec<_> = block.inputs.txs.iter().map(|t| t.tx.actor).collect();
+    assert_eq!(actors, [s(2).address(), s(3).address(), s(2).address()]);
+    assert!(
+        block
+            .outcomes
+            .txs
+            .iter()
+            .all(|t| t.status == TxStatus::Committed)
+    );
+    assert_eq!(p.pool.len(), 1);
+    assert_eq!(
+        p.request_status(s(4).address(), [0; 32]).unwrap()["status"],
+        "pending"
+    );
+    f.import(block).unwrap();
+    p.produce().unwrap();
+    let block = p.block(3).unwrap();
+    assert_eq!(block.inputs.txs.len(), 1);
+    assert_eq!(block.inputs.txs[0].tx.actor, s(4).address());
+    f.import(block).unwrap();
+    assert_eq!(f.head, p.head);
+    assert!(p.pool.is_empty());
+    // A follower refuses a block over the cap, whatever its certificate: here
+    // three large creates the producer would never have put together.
+    let inputs = SignedInputs {
+        txs: (5..=7)
+            .map(|n| tx_by(&p, &s(n), 0, 2_000_000, vec![create_bytes(1, 100 * 1024)]))
+            .collect(),
+    };
+    let outcomes = arkiv_node::BlockOutcomes {
+        txs: (0..3)
+            .map(|_| arkiv_node::TxOutcome {
+                status: TxStatus::Committed,
+                ops: vec![],
+                spent: 0,
+                rent_wei: U256::ZERO,
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let header = arkiv_node::Header {
+        chain_id: 9200,
+        height: 4,
+        parent_hash: f.head.hash(),
+        timestamp_ms: g.timestamp(4).unwrap(),
+        inputs_digest: inputs.digest(),
+        outcomes_digest: outcomes.digest(),
+        state_root: f.head.state_root,
+    };
+    let forged = SignedBlock {
+        header: SignedHeader::sign(&g, header, &signer()).unwrap(),
+        inputs,
+        outcomes,
+    };
+    assert_eq!(f.import(forged).unwrap_err().0, "InvalidBlock");
+    assert_eq!(f.head, p.head);
+}
+
+#[test]
+fn a_transaction_over_the_storage_cap_is_refused_or_dropped() {
+    let mut p = host_of(capped(150_000), true);
+    p.produce().unwrap();
+    let s = |n| signed_support::signer(n);
+    // Two 80 KiB creates in one transaction add about 166,000 units: no block
+    // can hold them, so admission refuses them.
+    assert_eq!(
+        p.submit(tx_by(
+            &p,
+            &s(2),
+            0,
+            3_000_000,
+            vec![create_bytes(1, 80 * 1024), create_bytes(2, 80 * 1024)],
+        ))
+        .unwrap_err()
+        .0,
+        "ExceedsStorageCap"
+    );
+    assert!(p.pool.is_empty());
+    // A patch of an entity created by a pending transaction quotes nothing at
+    // admission; in the block it would add 60 KiB beside a 100 KiB create,
+    // more than the cap alone, so the producer drops it.
+    let entity = key_of(&s(3), 0, 1);
+    p.submit(tx_by(
+        &p,
+        &s(3),
+        0,
+        2_000_000,
+        vec![create_bytes(1, 64 * 1024)],
+    ))
+    .unwrap();
+    let doomed = tx_by(
+        &p,
+        &s(3),
+        1,
+        3_000_000,
+        vec![grow(&entity, 60 * 1024), create_bytes(2, 100 * 1024)],
+    );
+    let doomed_hash = doomed.hash();
+    p.submit(doomed).unwrap();
+    p.submit(tx_by(&p, &s(3), 2, 1_000_000, vec![create_bytes(3, 8)]))
+        .unwrap();
+    p.produce().unwrap();
+    let block = p.block(2).unwrap();
+    assert_eq!(block.inputs.txs.len(), 1);
+    assert!(
+        p.pool.is_empty(),
+        "the doomed transaction and its successor left"
+    );
+    let hash = arkiv_node::simulator::wire::hex(doomed_hash.as_slice());
+    assert_eq!(p.pool.dropped.reason(&hash), Some("ExceedsStorageCap"));
+    let status = p.request_status(s(3).address(), [1; 32]).unwrap();
+    assert_eq!(
+        (status["status"].as_str(), status["reason"].as_str()),
+        (Some("dropped"), Some("ExceedsStorageCap"))
+    );
+}
+
+#[test]
+fn poisoned_senders_cost_one_execution_per_block() {
+    // Per sender: a permanent create (quoted exactly), a growth of it that
+    // quotes nothing (the entity is not at the head yet) and a third
+    // transaction whose 3M-gas reservation the growth's rent consumes.
+    const K: u8 = 5;
+    let senders: Vec<Signer> = (0..K).map(|n| signed_support::signer(20 + n)).collect();
+    let txs = |s: &Signer| {
+        let entity = key_of(s, 0, 1);
+        [
+            (1_000_000u64, vec![permanent(1, 0)]),
+            (1_000_000, vec![grow(&entity, 680)]),
+            (
+                3_000_000,
+                vec![ArkivOperation::ExtendExpiry {
+                    key: entity,
+                    expiry: Expiry::PERMANENT,
+                }],
+            ),
+        ]
+    };
+    let dry = dry_run(&senders[0], &txs(&senders[0])[..2]);
+    // Enough for both rents and both fees as charged, one wei short of the
+    // third transaction's reservation once they are paid; admission, which
+    // quotes the growth at zero, still sees room for all three.
+    let funds = dry[0].0 + dry[1].0 + accounts::fee(dry[0].1 + dry[1].1) + accounts::fee(3_000_000)
+        - U256::from(1u64);
+    let base = genesis();
+    let mut allocations = vec![(signer().address(), signed_support::balance())];
+    allocations.extend(senders.iter().map(|s| (s.address(), funds)));
+    let g = SignedGenesis::new(
+        base.genesis,
+        base.run_id,
+        base.proposer,
+        base.block_period_ms,
+        AccountConfig::new(allocations).unwrap(),
+    )
+    .unwrap();
+    let mut p = host_of(g.clone(), true);
+    let mut f = host_of(g, false);
+    p.produce().unwrap();
+    f.import(p.block(1).unwrap()).unwrap();
+    for s in &senders {
+        for (nonce, (budget, ops)) in txs(s).into_iter().enumerate() {
+            p.submit(tx_by(&p, s, nonce as u64, budget, ops)).unwrap();
+        }
+    }
+    assert_eq!(p.pool.len(), 3 * K as usize);
+    let executions = p.block_executions;
+    p.produce().unwrap();
+    // One execution: every third transaction is left out in place, not
+    // rebuilt around, and then dropped as its sender can no longer cover it.
+    assert_eq!(p.block_executions, executions + 1);
+    let block = p.block(2).unwrap();
+    assert_eq!(block.inputs.txs.len(), 2 * K as usize);
+    assert!(
+        block
+            .outcomes
+            .txs
+            .iter()
+            .all(|t| t.status == TxStatus::Committed)
+    );
+    assert!(p.pool.is_empty());
+    for s in &senders {
+        let status = p.request_status(s.address(), [2; 32]).unwrap();
+        assert_eq!(
+            (status["status"].as_str(), status["reason"].as_str()),
+            (Some("dropped"), Some("InsufficientBalance"))
+        );
+    }
+    f.import(block).unwrap();
+    assert_eq!(f.head, p.head);
+    p.produce().unwrap();
+    assert_eq!(p.block_executions, executions + 2);
+}
+
+/// The reviewer's case: `[create E, patch E]` in one transaction now quotes
+/// the patch on the create, so 32 senders and a heavy prefix build every
+/// block in one execution.
+#[test]
+fn a_transaction_quote_covers_its_own_create_and_patch() {
+    const K: u8 = 32;
+    let heavy = signed_support::signer(2);
+    let senders: Vec<Signer> = (0..K).map(|n| signed_support::signer(40 + n)).collect();
+    let first = |s: &Signer| vec![permanent(1, 0), grow(&key_of(s, 0, 1), 680)];
+    let dry = dry_run(&senders[0], &[(1_000_000, first(&senders[0]))]);
+    let probe = tight_host(&senders[0], signed_support::balance());
+    let quoted = probe
+        .quote(&tx_by(&probe, &senders[0], 0, 1_000_000, first(&senders[0])).tx)
+        .unwrap();
+    assert_eq!(quoted.rent_wei, dry[0].0);
+    let funds = accounts::fee(1_000_000) + quoted.rent_wei + accounts::fee(10_000_000);
+    let base = genesis();
+    let mut allocations = vec![
+        (signer().address(), signed_support::balance()),
+        (heavy.address(), signed_support::balance()),
+    ];
+    allocations.extend(senders.iter().map(|s| (s.address(), funds)));
+    let mut p = host_of(
+        SignedGenesis::new(
+            base.genesis,
+            base.run_id,
+            base.proposer,
+            base.block_period_ms,
+            AccountConfig::new(allocations).unwrap(),
+        )
+        .unwrap(),
+        true,
+    );
+    p.produce().unwrap();
+    for s in &senders {
+        p.submit(tx_by(&p, s, 0, 1_000_000, first(s))).unwrap();
+    }
+    for n in 0..5u64 {
+        p.submit(tx_by(
+            &p,
+            &heavy,
+            n,
+            2_000_000,
+            vec![create_bytes(100 + n as u128, 100 * 1024)],
+        ))
+        .unwrap();
+    }
+    for s in &senders {
+        p.submit(tx_by(
+            &p,
+            s,
+            1,
+            10_000_000,
+            vec![ArkivOperation::ExtendExpiry {
+                key: key_of(s, 0, 1),
+                expiry: Expiry::PERMANENT,
+            }],
+        ))
+        .unwrap();
+    }
+    let total = p.pool.len();
+    assert_eq!(total, 2 * K as usize + 5);
+    let (executions, start) = (p.block_executions, p.head.height);
+    let mut included = 0;
+    while !p.pool.is_empty() {
+        p.produce().unwrap();
+        let block = p.block(p.head.height).unwrap();
+        assert!(
+            block
+                .outcomes
+                .txs
+                .iter()
+                .all(|t| t.status == TxStatus::Committed)
+        );
+        included += block.inputs.txs.len();
+        assert!(p.head.height - start < 10);
+    }
+    assert_eq!(included, total);
+    assert_eq!(p.block_executions - executions, p.head.height - start);
 }

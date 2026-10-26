@@ -12,8 +12,8 @@ proposer = "0x1111111111111111111111111111111111111111"
 
 [profile]
 path = "profiles/fixed-glm-v2.toml"
-bytes = 1467
-sha256 = "f1f9bd5a83b554d69b20e6438ac6fe737bc39929b3beff006527866b6cedff28"
+bytes = 1731
+sha256 = "1cd8e56e98b9a1345f35887087a18f54b9981db7d34522ebf0b464d3f50b02ec"
 
 [allocations]
 path = "allocations.toml"

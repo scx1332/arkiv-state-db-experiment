@@ -211,6 +211,10 @@ pub fn status(node: &Node) -> Json {
         "maxRentLifetimeSeconds":params.max_rent_lifetime_seconds.to_string(),
         "maxRentLifetimeBlocks":cap_blocks.map(|n| n.to_string()),
         "rentReceiptField":"rentFee",
+        // Rent is bounded by the sender's balance only, not by anything the
+        // transaction signs; the pool reserves a quote with a height margin.
+        "rentBound":"sender-balance", "rentQuoteMarginBlocks":crate::signed::pool::RENT_QUOTE_MARGIN_BLOCKS.to_string(),
+        "maxNewStorageUnitsPerBlock":params.max_new_storage_units_per_block.to_string(),
         "permanentEntitiesSupported":true, "refunds":false, "storageRefunds":false,
         "unusedGasRefunds":true,
         "scope":"live-state logical occupancy; archive history excluded"
@@ -232,6 +236,7 @@ pub fn status(node: &Node) -> Json {
         "expiresAt":u64::MAX.to_string(), "expirySweep":false,
         "liveCreate":true, "liveExtendToPermanent":"owner-only", "liveUpdate":true, "liveDelete":true,
         "extendPermanent":"owner-only no-op-success; a finite expiry is ExpiryShortened",
+        "permissionlessExtensionLimit":"height + maxRentLifetimeBlocks; further, permanence included, is owner-only (PermanenceOwnerOnly)",
         "rent":"capped-at-maxRentLifetimeSeconds",
         "genesisRows":if permanent_prefill {"sponsored-without-rent"} else {"none"}
     });

@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     BlockOutcomes, Header, Inclusion, RequestIdentity, Scope,
-    exec::execute_block_hooked,
+    exec::{DeferReason, build_block_hooked, execute_block_hooked},
     simulator::{
         metadata,
         wire::{FEED_CAP, FeedBlock, Identity, hex, json_bytes, proof_limits},
@@ -140,6 +140,9 @@ pub struct Host {
     pending: Option<Pending>,
     /// The last state-retention refusal, for API error details.
     pub refusal: crate::retention::Refusal,
+    /// Blocks this host has executed for production or import (simulations
+    /// excluded): production executes each candidate once.
+    pub block_executions: u64,
 }
 impl Host {
     #[allow(clippy::too_many_arguments)]
@@ -253,6 +256,7 @@ impl Host {
             signer,
             pending: None,
             refusal: Default::default(),
+            block_executions: 0,
         })
     }
     /// Install a verified, privately staged genesis without materializing its trie.
@@ -337,6 +341,7 @@ impl Host {
             prefill_file: Some(prefill_file),
             pending: None,
             refusal: Default::default(),
+            block_executions: 0,
         })
     }
     /// Relabel a verified, privately staged genesis store in place as this
@@ -509,6 +514,7 @@ impl Host {
             signer,
             pending: None,
             refusal: Default::default(),
+            block_executions: 0,
         };
         host.block(host.head.height)?;
         if host.signer.is_none() {
@@ -631,13 +637,7 @@ impl Host {
                 .parse::<u64>()
                 .map_err(|_| Error("StorageCorrupt"))?;
             // Rent is burned beside the fee, not as gas.
-            let rent = self
-                .block(inclusion.height)?
-                .outcomes
-                .txs
-                .get(inclusion.index as usize)
-                .ok_or(Error("StorageCorrupt"))?
-                .rent_wei;
+            let rent = &tx.rent_wei;
             return Ok(
                 json!({"gasUsed":gas_used.to_string(),"gasPriceWei":crate::accounts::GAS_PRICE_WEI.to_string(),"feeChargedWei":crate::accounts::fee(gas_used).to_string(),"rentChargedWei":rent.to_string(),"status":"included","actor":hex(actor.as_bytes()),"requestId":hex(&request_id),"nonce":nonce.to_string(),"transactionHash":hex(inclusion.digest.as_slice()),"height":inclusion.height.to_string(),"index":inclusion.index,"executionStatus":tx.status,"durability":"durable"}),
             );
@@ -645,6 +645,11 @@ impl Host {
         if let Some(tx) = self.pool.pending(actor, request_id) {
             return Ok(
                 json!({"status":"pending","actor":hex(actor.as_bytes()),"requestId":hex(&request_id),"transactionHash":hex(tx.hash().as_slice()),"nonce":tx.nonce.to_string(),"durability":"volatile"}),
+            );
+        }
+        if let Some((hash, reason)) = self.pool.dropped.request(actor, request_id) {
+            return Ok(
+                json!({"status":"dropped","reason":reason,"actor":hex(actor.as_bytes()),"requestId":hex(&request_id),"transactionHash":hash,"durability":"volatile"}),
             );
         }
         Ok(json!({"status":"unknown","actor":hex(actor.as_bytes()),"requestId":hex(&request_id)}))
@@ -674,24 +679,31 @@ impl Host {
         let balance = self
             .account(self.head.height, identity.actor)
             .map(|a| a.balance)?;
-        let rent = self.quote_rent(&tx.tx)?;
-        self.pool.insert_funded(tx, next, balance, rent)?;
+        // Nonce, size, capacity and fee first: only then read any entity.
+        if self.pool.admissible(&tx, next, balance)?.is_none() {
+            let quote = self.quote(&tx.tx)?;
+            if quote.new_units > self.genesis.genesis.params.max_new_storage_units_per_block {
+                return Err(Error("ExceedsStorageCap"));
+            }
+            self.pool.insert_funded(tx, next, balance, quote.rent_wei)?;
+        }
         self.request_status(identity.actor, identity.request_id)
     }
-    /// The rent `tx` would burn in the next block on the head state, each
-    /// Arkiv operation quoted alone ([`crate::arkiv::quote_rent`]): a create
-    /// reads nothing, a keyed operation its one entity. An operation that
-    /// builds on a pending one quotes what the head state gives (zero for an
-    /// entity not created yet); execution checks the real rent against the
-    /// sender's balance itself.
-    pub fn quote_rent(&self, tx: &crate::TxEnvelope) -> Result<alloy_primitives::U256> {
-        let mut total = alloy_primitives::U256::ZERO;
+    /// What `tx` would charge in the next block on the head state
+    /// ([`crate::arkiv::quote_tx`]): its operations in order, each seeing
+    /// what the earlier ones of `tx` created or changed, the rent reserved
+    /// at the larger of now and [`super::pool::RENT_QUOTE_MARGIN_BLOCKS`]
+    /// later. It reads each named entity once and creates read nothing. An
+    /// operation that builds on another pending transaction quotes what the
+    /// head shows (nothing for an entity not created yet); execution checks
+    /// the real rent against the sender's balance.
+    pub fn quote(&self, tx: &crate::TxEnvelope) -> Result<crate::arkiv::TxQuote> {
         if !tx
             .ops
             .iter()
             .any(|op| matches!(op, crate::TxOp::Arkiv { .. }))
         {
-            return Ok(total);
+            return Ok(crate::arkiv::TxQuote::default());
         }
         let spec = self.genesis.spec()?;
         let branch = self.engine.begin(self.engine.head(), None)?;
@@ -708,21 +720,23 @@ impl Host {
             payer: None,
             allow_permanent_create: false,
         };
-        for op in &tx.ops {
-            if let crate::TxOp::Arkiv {
+        let ops = tx.ops.iter().filter_map(|op| match op {
+            crate::TxOp::Arkiv {
                 namespace,
                 operation,
-            } = op
-            {
-                let rent = crate::arkiv::quote_rent(&branch, *namespace, &context, operation)
-                    .map_err(|e| match e {
-                        crate::ExecError::Storage(e) => Error::from(e),
-                        _ => Error("StorageCorrupt"),
-                    })?;
-                total = total.checked_add(rent).ok_or(Error("BalanceOverflow"))?;
-            }
-        }
-        Ok(total)
+            } => Some((*namespace, operation)),
+            _ => None,
+        });
+        crate::arkiv::quote_tx(
+            &branch,
+            &context,
+            super::pool::RENT_QUOTE_MARGIN_BLOCKS,
+            ops,
+        )
+        .map_err(|e| match e {
+            crate::ExecError::Storage(e) => Error::from(e),
+            _ => Error("StorageCorrupt"),
+        })
     }
     pub fn produce(&mut self) -> Result<SignedHeader> {
         if !self.is_producer() {
@@ -748,22 +762,10 @@ impl Host {
             self.pool
                 .insert_funded(signed, 0, balance, alloy_primitives::U256::ZERO)?;
         }
-        // A selected transaction whose sender can no longer cover its gas
-        // reservation (rent an earlier one paid exceeded its admission quote)
-        // would invalidate the block: drop it and its successors, build again.
-        // Every round evicts at least one entry, so this ends.
-        loop {
-            let inputs = self.pool.select(|actor| self.committed_nonce(actor))?;
-            match self.execute_publish_or_drop(inputs.clone(), None)? {
-                Ok(header) => return Ok(header),
-                Err(index) => {
-                    let tx = inputs.txs.get(index).ok_or(Error("InvalidBlock"))?;
-                    if self.pool.evict_from(tx.tx.actor, tx.nonce) == 0 {
-                        return Err(Error("InvalidBlock"));
-                    }
-                }
-            }
-        }
+        // One execution builds the block: a candidate that cannot be
+        // included is left out (exec::DeferReason) rather than rebuilt around.
+        let inputs = self.pool.select(|actor| self.committed_nonce(actor))?;
+        self.execute_publish(inputs, None)
     }
     pub fn import(&mut self, block: SignedBlock) -> Result<SignedHeader> {
         if self.is_producer() {
@@ -842,21 +844,16 @@ impl Host {
         }
         Ok(())
     }
+    /// Executes and publishes the next block: `expected`'s inputs when
+    /// importing (every transaction must fit), or the producer's candidate
+    /// `inputs`, built into a block without the candidates that cannot be
+    /// included. A candidate that alone exceeds the storage cap leaves the
+    /// pool; the others stay for a later block.
     fn execute_publish(
         &mut self,
         inputs: SignedInputs,
         expected: Option<&SignedBlock>,
     ) -> Result<SignedHeader> {
-        self.execute_publish_or_drop(inputs, expected)?
-            .map_err(|_| Error("InvalidBlock"))
-    }
-    /// [`Self::execute_publish`], with `Ok(Err(index))` when transaction
-    /// `index` cannot cover its gas reservation: nothing was prepared.
-    fn execute_publish_or_drop(
-        &mut self,
-        inputs: SignedInputs,
-        expected: Option<&SignedBlock>,
-    ) -> Result<std::result::Result<SignedHeader, usize>> {
         if self.health == "storage-fenced" || self.health == "chain-conflict" {
             return Err(Error("CommitUncertain"));
         }
@@ -887,35 +884,76 @@ impl Host {
         )?;
         let native = inputs.native();
         let mut captured = None;
-        let executed = execute_block_hooked(
-            &spec,
-            branch,
-            &self.head,
-            height,
-            self.genesis.timestamp(height)?,
-            &native,
-            Some(&self.genesis.accounts),
-            |branch, index, tx| {
-                let mut account = self.genesis.accounts.read(branch, tx.actor)?;
-                if account.nonce != inputs.txs[index].nonce || account.nonce == u64::MAX {
-                    return Err(StorageError::new(
-                        StorageErrorKind::Corrupt,
-                        "account nonce",
-                    ));
+        let accounts = &self.genesis.accounts;
+        let after_tx = |branch: &mut arkiv_db::Branch, index: usize, tx: &crate::TxEnvelope| {
+            let mut account = accounts.read(branch, tx.actor)?;
+            if account.nonce != inputs.txs[index].nonce || account.nonce == u64::MAX {
+                return Err(StorageError::new(
+                    StorageErrorKind::Corrupt,
+                    "account nonce",
+                ));
+            }
+            account.nonce += 1;
+            crate::accounts::put(branch, tx.actor, account)
+        };
+        let observer = |branch: &arkiv_db::Branch,
+                        executed: &crate::BlockInputs,
+                        outcomes: &BlockOutcomes,
+                        expired: &[crate::exec::ExpiredRecord]| {
+            captured = Some(metadata::capture(branch, executed, outcomes, expired)?);
+            Ok(())
+        };
+        let timestamp = self.genesis.timestamp(height)?;
+        self.block_executions += 1;
+        let executed = if expected.is_some() {
+            execute_block_hooked(
+                &spec,
+                branch,
+                &self.head,
+                height,
+                timestamp,
+                &native,
+                Some(accounts),
+                after_tx,
+                observer,
+            )
+        } else {
+            build_block_hooked(
+                &spec,
+                branch,
+                &self.head,
+                height,
+                timestamp,
+                &native,
+                Some(accounts),
+                after_tx,
+                observer,
+            )
+        };
+        let mut executed = executed.map_err(|e| match e {
+            crate::ExecError::Storage(e) => Error::from(e),
+            _ => Error("InvalidBlock"),
+        })?;
+        // The block holds the included candidates only, in order.
+        let inputs = if executed.deferred.is_empty() {
+            inputs
+        } else {
+            let mut left_out = executed.deferred.iter().map(|d| d.index).peekable();
+            let mut kept = SignedInputs::default();
+            for (index, tx) in inputs.txs.into_iter().enumerate() {
+                if left_out.next_if_eq(&index).is_none() {
+                    kept.txs.push(tx);
+                } else if executed
+                    .deferred
+                    .iter()
+                    .any(|d| d.index == index && d.reason == DeferReason::ExceedsStorageCap)
+                {
+                    // No block can hold it.
+                    self.pool
+                        .evict_from(tx.tx.actor, tx.nonce, "ExceedsStorageCap");
                 }
-                account.nonce += 1;
-                crate::accounts::put(branch, tx.actor, account)
-            },
-            |branch, outcomes, expired| {
-                captured = Some(metadata::capture(branch, &native, outcomes, expired)?);
-                Ok(())
-            },
-        );
-        let mut executed = match executed {
-            Ok(executed) => executed,
-            Err(crate::ExecError::Unaffordable { tx }) => return Ok(Err(tx as usize)),
-            Err(crate::ExecError::Storage(e)) => return Err(Error::from(e)),
-            Err(_) => return Err(Error("InvalidBlock")),
+            }
+            kept
         };
         executed.header.inputs_digest = inputs.digest();
         if height == 1
@@ -999,7 +1037,7 @@ impl Host {
             history_saved: false,
             engine_attempted: false,
         });
-        self.finish_pending(false).map(Ok)
+        self.finish_pending(false)
     }
     fn finish_pending(&mut self, retry: bool) -> Result<SignedHeader> {
         if self.health == "chain-conflict" {
@@ -1042,6 +1080,20 @@ impl Host {
                 }
                 self.pool.remove_committed(&pending.block.inputs);
                 self.head = pending.record.certificate.header;
+                if self.is_producer() {
+                    // Rent can exceed its quote: drop what a sender can no
+                    // longer cover before it is selected.
+                    let snapshot = self.engine.head_snapshot();
+                    let accounts = &self.genesis.accounts;
+                    self.pool.evict_unaffordable(|actor| {
+                        Ok(accounts
+                            .resolve(
+                                actor,
+                                snapshot.try_host_get(&crate::accounts::account_key(actor))?,
+                            )?
+                            .balance)
+                    })?;
+                }
                 self.health = if self.is_producer() {
                     if self.paused { "paused" } else { "running" }
                 } else {

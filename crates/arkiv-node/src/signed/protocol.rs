@@ -118,12 +118,15 @@ pub const MAX_CELLS: usize = 64;
 /// the development workload limits under GLM pricing, without admins, with
 /// the signed wire caps. Its [`MIN_CELLS`] cells per record fit a full entity.
 /// Its block period is `block_period_ms`, which the [`SignedGenesis`] must
-/// repeat, and its rent cap a year at any period
-/// ([`crate::gas::DEFAULT_RENT_CAP_SECONDS`]).
+/// repeat, its rent cap a year at any period
+/// ([`crate::gas::DEFAULT_RENT_CAP_SECONDS`]) and its storage cap the default
+/// ([`crate::gas::DEFAULT_MAX_NEW_STORAGE_UNITS_PER_BLOCK`]).
 pub fn default_native_genesis(chain_id: u64, timestamp_ms: u64, block_period_ms: u64) -> Genesis {
     let mut native = crate::demo::workload::genesis(chain_id, timestamp_ms);
     native.params.block_period_ms = block_period_ms;
     native.params.max_rent_lifetime_seconds = crate::gas::DEFAULT_RENT_CAP_SECONDS;
+    native.params.max_new_storage_units_per_block =
+        crate::gas::DEFAULT_MAX_NEW_STORAGE_UNITS_PER_BLOCK;
     native.admins.clear();
     native.pricing = crate::gas::schedule();
     native.params.max_admin_per_block = 0;

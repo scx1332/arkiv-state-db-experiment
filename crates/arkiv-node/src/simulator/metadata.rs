@@ -169,6 +169,7 @@ pub fn capture(
             }
             .into(),
             spent_units: result.spent.to_string(),
+            rent_wei: result.rent_wei.to_string(),
         });
         for (oppos, (op, result)) in tx.ops.iter().zip(&result.ops).enumerate() {
             let (status, receipt, effect, reason) = match result {

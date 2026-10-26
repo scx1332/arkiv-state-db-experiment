@@ -54,6 +54,7 @@ pub const PARAMS: ChainParams = ChainParams {
     max_lifetime: 100,
     block_period_ms: 2_000,
     max_rent_lifetime_seconds: arkiv_node::gas::DEFAULT_RENT_CAP_SECONDS,
+    max_new_storage_units_per_block: u64::MAX,
 };
 
 pub fn genesis_with(params: ChainParams, limits: Limits, pricing: PriceSchedule) -> Genesis {

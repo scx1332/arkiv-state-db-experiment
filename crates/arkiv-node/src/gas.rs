@@ -27,6 +27,29 @@ pub const DEFAULT_RENT_CAP_SECONDS: u64 = 365 * 24 * 60 * 60;
 pub const MAX_RENT_CAP_SECONDS: u64 = 100 * DEFAULT_RENT_CAP_SECONDS;
 /// The longest block period a genesis may set: one day.
 pub const MAX_BLOCK_PERIOD_MS: u64 = 86_400_000;
+/// Storage units of an entity's seven system cells and its fixed overhead:
+/// a create without user attributes. 512 + 180 cell bytes + 6 indexed × 128.
+pub const EMPTY_ENTITY_UNITS: u64 = 1_460;
+/// The default per-block storage cap,
+/// [`ChainParams::max_new_storage_units_per_block`]: 1,500,000 units, the
+/// most any block can add under the default signed limits
+/// ([`block_storage_bound`] of 786,432 input bytes and 128 operations is
+/// 1,497,600), rounded up. So it binds no block the input cap admits; a
+/// genesis lowers it to throttle storage growth.
+///
+/// [`ChainParams::max_new_storage_units_per_block`]: crate::ChainParams::max_new_storage_units_per_block
+pub const DEFAULT_MAX_NEW_STORAGE_UNITS_PER_BLOCK: u64 = 1_500_000;
+/// The most storage units the committed transactions of one block can add
+/// under its input and operation limits: every user cell costs at most its
+/// encoded input bytes (a name and value plus two tags, against a length
+/// prefix, a kind and a value tag in the input) plus 128 if indexed, and each
+/// operation adds at most an empty entity's units and 32 index reservations:
+/// `max_block_input_bytes + max_ops_per_block × (EMPTY_ENTITY_UNITS + 32 × 128)`.
+pub const fn block_storage_bound(max_block_input_bytes: u32, max_ops_per_block: u32) -> u64 {
+    max_block_input_bytes as u64
+        + max_ops_per_block as u64
+            * (EMPTY_ENTITY_UNITS + crate::arkiv::MAX_ATTRIBUTES as u64 * INDEX_OVERHEAD_UNITS)
+}
 
 /// A rent cap of `seconds` at `block_period_ms`, in whole blocks rounded up so
 /// the cap is never shorter than asked. `None` for a zero period or overflow.
@@ -381,6 +404,20 @@ mod tests {
             grow.unit_blocks,
             u128::from(u64::MAX - 1) * 3_153_600_000_000
         );
+    }
+    #[test]
+    fn the_default_storage_cap_binds_no_block_the_input_cap_admits() {
+        let empty = crate::arkiv::create_cells([7; 32], [1; 20], 9, u64::MAX, 3, &[]);
+        assert_eq!(storage_units(&empty).unwrap().total, EMPTY_ENTITY_UNITS);
+        let bound = block_storage_bound(crate::signed::protocol::INPUT_CAP, 128);
+        assert_eq!(bound, 786_432 + 128 * (1_460 + 32 * 128));
+        assert_eq!(bound, 1_497_600);
+        assert_eq!(
+            DEFAULT_MAX_NEW_STORAGE_UNITS_PER_BLOCK.max(bound),
+            DEFAULT_MAX_NEW_STORAGE_UNITS_PER_BLOCK
+        );
+        // Eleven full 128 KiB entities fit the default; the input cap admits five.
+        assert_eq!(DEFAULT_MAX_NEW_STORAGE_UNITS_PER_BLOCK / 133_134, 11);
     }
     #[test]
     fn the_clock_bounds_the_period_and_the_cap() {

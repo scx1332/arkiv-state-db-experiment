@@ -31,7 +31,7 @@ const DOCUMENT_CAP: usize = 1024 * 1024;
 const INPUT_CAP: usize = 8 * DOCUMENT_CAP;
 const ROW_CAP: usize = 256;
 const LOCK_FILE: &str = "genesis.lock.toml";
-const PRESET_ID: &str = "arkiv-entity-v3/glm-v2@3";
+const PRESET_ID: &str = "arkiv-entity-v3/glm-v2@4";
 /// The rent rule of the profile: capped GLM rent per second, debited outside
 /// gas ([`crate::gas::rent`]).
 const RENT_RULE: &str = "glm-rent-v3";
@@ -229,6 +229,8 @@ struct Params {
     /// `max_rent_lifetime_seconds`, applied in whole blocks (rounded up) at
     /// the chain's `block_period_ms`.
     max_rent_lifetime_seconds: String,
+    /// The consensus `max_new_storage_units_per_block`, at least 1.
+    max_new_storage_units_per_block: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -770,6 +772,10 @@ fn profile_native(profile: &Profile, chain: &Chain) -> Result<Genesis> {
             // Rent is priced at the chain's block period.
             block_period_ms: number(&chain.block_period_ms)?,
             max_rent_lifetime_seconds: rent_cap(p)?,
+            max_new_storage_units_per_block: match number(&p.max_new_storage_units_per_block)? {
+                0 => return Err("max_new_storage_units_per_block must be at least 1".into()),
+                units => units,
+            },
         },
         admins: Vec::new(),
     })
@@ -1301,7 +1307,7 @@ mod tests {
     fn compiled_preset_expansion_is_frozen() {
         assert_eq!(
             sha256(PRESET.as_bytes()),
-            "f1f9bd5a83b554d69b20e6438ac6fe737bc39929b3beff006527866b6cedff28"
+            "1cd8e56e98b9a1345f35887087a18f54b9981db7d34522ebf0b464d3f50b02ec"
         );
     }
 
@@ -1473,7 +1479,7 @@ mod tests {
         stdfs::write(fixture.0.join("profiles/custom.toml"), custom).unwrap();
         fixture.change(
             &fixture.inline(),
-            "profile = { preset = \"arkiv-entity-v3/glm-v2@3\" }",
+            "profile = { preset = \"arkiv-entity-v3/glm-v2@4\" }",
             "profile = { path = \"profiles/custom.toml\" }",
         );
         let custom = compile(&fixture.inline()).unwrap();

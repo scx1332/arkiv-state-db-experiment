@@ -20,7 +20,7 @@
 //! | `outcomes_digest` | `digest("arkiv/outcomes/v2", encode(outcomes))` |
 //! | transaction digest | `digest("arkiv/tx/v2", encode(envelope))` |
 //! | admin input digest | `digest("arkiv/admin/v1", encode(admin_input))` |
-//! | genesis `inputs_digest` | `digest("arkiv/genesis/v3", encode(genesis))` |
+//! | genesis `inputs_digest` | `digest("arkiv/genesis/v4", encode(genesis))` |
 //!
 //! The genesis block is height 0 with a zero parent hash, the genesis digest
 //! as its inputs digest, the digest of empty outcomes and the root of the
@@ -38,21 +38,24 @@ use arkiv_db::{
 /// Version of the block format: the layouts and tag tables of this module.
 /// Headers carry it, so a decoder never reinterprets another layout.
 /// Version 2 carries entity attributes as cells (`kind ‖ value`) in
-/// `ArkivOperation`; version 1 carried bare values. Version 4 adds the rent
+/// `ArkivOperation`; version 1 carried bare values. Version 5 adds the rent
 /// clock ([`ChainParams::block_period_ms`] and
-/// [`ChainParams::max_rent_lifetime_seconds`]) to the genesis and each
+/// [`ChainParams::max_rent_lifetime_seconds`]) and the per-block storage cap
+/// ([`ChainParams::max_new_storage_units_per_block`]) to the genesis and each
 /// transaction's burned rent ([`TxOutcome::rent_wei`]) to the outcomes.
-/// Version 3 (a rent cap in blocks, rent charged as gas) was never released.
-pub const FORMAT_VERSION: u32 = 4;
+/// Versions 3 and 4 (earlier drafts of these) were never released.
+pub const FORMAT_VERSION: u32 = 5;
 
 /// Version of the execution rules a genesis selects. Version 2 is the
 /// user-defined-columns entity model: per-attribute indexed flags, user
-/// `bytes` and no payload or content type ([`crate::arkiv`]). Version 4
-/// admits live permanent entities (only an owner makes one permanent), caps
-/// the rent of any lifetime at [`ChainParams::max_rent_lifetime_seconds`]
-/// and charges rent in GLM per second, debited from the sender outside the
-/// gas budget ([`crate::gas::rent`]).
-pub const PROTOCOL_VERSION: u32 = 4;
+/// `bytes` and no payload or content type ([`crate::arkiv`]). Version 5
+/// admits live permanent entities (only an owner extends one beyond a rent
+/// cap ahead, permanence included), caps the rent of any lifetime at
+/// [`ChainParams::max_rent_lifetime_seconds`], charges rent in GLM per
+/// second, debited from the sender outside the gas budget
+/// ([`crate::gas::rent`]), and bounds the storage units a block may add
+/// ([`ChainParams::max_new_storage_units_per_block`]).
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Domain of the block hash.
 pub const HEADER_DOMAIN: &str = "arkiv/header/v1";
@@ -65,7 +68,7 @@ pub const TX_DOMAIN: &str = "arkiv/tx/v2";
 /// Domain of an admin input's digest.
 pub const ADMIN_DOMAIN: &str = "arkiv/admin/v1";
 /// Domain of the genesis digest (the genesis block's inputs digest).
-pub const GENESIS_DOMAIN: &str = "arkiv/genesis/v3";
+pub const GENESIS_DOMAIN: &str = "arkiv/genesis/v4";
 
 /// The host-owned attribute holding a record's expiry height. Users can
 /// neither write nor remove it (any cell name starting with `$` is refused
@@ -173,6 +176,12 @@ pub struct ChainParams {
     /// so every lifetime of at least the cap, permanent included, costs the
     /// same.
     pub max_rent_lifetime_seconds: u64,
+    /// The most logical storage units ([`crate::gas::storage_units`]) the
+    /// committed transactions of one block may add, at least 1: a create adds
+    /// its entity's units, a patch its positive growth; shrinks, deletes and
+    /// expiry free nothing against it. A block over it is invalid; a producer
+    /// defers the transaction that would cross it to a later block.
+    pub max_new_storage_units_per_block: u64,
 }
 
 impl Encode for ChainParams {
@@ -189,11 +198,12 @@ impl Encode for ChainParams {
         encoder.u64(self.max_lifetime);
         encoder.u64(self.block_period_ms);
         encoder.u64(self.max_rent_lifetime_seconds);
+        encoder.u64(self.max_new_storage_units_per_block);
     }
 }
 
 impl Decode for ChainParams {
-    const MIN_ENCODED_LEN: usize = 8 + 8 + 7 * 4 + 8 + 8 + 8;
+    const MIN_ENCODED_LEN: usize = 8 + 8 + 7 * 4 + 8 + 8 + 8 + 8;
 
     fn decode_from(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
@@ -209,6 +219,7 @@ impl Decode for ChainParams {
             max_lifetime: decoder.u64()?,
             block_period_ms: decoder.u64()?,
             max_rent_lifetime_seconds: decoder.u64()?,
+            max_new_storage_units_per_block: decoder.u64()?,
         })
     }
 }
@@ -238,7 +249,7 @@ pub struct Genesis {
 }
 
 impl Genesis {
-    /// The genesis digest: `digest("arkiv/genesis/v3", encode(self))`.
+    /// The genesis digest: `digest("arkiv/genesis/v4", encode(self))`.
     pub fn digest(&self) -> B256 {
         digest(GENESIS_DOMAIN, &encode(self))
     }

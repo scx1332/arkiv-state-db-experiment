@@ -101,6 +101,49 @@ pub struct ExecutedBlock {
     pub outcomes: BlockOutcomes,
     /// The block's header.
     pub header: Header,
+    /// The candidate transactions a producer building the block left out,
+    /// in input order; always empty when executing a given block. The block
+    /// holds the others, in order.
+    pub deferred: Vec<Deferred>,
+}
+
+/// A candidate transaction left out of the block a producer built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Deferred {
+    /// Its index among the candidate inputs.
+    pub index: usize,
+    /// Why.
+    pub reason: DeferReason,
+}
+
+/// Why a producer left a candidate transaction out of its block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeferReason {
+    /// Its sender could not cover its gas reservation (rent an earlier
+    /// transaction paid exceeded its quote): including it would invalidate
+    /// the block ([`ExecError::Unaffordable`]).
+    Unaffordable,
+    /// It would take the block past `max_new_storage_units_per_block`; it
+    /// fits a later block.
+    StorageCapFull,
+    /// It alone adds more than `max_new_storage_units_per_block`: no block
+    /// can hold it.
+    ExceedsStorageCap,
+    /// An earlier transaction of its sender was left out, and its nonce
+    /// comes first.
+    SenderDeferred,
+}
+
+/// How a block's transactions are executed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// A given block: every transaction must fit, or the block is invalid.
+    Strict,
+    /// One disposable transaction without affordability or settlement.
+    Estimate,
+    /// A producer's candidate: transactions that cannot be included are
+    /// left out ([`Deferred`]) instead of invalidating the block.
+    Build,
 }
 
 /// How the expiry schedule in host state disagrees with itself or with the
@@ -193,11 +236,19 @@ pub enum ExecError {
     /// The sender of transaction `tx` cannot cover the gas reservation of
     /// its declared budget: the block is invalid. Admission checks gas,
     /// value and quoted rent, but rent an earlier transaction paid can
-    /// exceed its quote, so a producer drops such a transaction and builds
-    /// the block again.
+    /// exceed its quote, so a producer building a block leaves such a
+    /// transaction out ([`DeferReason::Unaffordable`]).
     Unaffordable {
         /// The transaction's index in the block.
         tx: u32,
+    },
+    /// The block's committed transactions add more storage units than
+    /// `max_new_storage_units_per_block`: the block is invalid.
+    StorageCapExceeded {
+        /// The units added through the transaction that crossed the cap.
+        added: u64,
+        /// The cap.
+        cap: u64,
     },
     /// The storage beneath the state failed: an availability error.
     Storage(StorageError),
@@ -230,6 +281,10 @@ impl fmt::Display for ExecError {
                     "transaction {tx} cannot cover its gas reservation"
                 )
             }
+            Self::StorageCapExceeded { added, cap } => write!(
+                formatter,
+                "the block adds {added} storage units, more than its cap of {cap}"
+            ),
             Self::Storage(error) => write!(formatter, "storage unavailable: {error}"),
             Self::ScheduleInconsistent(fault) => {
                 write!(formatter, "expiry schedule inconsistent: {fault:?}")
@@ -321,7 +376,7 @@ pub fn execute_block(
         height,
         timestamp_ms,
         inputs,
-        |_, _, _| Ok(()),
+        |_, _, _, _| Ok(()),
     )
 }
 
@@ -343,7 +398,12 @@ pub fn execute_block_observed(
     height: u64,
     timestamp_ms: u64,
     inputs: &BlockInputs,
-    observer: impl FnMut(&Branch, &BlockOutcomes, &[ExpiredRecord]) -> Result<(), StorageError>,
+    observer: impl FnMut(
+        &Branch,
+        &BlockInputs,
+        &BlockOutcomes,
+        &[ExpiredRecord],
+    ) -> Result<(), StorageError>,
 ) -> Result<ExecutedBlock, ExecError> {
     execute_block_hooked(
         spec,
@@ -370,7 +430,12 @@ pub(crate) fn execute_block_hooked(
     inputs: &BlockInputs,
     accounts: Option<&crate::accounts::AccountConfig>,
     after_tx: impl FnMut(&mut Branch, usize, &TxEnvelope) -> Result<(), StorageError>,
-    observer: impl FnMut(&Branch, &BlockOutcomes, &[ExpiredRecord]) -> Result<(), StorageError>,
+    observer: impl FnMut(
+        &Branch,
+        &BlockInputs,
+        &BlockOutcomes,
+        &[ExpiredRecord],
+    ) -> Result<(), StorageError>,
 ) -> Result<ExecutedBlock, ExecError> {
     execute_block_inner(
         spec,
@@ -380,7 +445,45 @@ pub(crate) fn execute_block_hooked(
         timestamp_ms,
         inputs,
         accounts,
-        false,
+        Mode::Strict,
+        after_tx,
+        observer,
+    )
+}
+
+/// [`execute_block_hooked`] for a producer building a block from candidate
+/// `inputs`: a transaction whose sender cannot cover its gas reservation, or
+/// that would take the block past its storage cap, is left out with its
+/// sender's later candidates instead of invalidating the block. The header
+/// and outcomes cover the included transactions only, in order; `after_tx`
+/// and the observer see candidate indexes and the included inputs. Each
+/// candidate executes at most once.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_block_hooked(
+    spec: &ChainSpec,
+    branch: Branch,
+    parent: &Header,
+    height: u64,
+    timestamp_ms: u64,
+    inputs: &BlockInputs,
+    accounts: Option<&crate::accounts::AccountConfig>,
+    after_tx: impl FnMut(&mut Branch, usize, &TxEnvelope) -> Result<(), StorageError>,
+    observer: impl FnMut(
+        &Branch,
+        &BlockInputs,
+        &BlockOutcomes,
+        &[ExpiredRecord],
+    ) -> Result<(), StorageError>,
+) -> Result<ExecutedBlock, ExecError> {
+    execute_block_inner(
+        spec,
+        branch,
+        parent,
+        height,
+        timestamp_ms,
+        inputs,
+        accounts,
+        Mode::Build,
         after_tx,
         observer,
     )
@@ -409,9 +512,9 @@ pub(crate) fn estimate_transaction(
             txs: vec![tx],
         },
         accounts,
-        true,
+        Mode::Estimate,
         |_, _, _| Ok(()),
-        |_, _, _| Ok(()),
+        |_, _, _, _| Ok(()),
     )?;
     Ok(executed
         .outcomes
@@ -430,9 +533,14 @@ fn execute_block_inner(
     timestamp_ms: u64,
     inputs: &BlockInputs,
     accounts: Option<&crate::accounts::AccountConfig>,
-    estimate: bool,
+    mode: Mode,
     mut after_tx: impl FnMut(&mut Branch, usize, &TxEnvelope) -> Result<(), StorageError>,
-    mut observer: impl FnMut(&Branch, &BlockOutcomes, &[ExpiredRecord]) -> Result<(), StorageError>,
+    mut observer: impl FnMut(
+        &Branch,
+        &BlockInputs,
+        &BlockOutcomes,
+        &[ExpiredRecord],
+    ) -> Result<(), StorageError>,
 ) -> Result<ExecutedBlock, ExecError> {
     validate::check_successor(spec, parent, height, timestamp_ms)
         .map_err(|fault| ExecError::InvalidBlock(BlockFault::Successor(fault)))?;
@@ -447,7 +555,7 @@ fn execute_block_inner(
     let mut executor = Executor {
         spec,
         accounts,
-        estimate,
+        estimate: mode == Mode::Estimate,
         branch,
         height,
         expires_at: expires_at_name(),
@@ -459,16 +567,66 @@ fn execute_block_inner(
         .map(|input| executor.admin(input))
         .collect::<Result<Vec<_>, _>>()?;
     let expiry = executor.sweep()?;
-    let txs = inputs
-        .txs
-        .iter()
-        .enumerate()
-        .map(|(index, tx)| {
-            let outcome = executor.tx(position(index), tx)?;
-            after_tx(&mut executor.branch, index, tx)?;
-            Ok::<_, ExecError>(outcome)
+    let cap = spec.params().max_new_storage_units_per_block;
+    let mut added = 0u64;
+    let mut txs = Vec::with_capacity(inputs.txs.len());
+    let mut deferred = Vec::new();
+    let mut held = std::collections::BTreeSet::new();
+    for (index, tx) in inputs.txs.iter().enumerate() {
+        if mode == Mode::Build {
+            let reason = if held.contains(&tx.actor) {
+                Some(DeferReason::SenderDeferred)
+            } else {
+                // An upper bound of what it adds, on the state it will see.
+                let estimate = executor.new_units(tx)?;
+                if estimate > cap {
+                    Some(DeferReason::ExceedsStorageCap)
+                } else if added.saturating_add(estimate) > cap {
+                    Some(DeferReason::StorageCapFull)
+                } else {
+                    None
+                }
+            };
+            if let Some(reason) = reason {
+                held.insert(tx.actor);
+                deferred.push(Deferred { index, reason });
+                continue;
+            }
+        }
+        let (outcome, units) = match executor.tx(position(index), tx) {
+            // The reservation failed before any write: nothing to undo.
+            Err(ExecError::Unaffordable { .. }) if mode == Mode::Build => {
+                held.insert(tx.actor);
+                deferred.push(Deferred {
+                    index,
+                    reason: DeferReason::Unaffordable,
+                });
+                continue;
+            }
+            result => result?,
+        };
+        after_tx(&mut executor.branch, index, tx)?;
+        added = added.saturating_add(units);
+        if added > cap {
+            return Err(ExecError::StorageCapExceeded { added, cap });
+        }
+        txs.push(outcome);
+    }
+    let included = if deferred.is_empty() {
+        std::borrow::Cow::Borrowed(inputs)
+    } else {
+        let mut left_out = deferred.iter().map(|d| d.index).peekable();
+        std::borrow::Cow::Owned(BlockInputs {
+            admin: inputs.admin.clone(),
+            txs: inputs
+                .txs
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| left_out.next_if_eq(index).is_none())
+                .map(|(_, tx)| tx.clone())
+                .collect(),
         })
-        .collect::<Result<Vec<_>, _>>()?;
+    };
     let spent = executor.branch.spent().units();
     let accounted = expiry
         .iter()
@@ -484,7 +642,7 @@ fn execute_block_inner(
         txs,
         spent,
     };
-    observer(&executor.branch, &outcomes, &executor.expired)?;
+    observer(&executor.branch, &included, &outcomes, &executor.expired)?;
     let candidate = executor
         .branch
         .try_seal()
@@ -494,7 +652,7 @@ fn execute_block_inner(
         height,
         parent_hash: parent.hash(),
         timestamp_ms,
-        inputs_digest: inputs.digest(),
+        inputs_digest: included.digest(),
         outcomes_digest: outcomes.digest(),
         state_root: candidate.state_root(),
     };
@@ -502,13 +660,14 @@ fn execute_block_inner(
         candidate,
         outcomes,
         header,
+        deferred,
     })
 }
 
-/// The outcome of one operation: applied (with the rent it charged), or the
-/// transaction fails here.
+/// The outcome of one operation: applied (with the rent it charged and the
+/// storage units it added), or the transaction fails here.
 enum Step {
-    Applied(OpOutcome, alloy_primitives::U256),
+    Applied(OpOutcome, alloy_primitives::U256, u64),
     Failed(OpOutcome),
 }
 
@@ -522,7 +681,7 @@ struct Executor<'s> {
     expired: Vec<ExpiredRecord>,
 }
 
-impl Executor<'_> {
+impl<'s> Executor<'s> {
     // -----------------------------------------------------------------------
     // Admin inputs.
 
@@ -718,7 +877,42 @@ impl Executor<'_> {
     // -----------------------------------------------------------------------
     // User transactions.
 
-    fn tx(&mut self, index: u32, tx: &TxEnvelope) -> Result<TxOutcome, ExecError> {
+    /// An upper bound of the storage units `tx` adds on the current state
+    /// ([`crate::arkiv::quote_tx`]): exact when it commits, nothing when it
+    /// fails.
+    fn new_units(&self, tx: &TxEnvelope) -> Result<u64, ExecError> {
+        let context = self.arkiv_context(tx.actor, None)?;
+        let ops = tx.ops.iter().filter_map(|op| match op {
+            TxOp::Arkiv {
+                namespace,
+                operation,
+            } => Some((*namespace, operation)),
+            _ => None,
+        });
+        Ok(crate::arkiv::quote_tx(&self.branch, &context, 0, ops)?.new_units)
+    }
+
+    fn arkiv_context(
+        &self,
+        actor: OwnerId,
+        payer: Option<&'s crate::accounts::AccountConfig>,
+    ) -> Result<crate::arkiv::ArkivExecutionContext<'s>, ExecError> {
+        Ok(crate::arkiv::ArkivExecutionContext {
+            caller: *actor.as_bytes(),
+            block_height: self.height,
+            chain_id: self.spec.chain_id(),
+            rent: crate::gas::RentClock::of(self.spec.params())
+                .ok_or(ExecError::Invariant(Invariant::RentClock))?,
+            expiry_per_block: self.spec.params().expiry_per_block,
+            payer,
+            // Live permanent creates pay the capped rent.
+            allow_permanent_create: false,
+        })
+    }
+
+    /// One transaction's outcome and the storage units it added (zero when
+    /// it failed).
+    fn tx(&mut self, index: u32, tx: &TxEnvelope) -> Result<(TxOutcome, u64), ExecError> {
         let charged_accounts = self.accounts.filter(|_| !self.estimate);
         if let Some(accounts) = charged_accounts {
             accounts
@@ -749,16 +943,20 @@ impl Executor<'_> {
                     if let Some(accounts) = charged_accounts {
                         accounts.settle(&mut self.branch, tx, 0)?;
                     }
-                    return Ok(TxOutcome {
-                        status: TxStatus::Failed { op_index: 0 },
-                        ops,
-                        spent: 0,
-                        rent_wei: alloy_primitives::U256::ZERO,
-                    });
+                    return Ok((
+                        TxOutcome {
+                            status: TxStatus::Failed { op_index: 0 },
+                            ops,
+                            spent: 0,
+                            rent_wei: alloy_primitives::U256::ZERO,
+                        },
+                        0,
+                    ));
                 }
             }
         }
         let mut rent = alloy_primitives::U256::ZERO;
+        let mut units = 0u64;
         for (op_index, op) in tx.ops.iter().enumerate() {
             let remaining = tx.tx_budget.saturating_sub(spent);
             let op_index = position(op_index);
@@ -771,10 +969,11 @@ impl Executor<'_> {
                 tx.ops.len() == 1 && spent == crate::gas::TX_INTRINSIC_GAS,
             )?;
             let (outcome, fails) = match step {
-                Step::Applied(outcome, charged) => {
+                Step::Applied(outcome, charged, added) => {
                     rent = rent
                         .checked_add(charged)
                         .ok_or(ExecError::Account(crate::accounts::AccountFault::Overflow))?;
+                    units = units.saturating_add(added);
                     (outcome, false)
                 }
                 Step::Failed(outcome) => (outcome, true),
@@ -803,20 +1002,24 @@ impl Executor<'_> {
                     }
                 }
                 ops.resize(tx.ops.len(), OpOutcome::NotExecuted);
-                // The rollback undid every rent debit and burn.
+                // The rollback undid every rent debit, burn and addition.
                 rent = alloy_primitives::U256::ZERO;
+                units = 0;
                 TxStatus::Failed { op_index }
             }
         };
         if let Some(accounts) = charged_accounts {
             accounts.settle(&mut self.branch, tx, spent)?;
         }
-        Ok(TxOutcome {
-            status,
-            ops,
-            spent,
-            rent_wei: rent,
-        })
+        Ok((
+            TxOutcome {
+                status,
+                ops,
+                spent,
+                rent_wei: rent,
+            },
+            units,
+        ))
     }
 
     /// The lifetime of the live record `key` in `namespace` before the
@@ -891,7 +1094,7 @@ impl Executor<'_> {
                 intrinsic_covers_transfer,
             )?;
             return Ok(if matches!(outcome, OpOutcome::Applied { .. }) {
-                Step::Applied(outcome, alloy_primitives::U256::ZERO)
+                Step::Applied(outcome, alloy_primitives::U256::ZERO, 0)
             } else {
                 Step::Failed(outcome)
             });
@@ -901,18 +1104,8 @@ impl Executor<'_> {
             operation,
         } = op
         {
-            let context = crate::arkiv::ArkivExecutionContext {
-                caller: *actor.as_bytes(),
-                block_height: self.height,
-                chain_id: self.spec.chain_id(),
-                rent: crate::gas::RentClock::of(self.spec.params())
-                    .ok_or(ExecError::Invariant(Invariant::RentClock))?,
-                expiry_per_block: self.spec.params().expiry_per_block,
-                // Estimation quotes rent without affordability or a debit.
-                payer: self.accounts.filter(|_| !self.estimate),
-                // Live permanent creates pay the capped rent.
-                allow_permanent_create: false,
-            };
+            // Estimation quotes rent without affordability or a debit.
+            let context = self.arkiv_context(actor, self.accounts.filter(|_| !self.estimate))?;
             let executed = crate::arkiv::execute_operation(
                 &mut self.branch,
                 *namespace,
@@ -921,7 +1114,7 @@ impl Executor<'_> {
                 Budget::limit(remaining),
             )?;
             return Ok(if matches!(executed.outcome, OpOutcome::Applied { .. }) {
-                Step::Applied(executed.outcome, executed.rent_wei)
+                Step::Applied(executed.outcome, executed.rent_wei, executed.new_units)
             } else {
                 Step::Failed(executed.outcome)
             });
@@ -1003,6 +1196,7 @@ impl Executor<'_> {
                 receipt: executed.receipt,
             },
             alloy_primitives::U256::ZERO,
+            0,
         ))
     }
 

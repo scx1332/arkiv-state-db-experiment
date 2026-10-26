@@ -42,6 +42,8 @@ pub fn genesis(chain_id: u64, timestamp_ms: u64) -> Genesis {
             // GLM chains charge rent.
             block_period_ms: 1_000,
             max_rent_lifetime_seconds: crate::gas::DEFAULT_RENT_CAP_SECONDS,
+            // No storage cap: the demo's 2 MiB blocks are not a signed profile.
+            max_new_storage_units_per_block: u64::MAX,
         },
         admins: vec![ALICE],
     }

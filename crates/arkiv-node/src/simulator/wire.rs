@@ -133,6 +133,8 @@ pub struct Transaction {
     pub budget_units: String,
     pub status: String,
     pub spent_units: String,
+    /// Entity rent burned beside the gas fee, in wei (zero when failed).
+    pub rent_wei: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

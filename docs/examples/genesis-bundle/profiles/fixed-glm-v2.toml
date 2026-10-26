@@ -38,6 +38,10 @@ max_lifetime = "6307200"
 # Consensus keeps seconds; the cap applies in whole blocks (rounded up) at the
 # chain's block period, and rent is priced per second, outside gas.
 max_rent_lifetime_seconds = "31536000" # 365 days; 1 to 3153600000 (100 years)
+# The most storage units one block's transactions may add (creates and growth).
+# 1,500,000 binds no block the 786,432-byte input cap admits; lower it to
+# throttle storage growth. The producer defers what does not fit.
+max_new_storage_units_per_block = "1500000"
 
 [signed_limits]
 # An Ethereum transaction carries its raw bytes beside the native envelope:

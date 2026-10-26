@@ -100,7 +100,7 @@ for row in rows:
     nonces[row["creator"]].append(uint(row["create_nonce"]))
     uint(row["salt"], 128)
     expiry = uint(row["expires_at_height"])
-    # Entity lifetimes are unbounded since protocol 4; only the rent is capped.
+    # Entity lifetimes are unbounded since protocol 5; only the rent is capped.
     require(0 < expiry, "expiry bounds")
     require(0 < uint(profile["chain_params"]["max_rent_lifetime_seconds"]) <= 3153600000, "rent cap")
     require(expiry != 2**64 - 1, "permanent expiry")

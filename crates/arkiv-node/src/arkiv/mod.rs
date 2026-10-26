@@ -23,7 +23,7 @@ pub enum ArkivFault {
     Namespace = 11,
     Duplicate = 12,
     GasOverflow = 13,
-    /// Retired: live permanent entities are supported since protocol 4. The
+    /// Retired: live permanent entities are supported since protocol 5. The
     /// tag stays reserved and is never produced.
     PermanentStorageUnsupported = 14,
     UnsupportedGasOperation = 15,
@@ -33,6 +33,11 @@ pub enum ArkivFault {
     /// The sender's balance, after its transaction's gas reservation, cannot
     /// pay the operation's rent. Nothing of the operation applies.
     InsufficientRentBalance = 17,
+    /// A permissionless extension (creation flag 2) by someone other than
+    /// the owner asks for more than one rent cap ahead
+    /// (`height + cap_blocks`): further expiries, permanence included, are
+    /// the owner's alone.
+    PermanenceOwnerOnly = 18,
 }
 impl Encode for ArkivFault {
     fn encode_to(&self, e: &mut Encoder) {
@@ -60,6 +65,7 @@ impl Decode for ArkivFault {
             15 => Self::UnsupportedGasOperation,
             16 => Self::EntityTooLarge,
             17 => Self::InsufficientRentBalance,
+            18 => Self::PermanenceOwnerOnly,
             tag => {
                 return Err(DecodeError::UnknownTag {
                     kind: "ArkivFault",
@@ -275,18 +281,24 @@ pub struct ArkivExecutionContext<'a> {
     /// lifetime at or beyond the cap.
     pub allow_permanent_create: bool,
 }
-/// One executed operation and the rent it charged: nonzero only when the
-/// operation applied (a payer was debited that much, or would have been).
+/// One executed operation, the rent it charged and the storage units it
+/// added: both nonzero only when the operation applied (a payer was debited
+/// the rent, or would have been).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArkivOutcome {
     pub outcome: OpOutcome,
     pub rent_wei: alloy_primitives::U256,
+    /// Storage units the operation added: a create's whole entity, a patch's
+    /// positive growth, zero otherwise. Counted against
+    /// [`crate::ChainParams::max_new_storage_units_per_block`].
+    pub new_units: u64,
 }
 impl From<OpOutcome> for ArkivOutcome {
     fn from(outcome: OpOutcome) -> Self {
         Self {
             outcome,
             rent_wei: alloy_primitives::U256::ZERO,
+            new_units: 0,
         }
     }
 }
@@ -426,10 +438,14 @@ pub fn execute_operation(
             Ok(t) => t,
             Err(fault) => return Ok(OpOutcome::HostRejected { fault }.into()),
         };
-        // Permissionless extension (creation flag 2) admits anyone's finite
-        // extension; only the owner may make an entity permanent.
-        if target == u64::MAX && current.as_ref().is_some_and(|p| p.owner != c.caller) {
-            return Ok(rejected(ArkivFault::NotOwner).into());
+        // Permissionless extension (creation flag 2) admits anyone's
+        // extension up to one rent cap ahead. Further, permanence included,
+        // is the owner's alone: rent stops at the cap, so a longer extension
+        // would be a lifetime nobody paid for beyond it.
+        if current.as_ref().is_some_and(|p| p.owner != c.caller)
+            && target > c.block_height.saturating_add(c.rent.cap_blocks())
+        {
+            return Ok(rejected(ArkivFault::PermanenceOwnerOnly).into());
         }
         if old.is_some_and(|v| target < v) {
             return Ok(OpOutcome::HostRejected {
@@ -535,29 +551,29 @@ pub fn execute_operation(
     let waived = c.allow_permanent_create
         && new == Some(u64::MAX)
         && matches!(op, ArkivOperation::Create { .. });
+    let deleted = matches!(write, WriteOp::DeleteRecord { .. });
+    let units = |cells: &[(CellName, Cell)]| crate::gas::storage_units(cells).map(|u| u.total);
+    let (before, after) = match (
+        if current.is_some() {
+            units(&current_cells)
+        } else {
+            Ok(0)
+        },
+        if deleted { Ok(0) } else { units(&after_cells) },
+    ) {
+        (Ok(before), Ok(after)) => (before, after),
+        _ => return Ok(rejected(ArkivFault::GasOverflow).into()),
+    };
+    let new_units = after.saturating_sub(before);
     let rent = if crate::gas::is_active(branch.pricing()) && !waived {
-        let quoted = (|| {
-            let before = if current.is_some() {
-                crate::gas::storage_units(&current_cells)?.total
-            } else {
-                0
-            };
-            let deleted = matches!(write, WriteOp::DeleteRecord { .. });
-            let after = if deleted {
-                0
-            } else {
-                crate::gas::storage_units(&after_cells)?.total
-            };
-            crate::gas::rent(
-                before,
-                after,
-                old,
-                if deleted { None } else { new },
-                c.block_height,
-                c.rent,
-            )
-        })();
-        match quoted {
+        match crate::gas::rent(
+            before,
+            after,
+            old,
+            if deleted { None } else { new },
+            c.block_height,
+            c.rent,
+        ) {
             Ok(quote) => alloy_primitives::U256::from(quote.wei),
             Err(_) => return Ok(rejected(ArkivFault::GasOverflow).into()),
         }
@@ -620,6 +636,7 @@ pub fn execute_operation(
             receipt: result.receipt,
         },
         rent_wei: rent,
+        new_units,
     })
 }
 /// `cells` after a patch that sets `set` and removes `remove`.
@@ -633,104 +650,158 @@ fn patched(
     cells.extend(set.iter().cloned());
     cells
 }
-/// The rent `op` would charge applied alone at `c.block_height` on `branch`,
-/// in wei: an admission quote, not consensus. It reads at most the one
-/// entity the operation names (a create reads nothing) and checks neither
-/// authority nor capacity; an operation that could not apply quotes zero.
-/// Execution prices every operation again ([`execute_operation`]); where
-/// both apply to the same state, they agree.
-pub fn quote_rent(
+/// What the Arkiv operations of one transaction would charge, applied in
+/// order on `branch` at `c.block_height`, each seeing what the earlier ones
+/// created or changed: an admission and block-building estimate, never
+/// consensus ([`execute_operation`] prices every operation again).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TxQuote {
+    /// The rent: per operation the larger of its rent at `c.block_height` and
+    /// `margin` blocks later. Rent is monotone in the height for every
+    /// operation (an extension across the cap grows by one block of its size
+    /// per block, everything else shrinks), so this covers any execution
+    /// within `margin` blocks.
+    pub rent_wei: alloy_primitives::U256,
+    /// The storage units the operations add: a create's entity, a patch's
+    /// positive growth. Exact when every operation applies to the state
+    /// quoted; a transaction that fails adds nothing, so it never undercounts.
+    pub new_units: u64,
+}
+/// The entity state the earlier operations of a quoted transaction left:
+/// `None` once deleted.
+type Overlay =
+    std::collections::BTreeMap<(NamespaceId, Vec<u8>), Option<(Vec<(CellName, Cell)>, u64)>>;
+/// [`TxQuote`] of `ops`. Reads at most each named entity once and the
+/// caller's creation nonce; checks neither authority nor capacity, and an
+/// operation that could not apply quotes nothing.
+pub fn quote_tx<'o>(
     branch: &Branch,
-    namespace: NamespaceId,
     c: &ArkivExecutionContext<'_>,
-    op: &ArkivOperation,
-) -> Result<alloy_primitives::U256, ExecError> {
-    let zero = alloy_primitives::U256::ZERO;
-    if !crate::gas::is_active(branch.pricing()) || op.validate().is_err() {
-        return Ok(zero);
-    }
-    let (current_cells, old) = match op.key() {
-        None => (Vec::new(), None),
-        Some(key) => {
-            let row = match branch.try_get_record(
-                namespace,
-                key,
-                &Projection::ALL,
-                Budget::unlimited(),
-            )? {
-                Ok(read) => read.value,
-                Err(_) => None,
-            };
-            let Some(row) = row else { return Ok(zero) };
-            let Ok(projected) = project(&row) else {
-                return Ok(zero);
-            };
-            if projected.expires_at <= c.block_height {
-                return Ok(zero);
-            }
-            (row.cells, Some(projected.expires_at))
-        }
-    };
-    let new = match op.expiry() {
-        Some(exp) => match expiry(exp, c) {
-            Ok(target) if old.is_none_or(|v| target >= v) => Some(target),
-            _ => return Ok(zero),
-        },
-        None => old,
-    };
-    let stamp = (
-        name("$updatedAt"),
-        Cell::attribute(Value::U64(c.block_height)),
-    );
-    let after_cells = match op {
-        ArkivOperation::Create {
-            flags, attributes, ..
-        } => create_cells(
-            // Every system cell has a fixed size, so the key does not matter.
-            [0; 32],
-            c.caller,
-            c.block_height,
-            new.unwrap_or(u64::MAX),
-            *flags,
-            attributes,
-        ),
-        ArkivOperation::Patch { set, remove, .. } => {
-            let mut changes = vec![stamp];
-            changes.extend_from_slice(set);
-            patched(&current_cells, &changes, remove)
-        }
-        ArkivOperation::ExtendExpiry { .. } => patched(
-            &current_cells,
-            &[
-                stamp,
-                (
-                    name("$expiresAt"),
-                    Cell::attribute(Value::U64(new.unwrap_or(u64::MAX))),
-                ),
-            ],
-            &[],
-        ),
-        ArkivOperation::TransferOwnership { .. } | ArkivOperation::Delete { .. } => {
-            return Ok(zero);
-        }
-    };
+    margin: u64,
+    ops: impl IntoIterator<Item = (NamespaceId, &'o ArkivOperation)>,
+) -> Result<TxQuote, ExecError> {
+    let mut quote = TxQuote::default();
+    let mut overlay = Overlay::new();
+    let mut nonce = None;
     let units = |cells: &[(CellName, Cell)]| crate::gas::storage_units(cells).map(|u| u.total);
-    let before = if op.key().is_some() {
-        units(&current_cells)
-    } else {
-        Ok(0)
-    };
-    let quote = before.and_then(|before| {
-        crate::gas::rent(
-            before,
-            units(&after_cells)?,
-            old,
-            new,
-            c.block_height,
-            c.rent,
-        )
-    });
-    Ok(quote.map_or(zero, |q| alloy_primitives::U256::from(q.wei)))
+    let glm = crate::gas::is_active(branch.pricing());
+    for (namespace, op) in ops {
+        if op.validate().is_err() {
+            continue;
+        }
+        let current = match op.key() {
+            None => None,
+            Some(key) => {
+                let slot = (namespace, key.as_bytes().to_vec());
+                let state = match overlay.get(&slot) {
+                    Some(state) => state.clone(),
+                    None => match branch.try_get_record(
+                        namespace,
+                        key,
+                        &Projection::ALL,
+                        Budget::unlimited(),
+                    )? {
+                        Ok(read) => read
+                            .value
+                            .and_then(|row| project(&row).ok().map(|p| (row.cells, p.expires_at))),
+                        Err(_) => None,
+                    },
+                };
+                match state {
+                    Some((cells, expiry)) if expiry > c.block_height => Some((cells, expiry)),
+                    _ => continue,
+                }
+            }
+        };
+        let old = current.as_ref().map(|(_, expiry)| *expiry);
+        let target = |at: u64| match op.expiry() {
+            Some(exp) => expiry(
+                exp,
+                &ArkivExecutionContext {
+                    block_height: at,
+                    ..*c
+                },
+            )
+            .ok()
+            .filter(|t| old.is_none_or(|v| *t >= v)),
+            None => old,
+        };
+        let Some(new) = target(c.block_height) else {
+            continue;
+        };
+        let stamp = (
+            name("$updatedAt"),
+            Cell::attribute(Value::U64(c.block_height)),
+        );
+        let current_cells = current.map(|(cells, _)| cells).unwrap_or_default();
+        let (key, after_cells) = match op {
+            ArkivOperation::Create {
+                salt,
+                flags,
+                attributes,
+                ..
+            } => {
+                let next = match nonce {
+                    Some(n) => n,
+                    None => count(branch, &nonce_key(&c.caller))?,
+                };
+                nonce = next.checked_add(1);
+                let key = derive_entity_key(c.chain_id, &c.caller, next, *salt);
+                let cells = create_cells(key, c.caller, c.block_height, new, *flags, attributes);
+                (key.to_vec(), cells)
+            }
+            ArkivOperation::Patch { key, set, remove } => {
+                let mut changes = vec![stamp];
+                changes.extend_from_slice(set);
+                (
+                    key.as_bytes().to_vec(),
+                    patched(&current_cells, &changes, remove),
+                )
+            }
+            ArkivOperation::ExtendExpiry { key, .. } => (
+                key.as_bytes().to_vec(),
+                patched(
+                    &current_cells,
+                    &[
+                        stamp,
+                        (name("$expiresAt"), Cell::attribute(Value::U64(new))),
+                    ],
+                    &[],
+                ),
+            ),
+            ArkivOperation::TransferOwnership { .. } => continue,
+            ArkivOperation::Delete { key } => {
+                overlay.insert((namespace, key.as_bytes().to_vec()), None);
+                continue;
+            }
+        };
+        let (Ok(before), Ok(after)) = (
+            if old.is_some() {
+                units(&current_cells)
+            } else {
+                Ok(0)
+            },
+            units(&after_cells),
+        ) else {
+            continue;
+        };
+        quote.new_units = quote.new_units.saturating_add(after.saturating_sub(before));
+        if glm {
+            let rent_at = |at: u64| {
+                target(at)
+                    .and_then(|new| {
+                        crate::gas::rent(before, after, old, Some(new), at, c.rent).ok()
+                    })
+                    .map_or(0, |q| q.wei)
+            };
+            let rent = rent_at(c.block_height).max(rent_at(c.block_height.saturating_add(margin)));
+            quote.rent_wei = quote
+                .rent_wei
+                .saturating_add(alloy_primitives::U256::from(rent));
+        }
+        overlay.insert((namespace, key), Some((after_cells, new)));
+    }
+    Ok(quote)
 }
 /// Atomic batch on a branch. Deterministic failure rolls back all cells, indexes,
 /// creation counters, due schedules and rent debits, retaining normal engine

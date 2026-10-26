@@ -208,7 +208,7 @@ fn key(bytes: alloy_primitives::B256) -> Result<RecordKey> {
     RecordKey::new(bytes.as_slice()).ok_or_else(bad)
 }
 fn abi_config() -> AbiDecoderConfig {
-    // A canonical 256 KiB input needs far less than this; aliased dynamic
+    // A canonical input of at most TX_CAP (384 KiB) needs far less than this; aliased dynamic
     // offsets must not multiply a small hostile payload into large allocations.
     AbiDecoderConfig::new()
         .strict(true)

@@ -214,6 +214,14 @@ fn every_invariant_is_checked() {
             },
             GenesisError::RentLifetime,
         ),
+        // A block must be able to add at least one storage unit.
+        (
+            ChainParams {
+                max_new_storage_units_per_block: 0,
+                ..PARAMS
+            },
+            GenesisError::StorageCap,
+        ),
     ];
     for (params, error) in cases {
         assert_eq!(spec(params, LIMITS).err(), Some(error), "{params:?}");
@@ -296,8 +304,8 @@ fn versions_are_checked() {
         Some(GenesisError::UnsupportedFormat(2))
     );
     // Protocols 1 (payload entities) and 2 (uncapped rent) are retired; 3
-    // (rent charged as gas) was never released.
-    for protocol in [0, 1, 2, 3, 5] {
+    // and 4 (earlier drafts of the rent rules) were never released.
+    for protocol in [0, 1, 2, 3, 4, 6] {
         let mut bad = genesis();
         bad.protocol_version = protocol;
         assert_eq!(
@@ -311,7 +319,7 @@ fn versions_are_checked() {
 fn the_spec_exposes_the_genesis() {
     let spec = spec(PARAMS, LIMITS).expect("valid");
     assert_eq!(spec.chain_id(), CHAIN);
-    assert_eq!(spec.protocol_version(), 4);
+    assert_eq!(spec.protocol_version(), 5);
     assert!(spec.is_admin(&ADMIN));
     assert!(!spec.is_admin(&ALICE));
     assert_eq!(spec.genesis_header(), &genesis().header());

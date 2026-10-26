@@ -26,7 +26,7 @@ B = Path(os.environ.get("ARKIV_PROPOSER_BIN", ROOT / "target/debug/arkiv-propose
 FIXTURE = """schema = "arkiv-genesis-bundle-v1"
 protocol = "arkiv-launch-prefill-v1"
 name = "Independent prefill end-to-end"
-profile = { preset = "arkiv-entity-v3/glm-v2@3" }
+profile = { preset = "arkiv-entity-v3/glm-v2@4" }
 
 [chain]
 id = "9405"

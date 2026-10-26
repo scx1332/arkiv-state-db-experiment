@@ -9275,6 +9275,20 @@
                 "pattern": "^[1-9][0-9]*$",
                 "description": "maxRentLifetimeSeconds in whole blocks at rentBlockPeriodMs, rounded up: the cap execution applies."
               },
+              "rentBound": {
+                "type": "string",
+                "const": "sender-balance",
+                "description": "Rent is limited only by the sender's balance: a wallet's gas limit times gas price plus value covers the fee and value, not the rent. The pool reserves a rent quote at the larger of the next height and rentQuoteMarginBlocks later; execution charges the real rent."
+              },
+              "rentQuoteMarginBlocks": {
+                "type": "string",
+                "pattern": "^[0-9]+$"
+              },
+              "maxNewStorageUnitsPerBlock": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]*$",
+                "description": "The genesis cap (ChainParams.max_new_storage_units_per_block) on the storage units one block's committed transactions add: creates' entities and patches' growth. A producer defers a transaction that would cross it; one that alone exceeds it is refused at admission. Default 1500000, which binds no block the default input cap admits."
+              },
               "rentReceiptField": {
                 "type": "string",
                 "const": "rentFee",
@@ -9287,7 +9301,7 @@
               },
               "permanentEntities": {
                 "type": "object",
-                "description": "Rules of u64::MAX (permanent) entities: never scheduled or swept; rent capped; only the owner may extend an entity to permanent (a permissionless-extension entity takes finite extensions from anyone, a permanent one from no one else: NotOwner); extending a permanent entity to permanent is a no-op success and a finite expiry is ExpiryShortened; genesisRows says whether a permanent-prefill launch holds rent-free sponsored rows.",
+                "description": "Rules of u64::MAX (permanent) entities: never scheduled or swept; rent capped; only the owner may extend an entity beyond one rent cap ahead, permanence included (a permissionless-extension entity takes anyone's extension up to height + maxRentLifetimeBlocks; further is PermanenceOwnerOnly); extending a permanent entity to permanent is a no-op success and a finite expiry is ExpiryShortened; genesisRows says whether a permanent-prefill launch holds rent-free sponsored rows.",
                 "additionalProperties": true
               }
             },

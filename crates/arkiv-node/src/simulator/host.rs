@@ -617,8 +617,8 @@ impl Host {
             height,
             timestamp,
             &inputs,
-            |branch, outcomes, expired| {
-                metadata = Some(metadata::capture(branch, &inputs, outcomes, expired)?);
+            |branch, inputs, outcomes, expired| {
+                metadata = Some(metadata::capture(branch, inputs, outcomes, expired)?);
                 Ok(())
             },
         )

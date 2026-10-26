@@ -596,6 +596,21 @@ fn revert_data(
         crate::HostFault::Arkiv(arkiv::ArkivFault::Readonly) => {
             ("ReadOnlyEntity(bytes32)", key_word.to_owned())
         }
+        crate::HostFault::Arkiv(arkiv::ArkivFault::PermanenceOwnerOnly) => {
+            let Some(e) = operation.expiry() else {
+                return Ok(None);
+            };
+            let cap = crate::gas::RentClock::of(&host.genesis.genesis.params)
+                .map_or(0, |clock| clock.cap_blocks());
+            (
+                "PermanenceOwnerOnly(bytes32,uint64,uint64)",
+                format!(
+                    "{key_word}{}{}",
+                    word(e.expires_at.max(height.saturating_add(e.min_lifetime))),
+                    word(height.saturating_add(cap))
+                ),
+            )
+        }
         crate::HostFault::Arkiv(arkiv::ArkivFault::NotOwner) => {
             let Some(owner) = owner else { return Ok(None) };
             (
@@ -757,7 +772,7 @@ fn simulation(
             },
             Some(&host.genesis.accounts),
             |_, _, _| Ok(()),
-            |_, _, _| Ok(()),
+            |_, _, _, _| Ok(()),
         )
         .map(|executed| {
             executed
@@ -771,6 +786,7 @@ fn simulation(
     .map_err(|e| match e {
         crate::ExecError::Account(crate::accounts::AccountFault::InsufficientBalance)
         | crate::ExecError::Unaffordable { .. } => Error("InsufficientBalance"),
+        crate::ExecError::StorageCapExceeded { .. } => Error("ExceedsStorageCap"),
         crate::ExecError::Account(_) => Error("AccountOverflow"),
         crate::ExecError::Storage(e) => Error::from(e),
         crate::ExecError::InvalidBlock(_) => Error("InvalidTransaction"),
@@ -884,11 +900,19 @@ fn dispatch(host: &mut Host, state: &mut RpcState, method: &str, params: &Value)
                     let b = host.block(h)?;
                     transaction(&b.inputs.txs[i], Some((&b.header.header, i)))
                 }
-            } else if method == "eth_getTransactionByHash" {
-                match host.pool.by_hash(hash) {
-                    Some(t) => transaction(t, None),
-                    None => Ok(Value::Null),
+            } else if let Some(t) = host.pool.by_hash(hash) {
+                if method == "eth_getTransactionByHash" {
+                    transaction(t, None)
+                } else {
+                    Ok(Value::Null)
                 }
+            } else if let Some(reason) = host.pool.dropped.reason(hash) {
+                // Evicted without a block: a definite refusal, so a client
+                // polling for the receipt stops instead of waiting forever.
+                Err(Error(match reason {
+                    "ExceedsStorageCap" => "TransactionDroppedExceedsStorageCap",
+                    _ => "TransactionDroppedInsufficientBalance",
+                }))
             } else {
                 Ok(Value::Null)
             }
@@ -1152,6 +1176,15 @@ fn error_with(id: Value, e: Error, pruned: Option<(u64, u64)>) -> Value {
     }
     let message = match e.0 {
         "InsufficientBalance" => "insufficient funds for gas * price + value + rent",
+        "ExceedsStorageCap" => {
+            "transaction adds more storage units than a block may (max_new_storage_units_per_block)"
+        }
+        "TransactionDroppedInsufficientBalance" => {
+            "transaction dropped: insufficient funds for gas * price + value + rent"
+        }
+        "TransactionDroppedExceedsStorageCap" => {
+            "transaction dropped: it adds more storage units than a block may"
+        }
         _ => e.0,
     };
     // A refused detached read is retryable; its code stays outside the SDK's
@@ -1470,6 +1503,53 @@ mod tests {
         assert_eq!(paid["rentFee"], format!("{rent:#x}"));
         assert_eq!(paid["status"], "0x1");
         assert_eq!(receipt(&h, 3, 0).unwrap()["rentFee"], "0x0");
+    }
+    #[tokio::test]
+    async fn a_dropped_transaction_answers_with_a_definite_error() {
+        let mut h = host();
+        let caller = Signer::from_bytes([2; 32]).unwrap().address();
+        let tx = native(
+            &h,
+            1,
+            vec![ArkivOperation::Create {
+                salt: 9,
+                flags: 0,
+                expiry: crate::Expiry {
+                    expires_at: 0,
+                    min_lifetime: 20,
+                },
+                attributes: vec![],
+            }],
+        );
+        let hash = hex(tx.hash().as_slice());
+        let request = tx.tx.request_id;
+        h.submit(tx).unwrap();
+        assert_eq!(h.pool.evict_from(caller, 1, "InsufficientBalance"), 1);
+        assert_eq!(
+            h.request_status(caller, request).unwrap()["status"],
+            "dropped"
+        );
+        let rt =
+            super::super::runtime::Runtime::new(Node::Full(Box::new(h)), None, None, None).unwrap();
+        for method in ["eth_getTransactionReceipt", "eth_getTransactionByHash"] {
+            let answer = handle_request(
+                &rt,
+                json!({"jsonrpc":"2.0","id":1,"method":method,"params":[hash]}),
+            )
+            .await;
+            assert_eq!(
+                answer["error"],
+                json!({"code":-32000,"message":"transaction dropped: insufficient funds for gas * price + value + rent"}),
+                "{method}"
+            );
+        }
+        // An unknown hash is still just absent.
+        let unknown = handle_request(
+            &rt,
+            json!({"jsonrpc":"2.0","id":1,"method":"eth_getTransactionReceipt","params":[ZERO_HASH]}),
+        )
+        .await;
+        assert_eq!(unknown["result"], Value::Null);
     }
     #[test]
     fn estimate_has_no_nonce_balance_or_state_effect() {

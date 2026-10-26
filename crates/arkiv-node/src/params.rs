@@ -79,6 +79,8 @@ pub enum GenesisError {
     /// `max_rent_lifetime_seconds` is outside 1 to
     /// [`crate::gas::MAX_RENT_CAP_SECONDS`] (100 years).
     RentLifetime,
+    /// `max_new_storage_units_per_block` is zero: no block could add an entity.
+    StorageCap,
     /// `8 + max_admin_per_block × MAX_ADMIN_BYTES + max_tx_bytes ≤
     /// max_block_input_bytes` does not hold (or overflows).
     InputBytes,
@@ -121,6 +123,10 @@ impl fmt::Display for GenesisError {
                 formatter,
                 "the block period must be 1 ms to {} ms",
                 crate::gas::MAX_BLOCK_PERIOD_MS
+            ),
+            Self::StorageCap => write!(
+                formatter,
+                "the per-block storage cap must be at least one unit"
             ),
             Self::RentLifetime => write!(
                 formatter,
@@ -265,6 +271,9 @@ pub fn check_params(
         return Err(GenesisError::RentLifetime);
     }
     debug_assert!(crate::gas::RentClock::of(params).is_some());
+    if params.max_new_storage_units_per_block == 0 {
+        return Err(GenesisError::StorageCap);
+    }
     let inputs = u64::from(params.max_admin_per_block)
         .checked_mul(MAX_ADMIN_BYTES)
         .and_then(|admin| admin.checked_add(EMPTY_INPUTS_BYTES))

@@ -492,7 +492,7 @@ fn collector_handles_same_block_recreation_rollback_id_reuse_and_every_field_typ
         2,
         timestamp,
         &inputs,
-        |b, o, e| {
+        |b, _, o, e| {
             captured = Some(metadata::capture(b, &inputs, o, e)?);
             Ok(())
         },

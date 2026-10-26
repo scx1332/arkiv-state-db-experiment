@@ -934,8 +934,8 @@ mod tests {
             build_bundle(&finite_base, &finite_path, &tmp.0.join("v2"), [2; 20], 4096).unwrap();
         assert_eq!(report["version"], 2);
         assert!(report.get("permanentPrefill").is_none());
-        // Pinned at the user-defined-columns row codec (block format 4,
-        // protocol 4: rent per second, here at one-second blocks) on these
+        // Pinned at the user-defined-columns row codec (block format 5,
+        // protocol 5: rent per second, here at one-second blocks) on these
         // same base and stream bytes, so any later change to how a version-2
         // launch is built shows up here. The burn is 1,288,800 unit-blocks of
         // one second at 6250/27 wei each, rounded up once per row.
@@ -947,7 +947,7 @@ mod tests {
                 report["storageUnits"].as_str()
             ),
             (
-                Some("0x3d013ce32773505f980a6fbe7029a68f657f0dfd305d95d38736aecc0e3ce9de"),
+                Some("0x29de1b651e42c177f447290733a92b647e00c229e2a2a9fe82c535c02e9dcf51"),
                 Some("0xd756e0f565373d8f779f872c74dab72df31fb9608b41cbbf707a1c3fb23cb326"),
                 Some("298333333336"),
                 Some("12888")

@@ -3,7 +3,7 @@
 schema = "arkiv-genesis-bundle-v1"
 protocol = "arkiv-launch-prefill-v1"
 name = "Small catalog"
-profile = { preset = "arkiv-entity-v3/glm-v2@3" }
+profile = { preset = "arkiv-entity-v3/glm-v2@4" }
 
 [chain]
 id = "9002"

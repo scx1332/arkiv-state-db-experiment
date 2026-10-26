@@ -1211,7 +1211,7 @@ mod tests {
         use arkiv_db_memory::MemoryVersionedStore;
         use std::sync::Arc;
         let signer = Signer::from_bytes([1; 32]).unwrap();
-        let mut native = crate::signed::protocol::default_native_genesis(9515, 1_000);
+        let mut native = crate::signed::protocol::default_native_genesis(9515, 1_000, period_ms);
         native.limits.max_page = 2;
         let genesis = SignedGenesis {
             genesis: native,
@@ -1623,7 +1623,7 @@ mod tests {
         use std::sync::Arc;
         let signer = Signer::from_bytes([1; 32]).unwrap();
         let genesis = SignedGenesis {
-            genesis: crate::signed::protocol::default_native_genesis(9515, 1_000),
+            genesis: crate::signed::protocol::default_native_genesis(9515, 1_000, 1_000),
             run_id: [8; 16],
             proposer: *signer.address().as_bytes(),
             block_period_ms: 1_000,

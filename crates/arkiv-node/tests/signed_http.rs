@@ -65,7 +65,7 @@ fn genesis() -> SignedGenesis {
         )
     });
     SignedGenesis::new(
-        default_native_genesis(7, 1_000),
+        default_native_genesis(7, 1_000, 250),
         [0x42; 16],
         *signer(1).address().as_bytes(),
         250,

@@ -429,28 +429,32 @@ pub fn recipe_hash(g: &SignedGenesis, p: &PrefillLaunch) -> B256 {
         &e.into_bytes(),
     )
 }
-/// Genesis rent gas of one prefill row of `units` storage units expiring at
-/// `expires_at`, created at height 0 under the chain's rent cap `cap`. A
+/// Genesis rent of one prefill row of `units` storage units expiring at
+/// `expires_at`, created at height 0 under the chain's rent clock, in wei. A
 /// finite row prepays its lifetime with [`crate::gas::rent`], capped like a
 /// live create, so a row at or beyond the cap pays the cap. A
 /// [`PERMANENT_EXPIRY`] row is admitted only under a permanent-prefill launch,
-/// which sponsors it without rent.
-pub(crate) fn prefill_rent_gas(
+/// which sponsors it without rent; that is decided before any quote.
+pub(crate) fn prefill_rent_wei(
     units: u64,
     expires_at: u64,
     permanent: bool,
-    cap: u64,
-) -> Result<u64> {
+    clock: crate::gas::RentClock,
+) -> Result<U256> {
     if expires_at == PERMANENT_EXPIRY {
         return if permanent {
-            Ok(0)
+            Ok(U256::ZERO)
         } else {
             Err("permanent prefill rows require a permanent-prefill launch".into())
         };
     }
-    crate::gas::rent(0, units, None, Some(expires_at), 0, cap)
-        .map(|quote| quote.gas)
+    crate::gas::rent(0, units, None, Some(expires_at), 0, clock)
+        .map(|quote| U256::from(quote.wei))
         .map_err(err)
+}
+/// The rent clock of a genesis; its parameters were validated.
+pub(crate) fn rent_clock(g: &SignedGenesis) -> Result<crate::gas::RentClock> {
+    crate::gas::RentClock::of(&g.genesis.params).ok_or_else(|| "invalid rent clock".into())
 }
 struct Constructed {
     candidate: SealedCandidate,
@@ -472,6 +476,7 @@ fn construct(
     }
     let accounts = &g.accounts;
     accounts.validate().map_err(err)?;
+    let clock = rent_clock(g)?;
     let engine = Engine::with_limits(g.genesis.pricing.clone(), g.genesis.limits);
     let mut branch = engine.begin(engine.head(), None).map_err(err)?;
     branch
@@ -507,8 +512,10 @@ fn construct(
             caller: row.creator,
             block_height: 0,
             chain_id: g.genesis.chain_id,
-            max_rent_lifetime: g.genesis.params.max_rent_lifetime,
+            rent: clock,
             expiry_per_block: g.genesis.params.expiry_per_block,
+            // The sponsor, not the creator, pays the prefill burn below.
+            payer: None,
             allow_permanent_create: permanent,
         };
         if !matches!(
@@ -519,7 +526,8 @@ fn construct(
                 &op,
                 Budget::unlimited()
             )
-            .map_err(err)?,
+            .map_err(err)?
+            .outcome,
             crate::OpOutcome::Applied { .. }
         ) {
             return Err("prefill entity rejected by normal entity/expiry validation".into());
@@ -542,17 +550,10 @@ fn construct(
         if units > limits.max_storage_units {
             return Err("prefill storage units limit exceeded".into());
         }
-        let rent = prefill_rent_gas(
-            row_units,
-            row.expires_at_height,
-            permanent,
-            g.genesis.params.max_rent_lifetime,
-        )?;
-        burn = burn
-            .checked_add(accounts::fee(rent))
-            .ok_or("prefill rent overflow")?;
+        let rent = prefill_rent_wei(row_units, row.expires_at_height, permanent, clock)?;
+        burn = burn.checked_add(rent).ok_or("prefill rent overflow")?;
         use crate::simulator::wire::hex;
-        reports.push(serde_json::json!({"creator":hex(&row.creator),"createNonce":row.create_nonce.to_string(),"key":hex(&key),"expiresAtHeight":row.expires_at_height.to_string(),"storageUnits":row_units.to_string(),"rentGas":rent.to_string()}));
+        reports.push(serde_json::json!({"creator":hex(&row.creator),"createNonce":row.create_nonce.to_string(),"key":hex(&key),"expiresAtHeight":row.expires_at_height.to_string(),"storageUnits":row_units.to_string(),"rentWei":rent.to_string()}));
     }
     let balance = accounts
         .initial_balance(OwnerId::new(sponsor))
@@ -667,28 +668,39 @@ mod tests {
     use super::*;
     #[test]
     fn permanent_rows_pay_no_time_rent_only_under_the_permanent_policy() {
-        let cap = crate::gas::DEFAULT_RENT_CAP_BLOCKS;
-        for units in [1, 512, 9_000_000] {
+        let clock =
+            crate::gas::RentClock::new(1_000, crate::gas::DEFAULT_RENT_CAP_SECONDS).unwrap();
+        let cap = clock.cap_blocks();
+        for units in [1, 512, 9_000_000, u64::MAX] {
+            // Waived before quoting, whatever the size.
             assert_eq!(
-                prefill_rent_gas(units, PERMANENT_EXPIRY, true, cap).unwrap(),
-                0
+                prefill_rent_wei(units, PERMANENT_EXPIRY, true, clock).unwrap(),
+                U256::ZERO
             );
-            assert!(prefill_rent_gas(units, PERMANENT_EXPIRY, false, cap).is_err());
+            assert!(prefill_rent_wei(units, PERMANENT_EXPIRY, false, clock).is_err());
             for expiry in [1, 6_307_200, 1_000_000_000_000] {
-                let finite = crate::gas::rent(0, units, None, Some(expiry), 0, cap)
+                let finite = crate::gas::rent(0, units, None, Some(expiry), 0, clock)
                     .unwrap()
-                    .gas;
+                    .wei;
                 // A finite row is charged identically under either policy.
-                assert_eq!(prefill_rent_gas(units, expiry, false, cap).unwrap(), finite);
-                assert_eq!(prefill_rent_gas(units, expiry, true, cap).unwrap(), finite);
+                for permanent in [false, true] {
+                    assert_eq!(
+                        prefill_rent_wei(units, expiry, permanent, clock).unwrap(),
+                        U256::from(finite)
+                    );
+                }
             }
-            // Finite rows at or beyond the cap all pay the cap.
+            // Finite rows at or beyond the cap all pay the cap: a year.
             assert_eq!(
-                prefill_rent_gas(units, 1_000_000_000_000, false, cap).unwrap(),
-                prefill_rent_gas(units, cap, false, cap).unwrap()
+                prefill_rent_wei(units, 1_000_000_000_000, false, clock).unwrap(),
+                prefill_rent_wei(units, cap, false, clock).unwrap()
             );
         }
-        assert!(prefill_rent_gas(1, 0, true, cap).is_err());
+        assert_eq!(
+            prefill_rent_wei(1, cap, false, clock).unwrap(),
+            U256::from(7_300_000_000_000u64)
+        );
+        assert!(prefill_rent_wei(1, 0, true, clock).is_err());
     }
     /// The converter contract of `docs/genesis-bundle-v1.md`, byte for byte.
     #[test]

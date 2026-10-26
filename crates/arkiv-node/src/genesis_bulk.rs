@@ -208,6 +208,7 @@ pub(crate) fn build_file(
     let mut reader = StreamReader::with_policy(BufReader::new(file), limits, permanent)?;
     let mut progress = Progress::new("bulk_normalize", summary.rows, summary.bytes);
     progress.report(0, reader.bytes, None, false);
+    let clock = crate::genesis_bundle::rent_clock(base).map_err(err)?;
     let mut units = 0u64;
     let mut burn = U256::ZERO;
     let mut creator_nonce: Option<([u8; 20], u64)> = None;
@@ -228,9 +229,10 @@ pub(crate) fn build_file(
             caller: row.creator,
             block_height: 0,
             chain_id: base.genesis.chain_id,
-            max_rent_lifetime: base.genesis.params.max_rent_lifetime,
+            rent: clock,
             expiry_per_block: base.genesis.params.expiry_per_block,
             // Only used for expiry resolution; no operation executes here.
+            payer: None,
             allow_permanent_create: false,
         };
         let expiry = crate::Expiry {
@@ -260,17 +262,10 @@ pub(crate) fn build_file(
         if units > limits.max_storage_units {
             return Err("prefill storage limit".into());
         }
-        // Capped finite rent; permanent rows prepay none (see prefill_rent_gas).
-        let rent = crate::genesis_bundle::prefill_rent_gas(
-            row_units,
-            expires,
-            permanent,
-            base.genesis.params.max_rent_lifetime,
-        )
-        .map_err(err)?;
-        burn = burn
-            .checked_add(accounts::fee(rent))
-            .ok_or("prefill rent overflow")?;
+        // Capped finite rent; permanent rows prepay none (see prefill_rent_wei).
+        let rent = crate::genesis_bundle::prefill_rent_wei(row_units, expires, permanent, clock)
+            .map_err(err)?;
+        burn = burn.checked_add(rent).ok_or("prefill rent overflow")?;
         if burn > balance {
             return Err("prefill sponsor underfunded".into());
         }

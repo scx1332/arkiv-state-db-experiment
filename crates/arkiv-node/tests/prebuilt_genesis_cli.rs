@@ -52,7 +52,7 @@ fn hex(bytes: &[u8]) -> String {
 fn inputs(dir: &Path, run: u8) -> (PathBuf, PathBuf, PathBuf) {
     let proposer = signer().address();
     let base = SignedGenesis {
-        genesis: default_native_genesis(9451, 1000),
+        genesis: default_native_genesis(9451, 1000, 1000),
         run_id: [run; 16],
         proposer: *proposer.as_bytes(),
         block_period_ms: 1000,

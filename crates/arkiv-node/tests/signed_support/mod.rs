@@ -67,7 +67,7 @@ pub fn genesis(
     funded: &[u8],
 ) -> SignedGenesis {
     genesis_from(
-        default_native_genesis(chain_id, timestamp_ms),
+        default_native_genesis(chain_id, timestamp_ms, block_period_ms),
         run_id,
         proposer,
         block_period_ms,

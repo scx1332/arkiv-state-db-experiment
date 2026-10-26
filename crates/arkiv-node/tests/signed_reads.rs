@@ -173,7 +173,7 @@ async fn serve(router: axum::Router) -> Server {
 async fn node(limits: ReadLimits) -> Node2 {
     let signer = signer();
     let base = SignedGenesis {
-        genesis: default_native_genesis(CHAIN, 1_000),
+        genesis: default_native_genesis(CHAIN, 1_000, 1_000),
         run_id: [7; 16],
         proposer: creator(),
         block_period_ms: 1_000,

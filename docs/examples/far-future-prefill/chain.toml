@@ -1,7 +1,7 @@
 # Base genesis for a far-future Sourcify prefill (sourcify-prefill.py
 # --expiry-policy far-future --max-expiry 1000000000000). Same chain ID,
 # allocation, block period and sponsor as the streaming acceptance base. The
-# far-future heights need no max_lifetime since protocol 3 (entity lifetimes
+# far-future heights need no max_lifetime since protocol 4 (entity lifetimes
 # are unbounded), and the profile's one-year rent cap means each row pays at
 # most a year of rent; name, run ID and start time are new.
 schema = "arkiv-genesis-bundle-v1"
@@ -10,8 +10,8 @@ name = "Sourcify far-future prefill"
 
 [profile]
 path = "far-future-glm-v2.toml"
-bytes = 1242
-sha256 = "c1b01767530377b89c0af0ed7ee1342daa07a1a6e3746ed876576c41e2f5b4e8"
+bytes = 1489
+sha256 = "0d73d5c6b96dc96e7543c5f52e7be65606fe9868baaf04a25be129bee9ab1971"
 
 [chain]
 id = "7706815"

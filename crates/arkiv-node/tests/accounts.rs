@@ -26,7 +26,7 @@ fn glm(n: u64) -> U256 {
 }
 fn genesis() -> SignedGenesis {
     SignedGenesis::new(
-        default_native_genesis(9300, 1000),
+        default_native_genesis(9300, 1000, 1000),
         [7; 16],
         *signer(1).address().as_bytes(),
         1000,
@@ -166,17 +166,31 @@ fn funded_lifecycle_fee_burn_replay_proofs_and_restart() {
         .request_status(signer(2).address(), send.tx.request_id)
         .unwrap();
     assert_eq!(status["feeChargedWei"], accounts::fee(21_000).to_string());
+    assert_eq!(status["rentChargedWei"], "0");
     assert_eq!(status["gasPriceWei"], "1000000000");
     assert_eq!(p.submit(send.clone()).unwrap(), status);
     let create = tx(&g, 3, 0, 1_000_000, vec![create(3)]);
+    let request = create.tx.request_id;
     p.submit(create).unwrap();
     p.produce().unwrap();
     relay(&p, &mut f, &mut l);
-    let create_gas = p.block(3).unwrap().outcomes.txs[0].spent;
+    let created = p.block(3).unwrap().outcomes.txs[0].clone();
+    let (create_gas, rent) = (created.spent, created.rent_wei);
     assert!(create_gas > 21_000 && create_gas < 1_000_000);
+    // Rent is a GLM debit beside the gas fee, burned like it.
+    assert!(rent > U256::ZERO);
     let (account, burnt, supply) = proofs(&p, &l, 3, 3);
-    assert_eq!(account.balance, glm(1) - accounts::fee(create_gas));
-    assert_eq!(burnt, bootstrap_fee + accounts::fee(21_000 + create_gas));
+    assert_eq!(account.balance, glm(1) - accounts::fee(create_gas) - rent);
+    assert_eq!(
+        burnt,
+        bootstrap_fee + accounts::fee(21_000 + create_gas) + rent
+    );
+    let created_status = p.request_status(signer(3).address(), request).unwrap();
+    assert_eq!(created_status["rentChargedWei"], rent.to_string());
+    assert_eq!(
+        created_status["feeChargedWei"],
+        accounts::fee(create_gas).to_string()
+    );
     assert_eq!(supply, glm(12));
     assert_eq!(
         balance(&p, 1) + balance(&p, 2) + balance(&p, 3),

@@ -190,7 +190,8 @@ pub fn status(node: &Node) -> Json {
         .prefill
         .as_ref()
         .is_some_and(|p| p.permanent_prefill());
-    let cap = genesis.genesis.params.max_rent_lifetime;
+    let params = genesis.genesis.params;
+    let cap_blocks = crate::gas::RentClock::of(&params).map(|clock| clock.cap_blocks());
     let mut capabilities = crate::simulator::profile::capabilities(&genesis.genesis.limits);
     capabilities["gas"] = json!({
         "profile":crate::signed::protocol::GAS_PROFILE, "scheduleId":crate::gas::SCHEDULE_ID,
@@ -201,11 +202,15 @@ pub fn status(node: &Node) -> Json {
         "token":"GLM", "tokenDecimals":18, "feesDebited":true,
         "gasPriceWei":crate::accounts::GAS_PRICE_WEI.to_string(),
         "feePolicy":"burn", "accountProofProfile":"glm-account-v1",
-        "rentPeriodBlocks":crate::gas::RENT_PERIOD_BLOCKS.to_string(),
-        "rentGasPerStorageUnitPeriod":crate::gas::RENT_GAS_PER_UNIT_PERIOD.to_string(),
-        "rentRule":"glm-rent-v2",
-        "maxRentLifetimeBlocks":cap.to_string(),
-        "maxRentLifetimeSeconds":(u128::from(cap) * u128::from(genesis.block_period_ms) / 1000).to_string(),
+        "rentRule":"glm-rent-v3",
+        // Rent is GLM, not gas: a separate debit from the sender's balance,
+        // burned, outside the transaction gas budget and the block gas limit.
+        "rentCharging":"sender-balance-outside-gas", "rentPolicy":"burn",
+        "rentWeiPerStorageUnitDay":crate::gas::RENT_WEI_PER_UNIT_DAY.to_string(),
+        "rentBlockPeriodMs":params.block_period_ms.to_string(),
+        "maxRentLifetimeSeconds":params.max_rent_lifetime_seconds.to_string(),
+        "maxRentLifetimeBlocks":cap_blocks.map(|n| n.to_string()),
+        "rentReceiptField":"rentFee",
         "permanentEntitiesSupported":true, "refunds":false, "storageRefunds":false,
         "unusedGasRefunds":true,
         "scope":"live-state logical occupancy; archive history excluded"
@@ -221,13 +226,13 @@ pub fn status(node: &Node) -> Json {
         "unsupported":["arbitrary-evm","contract-creation","nonempty-access-lists","ethereum-mpt-roots"],
         "feePolicy":"fixed-one-gwei; signed-prices-are-ceilings; no-priority-payment"
     });
-    // Every lifetime of at least `maxRentLifetimeBlocks` blocks, permanent
+    // Every lifetime of at least `maxRentLifetimeSeconds`, permanent
     // (`expiresAt` = u64::MAX) included, pays the same capped rent.
     capabilities["gas"]["permanentEntities"] = json!({
         "expiresAt":u64::MAX.to_string(), "expirySweep":false,
-        "liveCreate":true, "liveExtendToPermanent":true, "liveUpdate":true, "liveDelete":true,
-        "extendPermanent":"no-op-success; a finite expiry is ExpiryShortened",
-        "rent":"capped-at-maxRentLifetimeBlocks",
+        "liveCreate":true, "liveExtendToPermanent":"owner-only", "liveUpdate":true, "liveDelete":true,
+        "extendPermanent":"owner-only no-op-success; a finite expiry is ExpiryShortened",
+        "rent":"capped-at-maxRentLifetimeSeconds",
         "genesisRows":if permanent_prefill {"sponsored-without-rent"} else {"none"}
     });
     capabilities["genesisPrefill"] = json!(genesis.prefill.is_some());

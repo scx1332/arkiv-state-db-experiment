@@ -21,7 +21,7 @@ ADDRESS = '0x1a642f0e3c3af545e7acbd38b07251b3990914f1'
 BASE = '''schema = "arkiv-genesis-bundle-v1"
 protocol = "arkiv-launch-prefill-v1"
 name = "Streaming acceptance"
-profile = { preset = "arkiv-entity-v3/glm-v2@2" }
+profile = { preset = "arkiv-entity-v3/glm-v2@3" }
 [chain]
 id = "7706815"
 run_id = "0x00000000000000000000000077068150"

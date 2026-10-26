@@ -280,7 +280,7 @@ mod tests {
     fn runtime() -> Shared {
         let signer = Signer::from_bytes([1; 32]).unwrap();
         let genesis = SignedGenesis::new(
-            default_native_genesis(9405, 1000),
+            default_native_genesis(9405, 1000, 1000),
             [1; 16],
             *signer.address().as_bytes(),
             1000,

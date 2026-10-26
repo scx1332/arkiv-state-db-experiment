@@ -68,7 +68,7 @@ fn address() -> String {
 fn inputs(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let proposer = signer().address();
     let base = SignedGenesis {
-        genesis: default_native_genesis(9452, 1000),
+        genesis: default_native_genesis(9452, 1000, 1000),
         run_id: [9; 16],
         proposer: *proposer.as_bytes(),
         block_period_ms: 1000,

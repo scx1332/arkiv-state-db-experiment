@@ -126,6 +126,32 @@ impl AccountConfig {
             .map_err(|_| corrupt())?;
         Ok(())
     }
+    /// Debits `amount` from `actor` and burns it: entity rent, which is not
+    /// gas. The caller has checked the balance; a shortfall here is a broken
+    /// invariant, never a user rejection.
+    pub fn burn_from(
+        &self,
+        branch: &mut Branch,
+        actor: OwnerId,
+        amount: U256,
+    ) -> Result<(), crate::ExecError> {
+        let mut account = self.read(branch, actor)?;
+        account.balance = account
+            .balance
+            .checked_sub(amount)
+            .ok_or(crate::ExecError::Account(AccountFault::InsufficientBalance))?;
+        put(branch, actor, account)?;
+        let burnt = burned(branch.try_host_get(&BURN_KEY)?)?
+            .checked_add(amount)
+            .ok_or(crate::ExecError::Account(AccountFault::Overflow))?;
+        if burnt > self.initial_supply().map_err(crate::ExecError::Account)? {
+            return Err(crate::ExecError::Account(AccountFault::Overflow));
+        }
+        branch
+            .try_host_put(BURN_KEY, &burnt.to_be_bytes::<32>())?
+            .map_err(|_| corrupt())?;
+        Ok(())
+    }
     pub fn transfer(
         &self,
         branch: &mut Branch,
@@ -267,6 +293,9 @@ pub fn fee(gas: u64) -> U256 {
     U256::from(gas) * U256::from(GAS_PRICE_WEI)
 }
 /// Conservative mempool reservation: fees plus gross non-self outgoing value.
+/// The pool adds the rent its admission simulation quoted
+/// ([`crate::signed::pool::Pool::insert_funded`]); execution checks rent
+/// again against the balance left after the gas reservation.
 pub fn reservation(tx: &TxEnvelope) -> Result<U256, AccountFault> {
     tx.ops
         .iter()

@@ -470,6 +470,7 @@ fn the_host_expiry_read_cannot_overflow() {
             },
         }],
         spent: 1,
+        rent_wei: Default::default(),
     };
     assert_eq!(
         block.outcomes.txs,

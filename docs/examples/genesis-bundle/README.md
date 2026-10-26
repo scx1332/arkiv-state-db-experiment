@@ -7,7 +7,7 @@ verifying these fixtures does not start a node.
 
 Start with [chain.inline.toml](chain.inline.toml) for a small chain. It keeps one
 allocation and entity together, resolves `@catalog` against the allocation
-label, and expands the immutable `arkiv-entity-v3/glm-v2@2` preset. The generated
+label, and expands the immutable `arkiv-entity-v3/glm-v2@3` preset. The generated
 lock records all source hashes and lengths, the full profile and resolved
 identities/economics.
 

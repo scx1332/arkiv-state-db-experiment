@@ -629,7 +629,7 @@ mod tests {
     }
     fn base() -> SignedGenesis {
         SignedGenesis {
-            genesis: default_native_genesis(9450, 1000),
+            genesis: default_native_genesis(9450, 1000, 1000),
             run_id: [7; 16],
             proposer: [1; 20],
             block_period_ms: 1000,
@@ -819,17 +819,17 @@ mod tests {
             let row_units = crate::gas::storage_units(&record.cells).unwrap().total;
             units += row_units;
             if r.expires_at_height != crate::genesis_bundle::PERMANENT_EXPIRY {
-                let gas = crate::gas::rent(
+                let wei = crate::gas::rent(
                     0,
                     row_units,
                     None,
                     Some(r.expires_at_height),
                     0,
-                    g.genesis.params.max_rent_lifetime,
+                    crate::gas::RentClock::of(&g.genesis.params).unwrap(),
                 )
                 .unwrap()
-                .gas;
-                burn += accounts::fee(gas);
+                .wei;
+                burn += U256::from(wei);
                 for key in [
                     crate::exec::total_key(r.expires_at_height),
                     crate::exec::due_key(r.expires_at_height, crate::arkiv::entity_namespace()),
@@ -934,9 +934,11 @@ mod tests {
             build_bundle(&finite_base, &finite_path, &tmp.0.join("v2"), [2; 20], 4096).unwrap();
         assert_eq!(report["version"], 2);
         assert!(report.get("permanentPrefill").is_none());
-        // Pinned at the user-defined-columns row codec (block format 3,
-        // protocol 3) on these same base and stream bytes, so any later
-        // change to how a version-2 launch is built shows up here.
+        // Pinned at the user-defined-columns row codec (block format 4,
+        // protocol 4: rent per second, here at one-second blocks) on these
+        // same base and stream bytes, so any later change to how a version-2
+        // launch is built shows up here. The burn is 1,288,800 unit-blocks of
+        // one second at 6250/27 wei each, rounded up once per row.
         assert_eq!(
             (
                 report["genesisHash"].as_str(),
@@ -945,9 +947,9 @@ mod tests {
                 report["storageUnits"].as_str()
             ),
             (
-                Some("0x6467f081557598d0e8e73ae0bddbc4101c3a77f97bc6ef903cf3574b80a3e197"),
-                Some("0x592448eaf0dbb8695a272c7ece687a4025cf92027d546e9886ac0023fee34dd4"),
-                Some("600000000000"),
+                Some("0x3d013ce32773505f980a6fbe7029a68f657f0dfd305d95d38736aecc0e3ce9de"),
+                Some("0xd756e0f565373d8f779f872c74dab72df31fb9608b41cbbf707a1c3fb23cb326"),
+                Some("298333333336"),
                 Some("12888")
             )
         );
@@ -1504,9 +1506,10 @@ mod tests {
         let mut g = base();
         g.accounts = accounts::AccountConfig::new(Vec::new()).unwrap();
         cases.push((g, vec![row(0)]));
-        // Rent overflows only without a cap: an uncapped near-sentinel row.
+        // Rent cannot overflow within the genesis bounds; a cap beyond them
+        // (more than 100 years) is refused outright.
         let mut g = base();
-        g.genesis.params.max_rent_lifetime = u64::MAX;
+        g.genesis.params.max_rent_lifetime_seconds = crate::gas::MAX_RENT_CAP_SECONDS + 1;
         let mut r = row(0);
         r.expires_at_height = u64::MAX - 1;
         r.attributes = vec![(

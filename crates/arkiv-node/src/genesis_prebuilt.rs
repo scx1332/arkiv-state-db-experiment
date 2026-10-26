@@ -403,7 +403,7 @@ mod tests {
     }
     fn base(run: u8) -> SignedGenesis {
         SignedGenesis {
-            genesis: default_native_genesis(9450, 1000),
+            genesis: default_native_genesis(9450, 1000, 1000),
             run_id: [run; 16],
             proposer: [1; 20],
             block_period_ms: 1000,

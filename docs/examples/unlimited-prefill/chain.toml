@@ -10,7 +10,7 @@ protocol = "arkiv-launch-prefill-v1"
 name = "Sourcify unlimited prefill"
 
 [profile]
-preset = "arkiv-entity-v3/glm-v2@2"
+preset = "arkiv-entity-v3/glm-v2@3"
 
 [chain]
 id = "7706815"

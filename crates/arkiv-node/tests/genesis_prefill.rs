@@ -27,7 +27,7 @@ fn signer(n: u8) -> Signer {
 /// has no bootstrap transaction to pay for.
 fn base() -> SignedGenesis {
     SignedGenesis {
-        genesis: default_native_genesis(9450, 1000),
+        genesis: default_native_genesis(9450, 1000, 1000),
         run_id: [7; 16],
         proposer: *signer(1).address().as_bytes(),
         block_period_ms: 1000,
@@ -163,7 +163,11 @@ fn invalid_nonces_system_cells_capacity_and_sponsor_fail() {
     }
     // Beyond max_lifetime is no longer too far, and every finite expiry at
     // or beyond the rent cap burns the same capped rent.
-    let cap = base().genesis.params.max_rent_lifetime;
+    let cap = arkiv_node::gas::RentClock::of(&base().genesis.params)
+        .unwrap()
+        .cap_blocks();
+    // A year at the base chain's one-second blocks.
+    assert_eq!(cap, 31_536_000);
     let burn = |height| build(&[row(0, height)]).prefill.unwrap().burned_wei;
     assert!(burn(6_307_201) > U256::ZERO);
     assert_eq!(burn(cap), burn(2 * cap));
@@ -275,7 +279,7 @@ fn empty_prefill_has_namespace_and_ordinary_block_one() {
     );
     assert_eq!(
         g.hash().to_string(),
-        "0x7fe4f2cf5c222157f18f974fe4664e51611d2e097ca31e6247a72a3c1d6beaaf"
+        "0xe4f89d20e34ceffc0569ae8ae6e97c814014a20c280c69692f314e80e0c0c936"
     );
     assert_eq!(
         p.stream_hash.to_string(),
@@ -552,7 +556,7 @@ fn permanent_policy_is_explicit_and_changes_identity_only() {
         report["entities"][0]["expiresAtHeight"],
         u64::MAX.to_string()
     );
-    assert_eq!(report["entities"][0]["rentGas"], "0");
+    assert_eq!(report["entities"][0]["rentWei"], "0");
     assert!(
         has_no_permanent_fields(&finite, &encode_stream(&rows).unwrap()),
         "finite reports carry no permanent fields"
@@ -847,9 +851,12 @@ fn exercise_permanent_chain(
         gas["permanentEntities"]["genesisRows"],
         "sponsored-without-rent"
     );
+    assert_eq!(gas["maxRentLifetimeSeconds"], "31536000");
+    assert_eq!(gas["maxRentLifetimeBlocks"], "31536000");
+    assert_eq!(gas["rentBlockPeriodMs"], "1000");
     assert_eq!(
-        gas["maxRentLifetimeBlocks"],
-        g.genesis.params.max_rent_lifetime.to_string()
+        gas["permanentEntities"]["liveExtendToPermanent"],
+        "owner-only"
     );
     let unsupported = status["capabilities"]["sdkRpcProfile"]["unsupported"].to_string();
     assert!(!unsupported.contains("permanent"), "{unsupported}");

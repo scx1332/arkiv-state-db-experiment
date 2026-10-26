@@ -4,7 +4,9 @@
 The fixed keys are disposable fixture identities, never deployment credentials.
 Expected entity keys were independently calculated from the documented Keccak
 preimage (chain ID, Arkiv address, creator, creation nonce, salt). Rent vectors
-use independent integer arithmetic: storage units 1764/1762/1764, rent 4/5/5 gas.
+use independent integer arithmetic (glm-rent-v3, 20 gwei per unit per day at
+5-second blocks): storage units 1764/1762/1764 for 4/5/6 blocks, rent
+ceil(units * blocks * 5000 * 20e9 / 86.4e6) wei.
 """
 
 import json
@@ -24,7 +26,7 @@ B = Path(os.environ.get("ARKIV_PROPOSER_BIN", ROOT / "target/debug/arkiv-propose
 FIXTURE = """schema = "arkiv-genesis-bundle-v1"
 protocol = "arkiv-launch-prefill-v1"
 name = "Independent prefill end-to-end"
-profile = { preset = "arkiv-entity-v3/glm-v2@2" }
+profile = { preset = "arkiv-entity-v3/glm-v2@3" }
 
 [chain]
 id = "9405"
@@ -109,7 +111,7 @@ EXPECTED = {
             "title": "alpha",
             "key": "0x223fd62733c4f6d95ecf8d6201f89d15197e6b29b86b2a7be7f985e2227aabfc",
             "storageUnits": 1764,
-            "rentGas": 4,
+            "rentWei": 8166666667,
         },
         {
             "creator": "0x5050a4f4b3f9338c3472dcc01a87c76a144b3c9c",
@@ -119,7 +121,7 @@ EXPECTED = {
             "title": "beta",
             "key": "0xa4c5ac5a9730d7f3d2598e88b53abdf3639a71475a43ffb3171631fbd225882c",
             "storageUnits": 1762,
-            "rentGas": 5,
+            "rentWei": 10196759260,
         },
         {
             "creator": "0x3325a78425f17a7e487eb5666b2bfd93abb06c70",
@@ -129,10 +131,10 @@ EXPECTED = {
             "title": "gamma",
             "key": "0xffe39c77fb98cdc8510526936c4ab7f3a25a24fe2fd946926312678ca7f2a6b0",
             "storageUnits": 1764,
-            "rentGas": 5,
+            "rentWei": 12250000000,
         },
     ],
-    "burnedWei": "14000000000",
+    "burnedWei": "30613425927",
     "nextAliceKey": "0xb6efeb844b48b2758358c68bea181dae6c6e6f653349ba2edf53aa16a9fd555a",
 }
 
@@ -348,7 +350,10 @@ def main():
             for row in expected["entities"]:
                 built = by_key[row["key"]]
                 assert int(built["storageUnits"]) == row["storageUnits"]
-                assert int(built["rentGas"]) == row["rentGas"]
+                assert int(built["rentWei"]) == row["rentWei"]
+                assert row["rentWei"] == -(
+                    -row["storageUnits"] * row["expiry"] * 5000 * 20 * 10**9 // 86_400_000
+                )
                 assert int(built["createNonce"]) == row["nonce"]
             print(
                 "PASS deterministic independent builds and exact sponsored rent",

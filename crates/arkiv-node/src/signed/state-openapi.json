@@ -9243,18 +9243,42 @@
               },
               "rentRule": {
                 "type": "string",
-                "const": "glm-rent-v2",
-                "description": "Capped rent: no operation charges rent past height + maxRentLifetimeBlocks."
+                "const": "glm-rent-v3",
+                "description": "Capped rent per second: no operation charges rent past height + maxRentLifetimeBlocks, and charged blocks are priced in time at rentBlockPeriodMs."
               },
-              "maxRentLifetimeBlocks": {
+              "rentCharging": {
+                "type": "string",
+                "const": "sender-balance-outside-gas",
+                "description": "Rent is a GLM debit from the sender's balance after its gas reservation, burned like fees; it is not gas and counts against neither the transaction gas limit nor the block gas limit. An operation whose rent the sender cannot pay fails with InsufficientRentBalance and its transaction rolls back."
+              },
+              "rentPolicy": {
+                "type": "string",
+                "const": "burn"
+              },
+              "rentWeiPerStorageUnitDay": {
+                "type": "string",
+                "const": "20000000000",
+                "description": "Rent rate: 20 gwei per logical storage unit per day (7,300 gwei per unit per year), rounded up once per operation to the next wei."
+              },
+              "rentBlockPeriodMs": {
                 "type": "string",
                 "pattern": "^[1-9][0-9]*$",
-                "description": "The genesis rent cap (ChainParams.max_rent_lifetime) in blocks; every lifetime at or beyond it, permanent included, costs the same. Default: a year at the chain's block period."
+                "description": "The genesis block period (ChainParams.block_period_ms) at which charged blocks are priced in time."
               },
               "maxRentLifetimeSeconds": {
                 "type": "string",
-                "pattern": "^(0|[1-9][0-9]*)$",
-                "description": "maxRentLifetimeBlocks at the configured block period, informational."
+                "pattern": "^[1-9][0-9]*$",
+                "description": "The genesis rent cap (ChainParams.max_rent_lifetime_seconds), 1 s to 100 years; every lifetime at or beyond it, permanent included, costs the same. Default: a year."
+              },
+              "maxRentLifetimeBlocks": {
+                "type": ["string", "null"],
+                "pattern": "^[1-9][0-9]*$",
+                "description": "maxRentLifetimeSeconds in whole blocks at rentBlockPeriodMs, rounded up: the cap execution applies."
+              },
+              "rentReceiptField": {
+                "type": "string",
+                "const": "rentFee",
+                "description": "The eth_getTransactionReceipt field holding the rent a committed transaction burned, in wei (hex quantity)."
               },
               "permanentEntitiesSupported": {
                 "type": "boolean",
@@ -9263,7 +9287,7 @@
               },
               "permanentEntities": {
                 "type": "object",
-                "description": "Rules of u64::MAX (permanent) entities: never scheduled or swept; rent capped; extending to permanent is a no-op success and a finite expiry is ExpiryShortened; genesisRows says whether a permanent-prefill launch holds rent-free sponsored rows.",
+                "description": "Rules of u64::MAX (permanent) entities: never scheduled or swept; rent capped; only the owner may extend an entity to permanent (a permissionless-extension entity takes finite extensions from anyone, a permanent one from no one else: NotOwner); extending a permanent entity to permanent is a no-op success and a finite expiry is ExpiryShortened; genesisRows says whether a permanent-prefill launch holds rent-free sponsored rows.",
                 "additionalProperties": true
               }
             },

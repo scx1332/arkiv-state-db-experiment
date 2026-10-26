@@ -433,6 +433,9 @@ fn receipt(host: &Host, h: u64, i: usize) -> Result<Value> {
         }),
     );
     obj.insert("gasUsed".into(), json!(quantity(out.spent)));
+    // Entity rent the transaction burned beside its gas fee, in wei: not gas,
+    // so not in gasUsed × effectiveGasPrice (like an L2's separate l1Fee).
+    obj.insert("rentFee".into(), json!(format!("{:#x}", out.rent_wei)));
     obj.insert("cumulativeGasUsed".into(), json!(quantity(cumulative)));
     obj.insert(
         "effectiveGasPrice".into(),
@@ -766,9 +769,8 @@ fn simulation(
         }),
     }
     .map_err(|e| match e {
-        crate::ExecError::Account(crate::accounts::AccountFault::InsufficientBalance) => {
-            Error("InsufficientBalance")
-        }
+        crate::ExecError::Account(crate::accounts::AccountFault::InsufficientBalance)
+        | crate::ExecError::Unaffordable { .. } => Error("InsufficientBalance"),
         crate::ExecError::Account(_) => Error("AccountOverflow"),
         crate::ExecError::Storage(e) => Error::from(e),
         crate::ExecError::InvalidBlock(_) => Error("InvalidTransaction"),
@@ -782,6 +784,8 @@ fn simulation(
                 crate::OpOutcome::AccountRejected {
                     fault: crate::accounts::AccountFault::InsufficientBalance,
                     ..
+                } | crate::OpOutcome::HostRejected {
+                    fault: crate::HostFault::Arkiv(arkiv::ArkivFault::InsufficientRentBalance),
                 }
             )
         }) {
@@ -1147,7 +1151,7 @@ fn error_with(id: Value, e: Error, pruned: Option<(u64, u64)>) -> Value {
         return json!({"jsonrpc":"2.0","id":id,"error":error});
     }
     let message = match e.0 {
-        "InsufficientBalance" => "insufficient funds for gas * price + value",
+        "InsufficientBalance" => "insufficient funds for gas * price + value + rent",
         _ => e.0,
     };
     // A refused detached read is retryable; its code stays outside the SDK's
@@ -1348,7 +1352,7 @@ mod tests {
     fn host() -> Host {
         let signer = Signer::from_bytes([2; 32]).unwrap();
         let g = SignedGenesis::new(
-            crate::signed::protocol::default_native_genesis(9300, 1000),
+            crate::signed::protocol::default_native_genesis(9300, 1000, 1000),
             [7; 16],
             *signer.address().as_bytes(),
             1000,
@@ -1458,6 +1462,14 @@ mod tests {
         assert!(block_logs(&h, 3).unwrap().is_empty());
         assert_eq!(receipt(&h, 3, 0).unwrap()["status"], "0x0");
         assert_eq!(entity_nonce(&h, 3, &caller).unwrap(), 1);
+        // The receipt carries the burned rent beside the gas: the committed
+        // create's, and none for the rolled-back batch.
+        let rent = h.block(2).unwrap().outcomes.txs[0].rent_wei;
+        assert!(rent > U256::ZERO);
+        let paid = receipt(&h, 2, 0).unwrap();
+        assert_eq!(paid["rentFee"], format!("{rent:#x}"));
+        assert_eq!(paid["status"], "0x1");
+        assert_eq!(receipt(&h, 3, 0).unwrap()["rentFee"], "0x0");
     }
     #[test]
     fn estimate_has_no_nonce_balance_or_state_effect() {
@@ -1693,7 +1705,7 @@ mod tests {
         let rejected = handle_request(&rt, request("eth_sendRawTransaction", json!([raw]))).await;
         assert_eq!(
             rejected,
-            json!({"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"insufficient funds for gas * price + value"}})
+            json!({"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"insufficient funds for gas * price + value + rent"}})
         );
         {
             let mut guard = rt.node.lock().unwrap();

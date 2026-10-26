@@ -23,13 +23,16 @@ pub enum ArkivFault {
     Namespace = 11,
     Duplicate = 12,
     GasOverflow = 13,
-    /// Retired: live permanent entities are supported since protocol 3. The
+    /// Retired: live permanent entities are supported since protocol 4. The
     /// tag stays reserved and is never produced.
     PermanentStorageUnsupported = 14,
     UnsupportedGasOperation = 15,
     /// The `bytes` cells of the resulting entity would hold more than
     /// [`MAX_ENTITY_BYTES`].
     EntityTooLarge = 16,
+    /// The sender's balance, after its transaction's gas reservation, cannot
+    /// pay the operation's rent. Nothing of the operation applies.
+    InsufficientRentBalance = 17,
 }
 impl Encode for ArkivFault {
     fn encode_to(&self, e: &mut Encoder) {
@@ -56,6 +59,7 @@ impl Decode for ArkivFault {
             14 => Self::PermanentStorageUnsupported,
             15 => Self::UnsupportedGasOperation,
             16 => Self::EntityTooLarge,
+            17 => Self::InsufficientRentBalance,
             tag => {
                 return Err(DecodeError::UnknownTag {
                     kind: "ArkivFault",
@@ -252,20 +256,39 @@ pub fn derive_entity_key(chain_id: u64, caller: &[u8; 20], nonce: u64, salt: u12
     alloy_primitives::keccak256(bytes).0
 }
 #[derive(Clone, Copy, Debug)]
-pub struct ArkivExecutionContext {
+pub struct ArkivExecutionContext<'a> {
     pub caller: [u8; 20],
     pub block_height: u64,
     pub chain_id: u64,
-    /// The chain's rent cap ([`crate::ChainParams::max_rent_lifetime`]):
-    /// rent is never charged past `block_height + max_rent_lifetime`.
-    pub max_rent_lifetime: u64,
+    /// The chain's rent clock ([`crate::gas::RentClock::of`] its params):
+    /// rent is never charged past `block_height + cap_blocks`.
+    pub rent: crate::gas::RentClock,
     pub expiry_per_block: u32,
+    /// The accounts that pay rent: the caller's balance is debited and the
+    /// rent burned. `None` quotes rent without debiting it (estimation,
+    /// chains without accounts and height-zero construction).
+    pub payer: Option<&'a crate::accounts::AccountConfig>,
     /// Waives the rent of a `Create` with the permanent expiry (`u64::MAX`).
     /// Only height-zero construction of a permanent-prefill launch sets it
     /// (its permanent rows are explicitly sponsored); live blocks pass
     /// `false`, so a live permanent create pays the capped rent like any
     /// lifetime at or beyond the cap.
     pub allow_permanent_create: bool,
+}
+/// One executed operation and the rent it charged: nonzero only when the
+/// operation applied (a payer was debited that much, or would have been).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArkivOutcome {
+    pub outcome: OpOutcome,
+    pub rent_wei: alloy_primitives::U256,
+}
+impl From<OpOutcome> for ArkivOutcome {
+    fn from(outcome: OpOutcome) -> Self {
+        Self {
+            outcome,
+            rent_wei: alloy_primitives::U256::ZERO,
+        }
+    }
 }
 fn name(s: &str) -> CellName {
     CellName::new(s).expect("system name")
@@ -299,7 +322,7 @@ fn rejected(fault: ArkivFault) -> OpOutcome {
         fault: HostFault::Arkiv(fault),
     }
 }
-pub(crate) fn expiry(exp: &Expiry, c: &ArkivExecutionContext) -> Result<u64, HostFault> {
+pub(crate) fn expiry(exp: &Expiry, c: &ArkivExecutionContext<'_>) -> Result<u64, HostFault> {
     let floor = c
         .block_height
         .checked_add(exp.min_lifetime)
@@ -345,22 +368,29 @@ pub(crate) fn create_cells(
 }
 /// Execute one operation; the enclosing transaction checkpoint provides atomic batches.
 /// Engine/storage errors remain fatal and may never be downgraded to user rejections.
+///
+/// Under GLM pricing the operation's rent ([`crate::gas::rent`]) is quoted
+/// before the engine write. It is not gas: the engine keeps the whole
+/// `budget`. With a payer the caller must hold the rent after its
+/// transaction's gas reservation, or the operation is refused with
+/// [`ArkivFault::InsufficientRentBalance`] before anything is written;
+/// after a successful write the rent is debited and burned.
 pub fn execute_operation(
     branch: &mut Branch,
     namespace: NamespaceId,
-    c: &ArkivExecutionContext,
+    c: &ArkivExecutionContext<'_>,
     op: &ArkivOperation,
     budget: Budget,
-) -> Result<OpOutcome, ExecError> {
+) -> Result<ArkivOutcome, ExecError> {
     // GLM disables generic record mutations in every namespace, so all of
     // them can safely use Arkiv ownership and rent. Chains without GLM
     // pricing allow generic writes outside namespace one, so entities stay
     // confined to it there.
     if namespace != entity_namespace() && !crate::gas::is_active(branch.pricing()) {
-        return Ok(rejected(ArkivFault::Namespace));
+        return Ok(rejected(ArkivFault::Namespace).into());
     }
     if let Err(f) = op.validate() {
-        return Ok(rejected(f));
+        return Ok(rejected(f).into());
     }
     let mut current_cells = Vec::new();
     let current = if let Some(key) = op.key() {
@@ -368,22 +398,22 @@ pub fn execute_operation(
             match branch.try_get_record(namespace, key, &Projection::ALL, Budget::unlimited())? {
                 Ok(read) => read.value,
                 Err(rejected) if rejected.reason == arkiv_db::Rejection::UnknownNamespace => {
-                    return Ok(self::rejected(ArkivFault::NotFound));
+                    return Ok(self::rejected(ArkivFault::NotFound).into());
                 }
                 Err(_) => return Err(corrupt()),
             };
         let Some(row) = row else {
-            return Ok(rejected(ArkivFault::NotFound));
+            return Ok(rejected(ArkivFault::NotFound).into());
         };
         let projected = project(&row).map_err(|_| corrupt())?;
         if projected.expires_at <= c.block_height {
-            return Ok(rejected(ArkivFault::Expired));
+            return Ok(rejected(ArkivFault::Expired).into());
         }
         if projected.owner != c.caller
             && !(matches!(op, ArkivOperation::ExtendExpiry { .. })
                 && projected.creation_flags & 2 != 0)
         {
-            return Ok(rejected(ArkivFault::NotOwner));
+            return Ok(rejected(ArkivFault::NotOwner).into());
         }
         current_cells = row.cells;
         Some(projected)
@@ -394,12 +424,18 @@ pub fn execute_operation(
     let new = if let Some(exp) = op.expiry() {
         let target = match expiry(exp, c) {
             Ok(t) => t,
-            Err(fault) => return Ok(OpOutcome::HostRejected { fault }),
+            Err(fault) => return Ok(OpOutcome::HostRejected { fault }.into()),
         };
+        // Permissionless extension (creation flag 2) admits anyone's finite
+        // extension; only the owner may make an entity permanent.
+        if target == u64::MAX && current.as_ref().is_some_and(|p| p.owner != c.caller) {
+            return Ok(rejected(ArkivFault::NotOwner).into());
+        }
         if old.is_some_and(|v| target < v) {
             return Ok(OpOutcome::HostRejected {
                 fault: HostFault::ExpiryShortened,
-            });
+            }
+            .into());
         }
         if target != u64::MAX
             && old != Some(target)
@@ -407,7 +443,8 @@ pub fn execute_operation(
         {
             return Ok(OpOutcome::HostRejected {
                 fault: HostFault::ExpiryCapacityFull,
-            });
+            }
+            .into());
         }
         Some(target)
     } else {
@@ -423,7 +460,7 @@ pub fn execute_operation(
         } => {
             let nonce = count(branch, &nonce_key(&c.caller))?;
             let Some(next) = nonce.checked_add(1) else {
-                return Ok(rejected(ArkivFault::NonceExhausted));
+                return Ok(rejected(ArkivFault::NonceExhausted).into());
             };
             next_nonce = Some(next);
             let key = derive_entity_key(c.chain_id, &c.caller, nonce, *salt);
@@ -459,7 +496,7 @@ pub fn execute_operation(
                     ..
                 } => {
                     if p.creation_flags & 1 != 0 {
-                        return Ok(rejected(ArkivFault::Readonly));
+                        return Ok(rejected(ArkivFault::Readonly).into());
                     }
                     set.extend_from_slice(changes);
                     remove.extend_from_slice(deleted);
@@ -470,7 +507,7 @@ pub fn execute_operation(
                 )),
                 ArkivOperation::TransferOwnership { owner, .. } => {
                     if *owner == [0; 20] || *owner == p.owner {
-                        return Ok(rejected(ArkivFault::Owner));
+                        return Ok(rejected(ArkivFault::Owner).into());
                     }
                     set.push((name("$owner"), Cell::attribute(Value::Addr(*owner))))
                 }
@@ -487,18 +524,18 @@ pub fn execute_operation(
     // The entity as this operation leaves it (empty for a delete).
     let after_cells = match &write {
         WriteOp::CreateRecord { cells, .. } => cells.clone(),
-        WriteOp::PatchRecord { set, remove, .. } => {
-            let mut cells = current_cells.clone();
-            cells.retain(|(name, _)| !remove.contains(name) && !set.iter().any(|(n, _)| n == name));
-            cells.extend(set.iter().cloned());
-            cells
-        }
+        WriteOp::PatchRecord { set, remove, .. } => patched(&current_cells, set, remove),
         _ => Vec::new(),
     };
     if entity_bytes(&after_cells) > MAX_ENTITY_BYTES {
-        return Ok(rejected(ArkivFault::EntityTooLarge));
+        return Ok(rejected(ArkivFault::EntityTooLarge).into());
     }
-    let rent = if crate::gas::is_active(branch.pricing()) {
+    // Genesis permanent prefill: no time-based rent for a creation. Decided
+    // before quoting, so a sponsored row never meets a quote at all.
+    let waived = c.allow_permanent_create
+        && new == Some(u64::MAX)
+        && matches!(op, ArkivOperation::Create { .. });
+    let rent = if crate::gas::is_active(branch.pricing()) && !waived {
         let quoted = (|| {
             let before = if current.is_some() {
                 crate::gas::storage_units(&current_cells)?.total
@@ -517,64 +554,37 @@ pub fn execute_operation(
                 old,
                 if deleted { None } else { new },
                 c.block_height,
-                c.max_rent_lifetime,
+                c.rent,
             )
         })();
         match quoted {
-            // Genesis permanent prefill: no time-based rent for a creation.
-            Ok(_)
-                if c.allow_permanent_create
-                    && new == Some(u64::MAX)
-                    && matches!(op, ArkivOperation::Create { .. }) =>
-            {
-                0
-            }
-            Ok(quote) => quote.gas,
-            Err(_) => return Ok(rejected(ArkivFault::GasOverflow)),
+            Ok(quote) => alloy_primitives::U256::from(quote.wei),
+            Err(_) => return Ok(rejected(ArkivFault::GasOverflow).into()),
         }
     } else {
-        0
+        alloy_primitives::U256::ZERO
     };
-    // Reserve rent before engine execution, then charge it only on success.
-    let available = budget
-        .limit_units()
-        .map_or(branch.remaining().units(), |v| v.units());
-    let Some(engine_budget) = available.checked_sub(rent) else {
-        let failure = branch
-            .try_charge_host(rent, budget)?
-            .expect_err("rent exceeds available gas");
-        return Ok(OpOutcome::Rejected {
-            reason: failure.reason,
-            receipt: failure.receipt,
-        });
-    };
-    let mut result = match branch.try_execute_host(
-        write,
-        if rent == 0 {
-            budget
-        } else {
-            Budget::limit(engine_budget)
-        },
-    )? {
+    let payer = arkiv_db::OwnerId::new(c.caller);
+    if let Some(accounts) = c.payer
+        && !rent.is_zero()
+        && accounts.read(branch, payer)?.balance < rent
+    {
+        return Ok(rejected(ArkivFault::InsufficientRentBalance).into());
+    }
+    let result = match branch.try_execute_host(write, budget)? {
         Ok(r) => r,
         Err(r) => {
             return Ok(OpOutcome::Rejected {
                 reason: r.reason,
                 receipt: r.receipt,
-            });
+            }
+            .into());
         }
     };
-    if rent != 0 {
-        let charged = branch
-            .try_charge_host(rent, Budget::limit(rent))?
-            .map_err(|_| corrupt())?;
-        result.receipt.spent = result
-            .receipt
-            .spent
-            .checked_add(charged.spent)
-            .ok_or_else(corrupt)?;
-        // The engine-only ledger cannot represent protocol rent.
-        result.receipt.ledger = None;
+    if let Some(accounts) = c.payer
+        && !rent.is_zero()
+    {
+        accounts.burn_from(branch, payer, rent)?;
     }
     if let Some(n) = next_nonce {
         put_count(branch, nonce_key(&c.caller), n)?;
@@ -604,33 +614,151 @@ pub fn execute_operation(
             }
         }
     }
-    Ok(OpOutcome::Applied {
-        effect: result.effect,
-        receipt: result.receipt,
+    Ok(ArkivOutcome {
+        outcome: OpOutcome::Applied {
+            effect: result.effect,
+            receipt: result.receipt,
+        },
+        rent_wei: rent,
     })
 }
+/// `cells` after a patch that sets `set` and removes `remove`.
+fn patched(
+    cells: &[(CellName, Cell)],
+    set: &[(CellName, Cell)],
+    remove: &[CellName],
+) -> Vec<(CellName, Cell)> {
+    let mut cells = cells.to_vec();
+    cells.retain(|(name, _)| !remove.contains(name) && !set.iter().any(|(n, _)| n == name));
+    cells.extend(set.iter().cloned());
+    cells
+}
+/// The rent `op` would charge applied alone at `c.block_height` on `branch`,
+/// in wei: an admission quote, not consensus. It reads at most the one
+/// entity the operation names (a create reads nothing) and checks neither
+/// authority nor capacity; an operation that could not apply quotes zero.
+/// Execution prices every operation again ([`execute_operation`]); where
+/// both apply to the same state, they agree.
+pub fn quote_rent(
+    branch: &Branch,
+    namespace: NamespaceId,
+    c: &ArkivExecutionContext<'_>,
+    op: &ArkivOperation,
+) -> Result<alloy_primitives::U256, ExecError> {
+    let zero = alloy_primitives::U256::ZERO;
+    if !crate::gas::is_active(branch.pricing()) || op.validate().is_err() {
+        return Ok(zero);
+    }
+    let (current_cells, old) = match op.key() {
+        None => (Vec::new(), None),
+        Some(key) => {
+            let row = match branch.try_get_record(
+                namespace,
+                key,
+                &Projection::ALL,
+                Budget::unlimited(),
+            )? {
+                Ok(read) => read.value,
+                Err(_) => None,
+            };
+            let Some(row) = row else { return Ok(zero) };
+            let Ok(projected) = project(&row) else {
+                return Ok(zero);
+            };
+            if projected.expires_at <= c.block_height {
+                return Ok(zero);
+            }
+            (row.cells, Some(projected.expires_at))
+        }
+    };
+    let new = match op.expiry() {
+        Some(exp) => match expiry(exp, c) {
+            Ok(target) if old.is_none_or(|v| target >= v) => Some(target),
+            _ => return Ok(zero),
+        },
+        None => old,
+    };
+    let stamp = (
+        name("$updatedAt"),
+        Cell::attribute(Value::U64(c.block_height)),
+    );
+    let after_cells = match op {
+        ArkivOperation::Create {
+            flags, attributes, ..
+        } => create_cells(
+            // Every system cell has a fixed size, so the key does not matter.
+            [0; 32],
+            c.caller,
+            c.block_height,
+            new.unwrap_or(u64::MAX),
+            *flags,
+            attributes,
+        ),
+        ArkivOperation::Patch { set, remove, .. } => {
+            let mut changes = vec![stamp];
+            changes.extend_from_slice(set);
+            patched(&current_cells, &changes, remove)
+        }
+        ArkivOperation::ExtendExpiry { .. } => patched(
+            &current_cells,
+            &[
+                stamp,
+                (
+                    name("$expiresAt"),
+                    Cell::attribute(Value::U64(new.unwrap_or(u64::MAX))),
+                ),
+            ],
+            &[],
+        ),
+        ArkivOperation::TransferOwnership { .. } | ArkivOperation::Delete { .. } => {
+            return Ok(zero);
+        }
+    };
+    let units = |cells: &[(CellName, Cell)]| crate::gas::storage_units(cells).map(|u| u.total);
+    let before = if op.key().is_some() {
+        units(&current_cells)
+    } else {
+        Ok(0)
+    };
+    let quote = before.and_then(|before| {
+        crate::gas::rent(
+            before,
+            units(&after_cells)?,
+            old,
+            new,
+            c.block_height,
+            c.rent,
+        )
+    });
+    Ok(quote.map_or(zero, |q| alloy_primitives::U256::from(q.wei)))
+}
 /// Atomic batch on a branch. Deterministic failure rolls back all cells, indexes,
-/// creation counters and due schedules, retaining normal engine charge receipts.
+/// creation counters, due schedules and rent debits, retaining normal engine
+/// charge receipts. Returns the outcomes and the rent the batch charged (zero
+/// when it failed).
 pub fn execute_batch(
     branch: &mut Branch,
     namespace: NamespaceId,
-    c: &ArkivExecutionContext,
+    c: &ArkivExecutionContext<'_>,
     ops: &[ArkivOperation],
     budget: u64,
-) -> Result<Vec<OpOutcome>, ExecError> {
+) -> Result<(Vec<OpOutcome>, alloy_primitives::U256), ExecError> {
     let checkpoint = branch.checkpoint();
     let mut outcomes = Vec::new();
     let mut remaining = budget;
+    let mut rent = alloy_primitives::U256::ZERO;
     for op in ops {
         let result = execute_operation(branch, namespace, c, op, Budget::limit(remaining));
-        let outcome = match result {
+        let executed = match result {
             Ok(o) => o,
             Err(e) => {
                 branch.rollback_to(checkpoint).map_err(|_| corrupt())?;
                 return Err(e);
             }
         };
+        let outcome = executed.outcome;
         remaining = remaining.saturating_sub(outcome.spent());
+        rent = rent.checked_add(executed.rent_wei).ok_or_else(corrupt)?;
         let failed = !matches!(outcome, OpOutcome::Applied { .. });
         outcomes.push(outcome);
         if failed {
@@ -644,10 +772,10 @@ pub fn execute_batch(
                 }
             }
             outcomes.resize(ops.len(), OpOutcome::NotExecuted);
-            break;
+            return Ok((outcomes, alloy_primitives::U256::ZERO));
         }
     }
-    Ok(outcomes)
+    Ok((outcomes, rent))
 }
 
 #[cfg(test)]

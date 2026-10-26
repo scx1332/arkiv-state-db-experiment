@@ -1,4 +1,6 @@
-//! Bounded, volatile admission state. Selection never removes an entry.
+//! Bounded, volatile admission state. Selection never removes an entry; only a
+//! definite commit or an eviction of a transaction its sender can no longer
+//! cover ([`Pool::evict_from`]) does.
 use super::{
     Error, Result,
     protocol::{SignedGenesis, SignedInputs, SignedLimits, SignedTx},
@@ -46,6 +48,9 @@ struct Entry {
     hash: B256,
     bytes: usize,
     arrival: u64,
+    /// The rent quoted at admission ([`super::host::Host::quote_rent`]),
+    /// reserved beside its fee and value.
+    rent: alloy_primitives::U256,
 }
 
 #[derive(Debug)]
@@ -128,6 +133,8 @@ impl Pool {
         next
     }
 
+    /// Funds the sender's pending transactions hold: their fees at the
+    /// declared gas, their outgoing value and their quoted rent.
     pub fn reserved(&self, actor: OwnerId) -> Result<alloy_primitives::U256> {
         self.senders
             .get(&actor)
@@ -138,14 +145,20 @@ impl Pool {
                     crate::accounts::reservation(&entry.tx.tx)
                         .map_err(|_| Error("BalanceOverflow"))?,
                 )
+                .and_then(|sum| sum.checked_add(entry.rent))
                 .ok_or(Error("BalanceOverflow"))
             })
     }
+    /// Admits `tx` if `balance` covers every pending reservation of its
+    /// sender plus its own fee, value and `rent`, its rent quoted on the head
+    /// state. Execution checks rent again: an operation whose rent the sender
+    /// cannot pay then fails deterministically.
     pub fn insert_funded(
         &mut self,
         tx: SignedTx,
         next: u64,
         balance: alloy_primitives::U256,
+        rent: alloy_primitives::U256,
     ) -> Result<Admission> {
         // Request retries and request conflicts bypass the new reservation. A valid
         // pending retry must not reserve the same funds twice.
@@ -155,14 +168,40 @@ impl Pool {
                 .checked_add(
                     crate::accounts::reservation(&tx.tx).map_err(|_| Error("BalanceOverflow"))?,
                 )
+                .and_then(|need| need.checked_add(rent))
                 .ok_or(Error("BalanceOverflow"))?;
             if need > balance {
                 return Err(Error("InsufficientBalance"));
             }
         }
-        self.insert_inner(tx, next)
+        self.insert_inner(tx, next, rent)
     }
-    fn insert_inner(&mut self, tx: SignedTx, committed_next: u64) -> Result<Admission> {
+    /// Removes `actor`'s transactions from `nonce` on: the producer found the
+    /// one at `nonce` unable to cover its gas reservation (rent an earlier
+    /// transaction paid exceeded its quote), so it and its successors, which
+    /// cannot run before it, leave the pool. Never called for a transaction
+    /// of a block awaiting commit.
+    pub fn evict_from(&mut self, actor: OwnerId, nonce: u64) -> usize {
+        let Some(entries) = self.senders.get_mut(&actor) else {
+            return 0;
+        };
+        let evicted = entries.split_off(&nonce);
+        for entry in evicted.values() {
+            self.requests.remove(&(actor, entry.tx.tx.request_id));
+            self.count -= 1;
+            self.bytes -= entry.bytes;
+        }
+        if entries.is_empty() {
+            self.senders.remove(&actor);
+        }
+        evicted.len()
+    }
+    fn insert_inner(
+        &mut self,
+        tx: SignedTx,
+        committed_next: u64,
+        rent: alloy_primitives::U256,
+    ) -> Result<Admission> {
         if tx.genesis_hash != self.genesis_hash || tx.tx.chain_id != self.chain_id {
             return Err(Error("IdentityMismatch"));
         }
@@ -231,6 +270,7 @@ impl Pool {
                 hash,
                 bytes,
                 arrival: self.arrival,
+                rent,
             },
         );
         self.arrival = next_arrival;

@@ -18,7 +18,11 @@
 //! 4. User transactions, in order, each under a checkpoint. A transaction
 //!    whose operation fails is rolled back (its receipts and charged units
 //!    stay), its remaining operations are not executed, and execution
-//!    continues with the next transaction.
+//!    continues with the next transaction. On a chain with accounts the
+//!    sender's fee at the declared gas is reserved before the checkpoint (a
+//!    sender who cannot cover it makes the block invalid:
+//!    [`ExecError::Unaffordable`]), and each entity operation's rent is
+//!    debited and burned inside it, so a rollback undoes the rent too.
 //!
 //! # Expiry schedule
 //!
@@ -176,6 +180,9 @@ pub enum Invariant {
     HostValue,
     /// The block's spend differs from the sum of its outcomes.
     Spent,
+    /// The chain parameters give no rent clock (block period or rent cap
+    /// out of range).
+    RentClock,
 }
 
 /// Why a block could not be executed. The candidate is discarded.
@@ -183,6 +190,15 @@ pub enum Invariant {
 pub enum ExecError {
     /// Invalid account transition invalidates the containing block.
     Account(crate::accounts::AccountFault),
+    /// The sender of transaction `tx` cannot cover the gas reservation of
+    /// its declared budget: the block is invalid. Admission checks gas,
+    /// value and quoted rent, but rent an earlier transaction paid can
+    /// exceed its quote, so a producer drops such a transaction and builds
+    /// the block again.
+    Unaffordable {
+        /// The transaction's index in the block.
+        tx: u32,
+    },
     /// The storage beneath the state failed: an availability error.
     Storage(StorageError),
     /// The expiry schedule is inconsistent.
@@ -208,6 +224,12 @@ impl fmt::Display for ExecError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Account(fault) => write!(formatter, "account: {fault:?}"),
+            Self::Unaffordable { tx } => {
+                write!(
+                    formatter,
+                    "transaction {tx} cannot cover its gas reservation"
+                )
+            }
             Self::Storage(error) => write!(formatter, "storage unavailable: {error}"),
             Self::ScheduleInconsistent(fault) => {
                 write!(formatter, "expiry schedule inconsistent: {fault:?}")
@@ -483,9 +505,10 @@ fn execute_block_inner(
     })
 }
 
-/// The outcome of one operation: applied, or the transaction fails here.
+/// The outcome of one operation: applied (with the rent it charged), or the
+/// transaction fails here.
 enum Step {
-    Applied(OpOutcome),
+    Applied(OpOutcome, alloy_primitives::U256),
     Failed(OpOutcome),
 }
 
@@ -698,7 +721,14 @@ impl Executor<'_> {
     fn tx(&mut self, index: u32, tx: &TxEnvelope) -> Result<TxOutcome, ExecError> {
         let charged_accounts = self.accounts.filter(|_| !self.estimate);
         if let Some(accounts) = charged_accounts {
-            accounts.reserve(&mut self.branch, tx)?;
+            accounts
+                .reserve(&mut self.branch, tx)
+                .map_err(|error| match error {
+                    ExecError::Account(crate::accounts::AccountFault::InsufficientBalance) => {
+                        ExecError::Unaffordable { tx: index }
+                    }
+                    other => other,
+                })?;
         }
         let checkpoint = self.branch.checkpoint();
         let mut ops = Vec::with_capacity(tx.ops.len());
@@ -723,10 +753,12 @@ impl Executor<'_> {
                         status: TxStatus::Failed { op_index: 0 },
                         ops,
                         spent: 0,
+                        rent_wei: alloy_primitives::U256::ZERO,
                     });
                 }
             }
         }
+        let mut rent = alloy_primitives::U256::ZERO;
         for (op_index, op) in tx.ops.iter().enumerate() {
             let remaining = tx.tx_budget.saturating_sub(spent);
             let op_index = position(op_index);
@@ -739,7 +771,12 @@ impl Executor<'_> {
                 tx.ops.len() == 1 && spent == crate::gas::TX_INTRINSIC_GAS,
             )?;
             let (outcome, fails) = match step {
-                Step::Applied(outcome) => (outcome, false),
+                Step::Applied(outcome, charged) => {
+                    rent = rent
+                        .checked_add(charged)
+                        .ok_or(ExecError::Account(crate::accounts::AccountFault::Overflow))?;
+                    (outcome, false)
+                }
                 Step::Failed(outcome) => (outcome, true),
             };
             spent = spent
@@ -766,13 +803,20 @@ impl Executor<'_> {
                     }
                 }
                 ops.resize(tx.ops.len(), OpOutcome::NotExecuted);
+                // The rollback undid every rent debit and burn.
+                rent = alloy_primitives::U256::ZERO;
                 TxStatus::Failed { op_index }
             }
         };
         if let Some(accounts) = charged_accounts {
             accounts.settle(&mut self.branch, tx, spent)?;
         }
-        Ok(TxOutcome { status, ops, spent })
+        Ok(TxOutcome {
+            status,
+            ops,
+            spent,
+            rent_wei: rent,
+        })
     }
 
     /// The lifetime of the live record `key` in `namespace` before the
@@ -847,7 +891,7 @@ impl Executor<'_> {
                 intrinsic_covers_transfer,
             )?;
             return Ok(if matches!(outcome, OpOutcome::Applied { .. }) {
-                Step::Applied(outcome)
+                Step::Applied(outcome, alloy_primitives::U256::ZERO)
             } else {
                 Step::Failed(outcome)
             });
@@ -861,22 +905,25 @@ impl Executor<'_> {
                 caller: *actor.as_bytes(),
                 block_height: self.height,
                 chain_id: self.spec.chain_id(),
-                max_rent_lifetime: self.spec.params().max_rent_lifetime,
+                rent: crate::gas::RentClock::of(self.spec.params())
+                    .ok_or(ExecError::Invariant(Invariant::RentClock))?,
                 expiry_per_block: self.spec.params().expiry_per_block,
+                // Estimation quotes rent without affordability or a debit.
+                payer: self.accounts.filter(|_| !self.estimate),
                 // Live permanent creates pay the capped rent.
                 allow_permanent_create: false,
             };
-            let outcome = crate::arkiv::execute_operation(
+            let executed = crate::arkiv::execute_operation(
                 &mut self.branch,
                 *namespace,
                 &context,
                 operation,
                 Budget::limit(remaining),
             )?;
-            return Ok(if matches!(outcome, OpOutcome::Applied { .. }) {
-                Step::Applied(outcome)
+            return Ok(if matches!(executed.outcome, OpOutcome::Applied { .. }) {
+                Step::Applied(executed.outcome, executed.rent_wei)
             } else {
-                Step::Failed(outcome)
+                Step::Failed(executed.outcome)
             });
         }
         if crate::gas::is_active(self.branch.pricing())
@@ -950,10 +997,13 @@ impl Executor<'_> {
                 }
             }
         }
-        Ok(Step::Applied(OpOutcome::Applied {
-            effect: executed.effect,
-            receipt: executed.receipt,
-        }))
+        Ok(Step::Applied(
+            OpOutcome::Applied {
+                effect: executed.effect,
+                receipt: executed.receipt,
+            },
+            alloy_primitives::U256::ZERO,
+        ))
     }
 
     /// Resolves and admits an operation's expiry against the record's

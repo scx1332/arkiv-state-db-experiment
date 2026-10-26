@@ -1,8 +1,10 @@
-use arkiv_db::{Budget, Cell, CellName, Projection, RecordKey, Value, durable::Options};
+use alloy_primitives::U256;
+use arkiv_db::{Budget, Cell, CellName, OwnerId, Projection, RecordKey, Value, durable::Options};
 use arkiv_db_memory::MemoryVersionedStore;
 use arkiv_node::{
-    Expiry, OpOutcome, TxEnvelope, TxOp, TxStatus,
-    arkiv::{self, ArkivOperation},
+    Expiry, HostFault, OpOutcome, TxEnvelope, TxOp, TxStatus,
+    accounts::{self, AccountConfig},
+    arkiv::{self, ArkivFault, ArkivOperation},
     gas,
     signed::{
         crypto::Signer,
@@ -20,7 +22,9 @@ fn genesis() -> SignedGenesis {
     signed_support::genesis(9200, 1000, [8; 16], 1, 5000, &[1, 2])
 }
 fn host(producer: bool) -> Host {
-    let g = genesis();
+    host_of(genesis(), producer)
+}
+fn host_of(g: SignedGenesis, producer: bool) -> Host {
     let cert = SignedHeader::sign(&g, g.header(), &signer()).unwrap();
     Host::create(
         Arc::new(MemoryVersionedStore::new()),
@@ -55,12 +59,15 @@ fn create(salt: u128, body: usize, lifetime: u64) -> ArkivOperation {
     }
 }
 fn tx(h: &Host, nonce: u64, budget: u64, ops: Vec<ArkivOperation>) -> SignedTx {
+    tx_by(h, &signer(), nonce, budget, ops)
+}
+fn tx_by(h: &Host, by: &Signer, nonce: u64, budget: u64, ops: Vec<ArkivOperation>) -> SignedTx {
     SignedTx::sign(
         &h.genesis,
         nonce,
         TxEnvelope {
             chain_id: 9200,
-            actor: signer().address(),
+            actor: by.address(),
             request_id: [nonce as u8; 32],
             tx_budget: budget,
             ops: ops
@@ -71,18 +78,55 @@ fn tx(h: &Host, nonce: u64, budget: u64, ops: Vec<ArkivOperation>) -> SignedTx {
                 })
                 .collect(),
         },
-        &signer(),
+        by,
     )
     .unwrap()
 }
 fn key(nonce: u64, salt: u128) -> RecordKey {
+    key_of(&signer(), nonce, salt)
+}
+fn key_of(by: &Signer, nonce: u64, salt: u128) -> RecordKey {
     RecordKey::new(&arkiv::derive_entity_key(
         9200,
-        signer().address().as_bytes(),
+        by.address().as_bytes(),
         nonce,
         salt,
     ))
     .unwrap()
+}
+/// The chain's rent clock: 5-second blocks, a one-year cap.
+fn clock(h: &Host) -> gas::RentClock {
+    gas::RentClock::of(&h.genesis.genesis.params).unwrap()
+}
+fn balance(h: &Host, actor: OwnerId) -> U256 {
+    h.account(h.head.height, actor).unwrap().balance
+}
+fn burnt(h: &Host) -> U256 {
+    accounts::burned(
+        h.engine
+            .head_snapshot()
+            .try_host_get(&accounts::BURN_KEY)
+            .unwrap(),
+    )
+    .unwrap()
+}
+fn permanent(salt: u128, body: usize) -> ArkivOperation {
+    let mut op = create(salt, body, 0);
+    if let ArkivOperation::Create { expiry, .. } = &mut op {
+        *expiry = Expiry::PERMANENT;
+    }
+    op
+}
+/// A patch adding an unindexed `more` column of `bytes` bytes.
+fn grow(key: &RecordKey, bytes: usize) -> ArkivOperation {
+    ArkivOperation::Patch {
+        key: key.clone(),
+        set: vec![(
+            CellName::new("more").unwrap(),
+            Cell::field(Value::bytes(&vec![7; bytes])),
+        )],
+        remove: vec![],
+    }
 }
 fn cells(h: &Host, key: &RecordKey) -> Option<Vec<(CellName, arkiv_db::Cell)>> {
     h.engine
@@ -128,6 +172,20 @@ fn costs_rent_replay_and_exact_budget() {
                     .sum::<u64>()
         );
         assert_eq!(b.outcomes.spent, gas);
+        // Rent is recorded and burned beside the gas, never inside it.
+        let row = cells(&p, &key(nonce - 1, nonce as u128)).unwrap();
+        let units = gas::storage_units(&row).unwrap().total;
+        let rent = gas::rent(
+            0,
+            units,
+            None,
+            Some(p.head.height + days * 17280),
+            p.head.height,
+            clock(&p),
+        )
+        .unwrap()
+        .wei;
+        assert_eq!(b.outcomes.txs[0].rent_wei, U256::from(rent));
         f.import(b).unwrap();
         assert_eq!(p.head, f.head);
     }
@@ -149,81 +207,298 @@ fn costs_rent_replay_and_exact_budget() {
     );
 }
 #[test]
-fn permanent_create_pays_the_capped_rent_and_rollback_retains_gas_and_nonce() {
+fn permanent_create_pays_rent_outside_gas_and_rollback_retains_gas_and_nonce() {
     let mut p = host(true);
+    let mut f = host(false);
     p.produce().unwrap();
-    let mut permanent = create(1, 1024, 0);
-    if let ArkivOperation::Create { expiry, .. } = &mut permanent {
-        *expiry = Expiry::PERMANENT;
-    }
-    // Too small a budget for a year of rent: refused before the engine runs.
-    p.submit(tx(&p, 1, 1_000_000, vec![permanent.clone()]))
+    f.import(p.block(1).unwrap()).unwrap();
+    let actor = signer().address();
+    // A live permanent create fits an ordinary gas budget: rent is not gas.
+    let cap = clock(&p).cap_blocks();
+    assert_eq!(cap, 6_307_200);
+    let at_cap = {
+        let mut op = create(9, 1024, 0);
+        if let ArkivOperation::Create { expiry, .. } = &mut op {
+            *expiry = Expiry {
+                expires_at: 0,
+                min_lifetime: cap,
+            };
+        }
+        op
+    };
+    let (balance0, burnt0) = (balance(&p, actor), burnt(&p));
+    p.submit(tx(&p, 1, 1_000_000, vec![permanent(1, 1024)]))
         .unwrap();
     p.produce().unwrap();
-    assert!(matches!(
-        p.block(2).unwrap().outcomes.txs[0].status,
-        TxStatus::Failed { .. }
-    ));
-    // With the budget, a live permanent create commits and pays exactly the
-    // rent of the cap, the same as any lifetime of a cap or more.
-    let cap = p.genesis.genesis.params.max_rent_lifetime;
-    let mut at_cap = create(9, 1024, 0);
-    if let ArkivOperation::Create { expiry, .. } = &mut at_cap {
-        *expiry = Expiry {
-            expires_at: 0,
-            min_lifetime: cap,
-        };
-    }
-    p.submit(tx(&p, 2, 60_000_000, vec![permanent])).unwrap();
+    p.submit(tx(&p, 2, 1_000_000, vec![at_cap])).unwrap();
     p.produce().unwrap();
-    p.submit(tx(&p, 3, 60_000_000, vec![at_cap])).unwrap();
-    p.produce().unwrap();
-    let permanent_gas = p.block(3).unwrap().outcomes.txs[0].spent;
-    let at_cap_gas = p.block(4).unwrap().outcomes.txs[0].spent;
-    assert_eq!(
-        p.block(3).unwrap().outcomes.txs[0].status,
-        TxStatus::Committed
+    let (permanent_tx, at_cap_tx) = (
+        p.block(2).unwrap().outcomes.txs[0].clone(),
+        p.block(3).unwrap().outcomes.txs[0].clone(),
     );
-    assert_eq!(permanent_gas, at_cap_gas);
-    // The refused transaction consumed no creation nonce.
+    assert_eq!(permanent_tx.status, TxStatus::Committed);
+    assert_eq!(at_cap_tx.status, TxStatus::Committed);
+    // The same execution gas and the same capped rent: a year of the entity.
+    assert_eq!(permanent_tx.spent, at_cap_tx.spent);
+    assert!(permanent_tx.spent < 200_000);
+    assert_eq!(permanent_tx.rent_wei, at_cap_tx.rent_wei);
     let entity = key(0, 1);
-    let row = cells(&p, &entity).unwrap();
-    let units = gas::storage_units(&row).unwrap().total;
-    let rent = gas::rent(0, units, None, Some(u64::MAX), 3, cap)
+    let units = gas::storage_units(&cells(&p, &entity).unwrap())
         .unwrap()
-        .gas;
-    assert!(permanent_gas > gas::TX_INTRINSIC_GAS + rent);
-    assert_eq!(
-        rent,
-        gas::rent(0, units, None, Some(3 + cap), 3, cap)
-            .unwrap()
-            .gas
-    );
+        .total;
+    let year = U256::from(units) * U256::from(7_300_000_000_000u64);
+    assert_eq!(permanent_tx.rent_wei, year);
+    // The sender paid gas at 1 gwei plus the rent; both were burned.
+    let paid = accounts::fee(permanent_tx.spent + at_cap_tx.spent)
+        + permanent_tx.rent_wei
+        + at_cap_tx.rent_wei;
+    assert_eq!(balance(&p, actor), balance0 - paid);
+    assert_eq!(burnt(&p), burnt0 + paid);
+    for height in 2..=3 {
+        f.import(p.block(height).unwrap()).unwrap();
+    }
+    assert_eq!(f.head, p.head);
     // Many blocks later it is still there and was never due.
     for _ in 0..20 {
         p.produce().unwrap();
     }
     assert!(cells(&p, &entity).is_some());
-    let next_nonce = 4;
     let missing = ArkivOperation::Delete {
         key: RecordKey::new(&[0; 32]).unwrap(),
     };
-    p.submit(tx(
-        &p,
-        next_nonce,
-        1_000_000,
-        vec![create(2, 1024, 17280), missing],
-    ))
-    .unwrap();
+    let before = (balance(&p, actor), burnt(&p));
+    p.submit(tx(&p, 3, 1_000_000, vec![permanent(2, 1024), missing]))
+        .unwrap();
     p.produce().unwrap();
     let b = p.block(p.head.height).unwrap();
     assert!(matches!(
         b.outcomes.txs[0].ops[0],
         OpOutcome::RolledBack { .. }
     ));
+    // The rollback undid the rent debit; only the gas remains charged.
+    assert_eq!(b.outcomes.txs[0].rent_wei, U256::ZERO);
+    let gas_fee = accounts::fee(b.outcomes.txs[0].spent);
+    assert_eq!(balance(&p, actor), before.0 - gas_fee);
+    assert_eq!(burnt(&p), before.1 + gas_fee);
     assert!(b.outcomes.spent > 50_000);
     assert!(cells(&p, &key(2, 2)).is_none());
-    assert_eq!(p.committed_nonce(signer().address()).unwrap(), 5);
+    assert_eq!(p.committed_nonce(actor).unwrap(), 4);
+}
+#[test]
+fn a_128_kib_permanent_entity_fits_one_transaction() {
+    let mut p = host(true);
+    p.produce().unwrap();
+    let actor = signer().address();
+    let before = balance(&p, actor);
+    let op = permanent(1, arkiv::MAX_ENTITY_BYTES);
+    p.submit(tx(&p, 1, 2_000_000, vec![op])).unwrap();
+    p.produce().unwrap();
+    let outcome = p.block(2).unwrap().outcomes.txs[0].clone();
+    assert_eq!(outcome.status, TxStatus::Committed);
+    // Under a million gas of execution, far inside the 90M user budget ...
+    assert!(outcome.spent < 1_000_000, "{}", outcome.spent);
+    // ... and about one GLM of rent for the year the cap charges.
+    let units = gas::storage_units(&cells(&p, &key(0, 1)).unwrap())
+        .unwrap()
+        .total;
+    assert!(units > 131_072);
+    assert_eq!(
+        outcome.rent_wei,
+        U256::from(units) * U256::from(7_300_000_000_000u64)
+    );
+    let glm = U256::from(10u64).pow(U256::from(18u64));
+    assert!(outcome.rent_wei > glm * U256::from(9u64) / U256::from(10u64));
+    assert!(outcome.rent_wei < glm);
+    assert_eq!(
+        balance(&p, actor),
+        before - accounts::fee(outcome.spent) - outcome.rent_wei
+    );
+}
+/// A chain funding the proposer and `tight` with exactly `balance`.
+fn tight_host(tight: &Signer, funds: U256) -> Host {
+    let base = genesis();
+    let g = SignedGenesis::new(
+        base.genesis.clone(),
+        base.run_id,
+        base.proposer,
+        base.block_period_ms,
+        AccountConfig::new(vec![
+            (signer().address(), signed_support::balance()),
+            (tight.address(), funds),
+        ])
+        .unwrap(),
+    )
+    .unwrap();
+    let mut h = host_of(g, true);
+    h.produce().unwrap();
+    h
+}
+/// The rent and gas of `txs` when `by` runs them in block 2 of a rich chain:
+/// execution is deterministic, so a tight chain charges the same.
+fn dry_run(by: &Signer, txs: &[(u64, Vec<ArkivOperation>)]) -> Vec<(U256, u64)> {
+    let mut h = tight_host(by, signed_support::balance());
+    for (budget, ops) in txs {
+        let nonce = h.committed_nonce(by.address()).unwrap() + h.pool.len() as u64;
+        h.submit(tx_by(&h, by, nonce, *budget, ops.clone()))
+            .unwrap();
+    }
+    h.produce().unwrap();
+    h.block(2)
+        .unwrap()
+        .outcomes
+        .txs
+        .iter()
+        .map(|t| {
+            assert_eq!(t.status, TxStatus::Committed);
+            (t.rent_wei, t.spent)
+        })
+        .collect()
+}
+#[test]
+fn admission_refuses_a_sender_who_cannot_pay_gas_and_rent() {
+    let tight = signed_support::signer(7);
+    let op = permanent(1, 4096);
+    let (rent, _) = dry_run(&tight, &[(1_000_000, vec![op.clone()])])[0];
+    assert!(rent > U256::ZERO);
+    let need = accounts::fee(1_000_000) + rent;
+    // One wei short of gas plus rent: refused at admission, nothing queued.
+    let mut h = tight_host(&tight, need - U256::from(1u64));
+    assert_eq!(
+        h.submit(tx_by(&h, &tight, 0, 1_000_000, vec![op.clone()]))
+            .unwrap_err()
+            .0,
+        "InsufficientBalance"
+    );
+    assert!(h.pool.is_empty());
+    // Enough for the gas reservation alone is not enough either.
+    assert!(accounts::fee(1_000_000) < need - U256::from(1u64));
+    // Exactly gas plus rent: admitted, committed, and the unused gas refunded.
+    let mut h = tight_host(&tight, need);
+    h.submit(tx_by(&h, &tight, 0, 1_000_000, vec![op])).unwrap();
+    // The pool reserves the quoted rent beside the fee, so a second
+    // transaction from the same sender needs funds of its own.
+    assert_eq!(h.pool.reserved(tight.address()).unwrap(), need);
+    assert_eq!(
+        h.submit(tx_by(&h, &tight, 1, 21_000, vec![permanent(2, 0)]))
+            .unwrap_err()
+            .0,
+        "InsufficientBalance"
+    );
+    h.produce().unwrap();
+    let outcome = &h.block(2).unwrap().outcomes.txs[0];
+    assert_eq!(outcome.status, TxStatus::Committed);
+    assert_eq!(outcome.rent_wei, rent);
+    assert_eq!(
+        balance(&h, tight.address()),
+        accounts::fee(1_000_000 - outcome.spent)
+    );
+}
+#[test]
+fn rent_the_sender_cannot_pay_at_execution_fails_its_transaction_atomically() {
+    let tight = signed_support::signer(7);
+    let entity = key_of(&tight, 0, 1);
+    let dry = dry_run(
+        &tight,
+        &[
+            (1_000_000, vec![permanent(1, 1024)]),
+            (1_000_000, vec![grow(&entity, 4096)]),
+        ],
+    );
+    let rents = [dry[0].0, dry[1].0];
+    // The patch builds on the pending create, so its admission simulation
+    // fails and quotes no rent: execution must check it. The sender holds
+    // the create's gas and rent and the patch's gas reservation, and one wei
+    // less than the patch's rent.
+    let funds =
+        accounts::fee(dry[0].1) + rents[0] + accounts::fee(1_000_000) + rents[1] - U256::from(1u64);
+    let mut h = tight_host(&tight, funds);
+    let mut f = host_of(h.genesis.clone(), false);
+    f.import(h.block(1).unwrap()).unwrap();
+    h.submit(tx_by(&h, &tight, 0, 1_000_000, vec![permanent(1, 1024)]))
+        .unwrap();
+    h.submit(tx_by(&h, &tight, 1, 1_000_000, vec![grow(&entity, 4096)]))
+        .unwrap();
+    h.produce().unwrap();
+    let b = h.block(2).unwrap();
+    assert_eq!(b.outcomes.txs.len(), 2);
+    assert_eq!(b.outcomes.txs[0].status, TxStatus::Committed);
+    let refused = &b.outcomes.txs[1];
+    assert_eq!(refused.status, TxStatus::Failed { op_index: 0 });
+    assert_eq!(
+        refused.ops[0],
+        OpOutcome::HostRejected {
+            fault: HostFault::Arkiv(ArkivFault::InsufficientRentBalance)
+        }
+    );
+    assert_eq!(refused.rent_wei, U256::ZERO);
+    // Gas is charged as for any failed transaction; the entity kept its size.
+    assert!(refused.spent >= gas::TX_INTRINSIC_GAS);
+    let row = cells(&h, &entity).unwrap();
+    assert!(row.iter().all(|(name, _)| name.as_str() != "more"));
+    assert_eq!(
+        balance(&h, tight.address()),
+        funds - accounts::fee(b.outcomes.txs[0].spent + refused.spent) - rents[0]
+    );
+    assert_eq!(h.committed_nonce(tight.address()).unwrap(), 2);
+    // A follower replays the failure exactly.
+    f.import(b).unwrap();
+    assert_eq!(f.head, h.head);
+}
+#[test]
+fn the_producer_drops_a_transaction_whose_reservation_rent_consumed() {
+    let tight = signed_support::signer(7);
+    let entity = key_of(&tight, 0, 1);
+    let dry = dry_run(
+        &tight,
+        &[
+            (1_000_000, vec![permanent(1, 1024)]),
+            (1_000_000, vec![grow(&entity, 4096)]),
+        ],
+    );
+    let rents = [dry[0].0, dry[1].0];
+    // Enough for both rents and two reservations, so the unquoted growth
+    // pays; a third transaction's 3M-gas reservation then no longer fits.
+    let funds = accounts::fee(2_000_000) + rents[0] + rents[1];
+    let mut h = tight_host(&tight, funds);
+    let mut f = host_of(h.genesis.clone(), false);
+    f.import(h.block(1).unwrap()).unwrap();
+    h.submit(tx_by(&h, &tight, 0, 1_000_000, vec![permanent(1, 1024)]))
+        .unwrap();
+    h.submit(tx_by(&h, &tight, 1, 1_000_000, vec![grow(&entity, 4096)]))
+        .unwrap();
+    let third = tx_by(
+        &h,
+        &tight,
+        2,
+        3_000_000,
+        vec![ArkivOperation::ExtendExpiry {
+            key: entity.clone(),
+            expiry: Expiry::PERMANENT,
+        }],
+    );
+    let third_hash = third.hash();
+    h.submit(third).unwrap();
+    assert_eq!(h.pool.len(), 3);
+    // Including it would invalidate the block: the producer evicts it and
+    // builds the block without it.
+    h.produce().unwrap();
+    let b = h.block(2).unwrap();
+    assert_eq!(b.inputs.txs.len(), 2);
+    assert!(b.inputs.txs.iter().all(|t| t.hash() != third_hash));
+    assert!(
+        b.outcomes
+            .txs
+            .iter()
+            .all(|t| t.status == TxStatus::Committed)
+    );
+    assert_eq!(b.outcomes.txs[1].rent_wei, rents[1]);
+    assert!(h.pool.is_empty());
+    assert_eq!(h.committed_nonce(tight.address()).unwrap(), 2);
+    f.import(b).unwrap();
+    assert_eq!(f.head, h.head);
+    // The chain goes on.
+    h.produce().unwrap();
+    assert_eq!(h.head.height, 3);
 }
 #[test]
 fn forged_schedule_and_low_intrinsic_are_rejected() {
@@ -276,11 +551,14 @@ fn lifecycle_growth_extension_shrink_and_delete() {
         .total;
     assert_eq!(grown - initial_units, 1024);
     let grow_gas = p.block(3).unwrap().outcomes.txs[0].spent;
-    let cap = p.genesis.genesis.params.max_rent_lifetime;
-    let grow_rent = gas::rent(initial_units, grown, Some(17282), Some(17282), 3, cap)
+    let grow_rent = gas::rent(initial_units, grown, Some(17282), Some(17282), 3, clock(&p))
         .unwrap()
-        .gas;
-    assert!(grow_gas > 21000 + grow_rent);
+        .wei;
+    assert!(grow_gas > 21000);
+    assert_eq!(
+        p.block(3).unwrap().outcomes.txs[0].rent_wei,
+        U256::from(grow_rent)
+    );
     p.submit(tx(
         &p,
         3,
@@ -296,10 +574,14 @@ fn lifecycle_growth_extension_shrink_and_delete() {
     .unwrap();
     p.produce().unwrap();
     let extend_gas = p.block(4).unwrap().outcomes.txs[0].spent;
-    let extension_rent = gas::rent(grown, grown, Some(17282), Some(34562), 4, cap)
+    let extension_rent = gas::rent(grown, grown, Some(17282), Some(34562), 4, clock(&p))
         .unwrap()
-        .gas;
-    assert!(extend_gas > 21000 + extension_rent);
+        .wei;
+    assert!(extend_gas > 21000);
+    assert_eq!(
+        p.block(4).unwrap().outcomes.txs[0].rent_wei,
+        U256::from(extension_rent)
+    );
     p.submit(tx(
         &p,
         4,
@@ -317,7 +599,8 @@ fn lifecycle_growth_extension_shrink_and_delete() {
     p.produce().unwrap();
     let shrink_gas = p.block(5).unwrap().outcomes.txs[0].spent;
     assert!(shrink_gas >= 21000);
-    assert!(shrink_gas < grow_gas);
+    // No refunds: a shrink pays no rent and gets none back.
+    assert_eq!(p.block(5).unwrap().outcomes.txs[0].rent_wei, U256::ZERO);
     p.submit(tx(
         &p,
         5,
@@ -499,11 +782,15 @@ fn named_namespace_entities_preserve_rent_authority_proofs_and_expiry() {
         None,
         Some(11),
         3,
-        p.genesis.genesis.params.max_rent_lifetime,
+        clock(&p),
     )
     .unwrap()
-    .gas;
-    assert!(p.block(3).unwrap().outcomes.txs[0].spent > gas::TX_INTRINSIC_GAS + rent);
+    .wei;
+    assert!(p.block(3).unwrap().outcomes.txs[0].spent > gas::TX_INTRINSIC_GAS);
+    assert_eq!(
+        p.block(3).unwrap().outcomes.txs[0].rent_wei,
+        U256::from(rent)
+    );
     let request = EqRequest {
         snapshot: SnapshotRef {
             genesis_hash: p.genesis.hash(),

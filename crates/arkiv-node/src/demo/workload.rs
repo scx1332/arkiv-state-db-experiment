@@ -38,8 +38,10 @@ pub fn genesis(chain_id: u64, timestamp_ms: u64) -> Genesis {
             max_tx_bytes: 1024 * 1024,
             max_block_input_bytes: 2 * 1024 * 1024,
             max_lifetime: 1000,
-            // A year at the SDK's nominal 2-second blocks; only GLM chains charge rent.
-            max_rent_lifetime: crate::gas::DEFAULT_RENT_CAP_BLOCKS,
+            // The simulator's one-second blocks and a one-year rent cap; only
+            // GLM chains charge rent.
+            block_period_ms: 1_000,
+            max_rent_lifetime_seconds: crate::gas::DEFAULT_RENT_CAP_SECONDS,
         },
         admins: vec![ALICE],
     }

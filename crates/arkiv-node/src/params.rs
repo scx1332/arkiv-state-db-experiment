@@ -74,7 +74,10 @@ pub enum GenesisError {
     ExpiryPerBlock,
     /// `user_budget` is zero.
     UserBudget,
-    /// `max_rent_lifetime` is zero: no lifetime could be charged.
+    /// `block_period_ms` is outside 1 to [`crate::gas::MAX_BLOCK_PERIOD_MS`].
+    BlockPeriod,
+    /// `max_rent_lifetime_seconds` is outside 1 to
+    /// [`crate::gas::MAX_RENT_CAP_SECONDS`] (100 years).
     RentLifetime,
     /// `8 + max_admin_per_block × MAX_ADMIN_BYTES + max_tx_bytes ≤
     /// max_block_input_bytes` does not hold (or overflows).
@@ -114,7 +117,16 @@ impl fmt::Display for GenesisError {
             Self::TxsPerBlock => write!(formatter, "transactions per block must be at least 1"),
             Self::ExpiryPerBlock => write!(formatter, "expiry capacity must be at least 1"),
             Self::UserBudget => write!(formatter, "user budget must be at least 1"),
-            Self::RentLifetime => write!(formatter, "the rent lifetime cap must be at least 1"),
+            Self::BlockPeriod => write!(
+                formatter,
+                "the block period must be 1 ms to {} ms",
+                crate::gas::MAX_BLOCK_PERIOD_MS
+            ),
+            Self::RentLifetime => write!(
+                formatter,
+                "the rent lifetime cap must be 1 s to {} s",
+                crate::gas::MAX_RENT_CAP_SECONDS
+            ),
             Self::InputBytes => write!(
                 formatter,
                 "block input bytes cannot hold a full admin section and a largest transaction"
@@ -244,9 +256,15 @@ pub fn check_params(
     if params.user_budget == 0 {
         return Err(GenesisError::UserBudget);
     }
-    if params.max_rent_lifetime == 0 {
+    if params.block_period_ms == 0 || params.block_period_ms > crate::gas::MAX_BLOCK_PERIOD_MS {
+        return Err(GenesisError::BlockPeriod);
+    }
+    if params.max_rent_lifetime_seconds == 0
+        || params.max_rent_lifetime_seconds > crate::gas::MAX_RENT_CAP_SECONDS
+    {
         return Err(GenesisError::RentLifetime);
     }
+    debug_assert!(crate::gas::RentClock::of(params).is_some());
     let inputs = u64::from(params.max_admin_per_block)
         .checked_mul(MAX_ADMIN_BYTES)
         .and_then(|admin| admin.checked_add(EMPTY_INPUTS_BYTES))

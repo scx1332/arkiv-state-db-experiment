@@ -23,7 +23,7 @@ fn glm() -> U256 {
 }
 fn genesis() -> SignedGenesis {
     SignedGenesis::new(
-        default_native_genesis(7, 1_000),
+        default_native_genesis(7, 1_000, 250),
         [0x42; 16],
         *signer(1).address().as_bytes(),
         250,
@@ -79,7 +79,7 @@ fn signed_genesis_bounds_native_state_and_reserves_complete_outcomes() {
         arkiv_node::arkiv::SYSTEM_CELLS + arkiv_node::arkiv::MAX_ATTRIBUTES
     );
     assert_eq!(
-        arkiv_node::signed::protocol::default_native_genesis(7, 0)
+        arkiv_node::signed::protocol::default_native_genesis(7, 0, 250)
             .limits
             .max_cells,
         arkiv_node::arkiv::MIN_ENTITY_CELLS
@@ -186,31 +186,31 @@ fn preimages_are_explicit_and_golden() {
     // Explicit byte-layout vectors pinned across dependency changes.
     assert_eq!(
         hex(g.hash().as_slice()),
-        "1019a402ba5c37c84628df9083fece6c19d6682c0fd51f6c2ba3e4209fc74a20"
+        "0ab95aaae316933ab5ee4205d16f59e8c9203dd1621961ac561cb838b4aa96ba"
     );
     assert_eq!(
         hex(tx.intent_digest().as_slice()),
-        "537893ec0f2e495d2205e9c1764cb0cb47e15c84fbc50cf72e75fcd5b54805ee"
+        "2ca8780041f75c9d3c16754731d14501e6cd318f120181fcb3f5cb50315138cd"
     );
     assert_eq!(
         hex(tx.hash().as_slice()),
-        "5f0c14871f2e2660d300c31b31b50d071a5b1b77b77b092b8c8538a29151715c"
+        "802766df3cbf8847b10f8042172cb780a0c491a80e6d45b756486f63166f970f"
     );
     assert_eq!(
         hex(inputs.digest().as_slice()),
-        "81d349f2b1f452b9d34800c2b75553a36074924cc4b68169560035266b2fb10b"
+        "c54c5e63cae405cbd5d079d5e3672b404e9c9e5fd0cc954f997bd2f0422c1295"
     );
     assert_eq!(
         hex(header.intent_digest().as_slice()),
-        "ec7a44c3914f415b7a4264d25395eb181b2be6bd5ab201da774fbe93745cb22e"
+        "fd0ecccfa60dfc13734386725d7f5ec269a23661e7b4a0f68b98ec55d540ba49"
     );
     assert_eq!(
         hex(&tx.signature),
-        "f1814a002038d232faa3d9a64d35ecb69a6cf4423ea598e3df4d741413a8051f0fb6935cb0b2d5335d65a24c7843c425e657b0324ea8b18100189f6c1c70f65400"
+        "b6626f51a2eae1c0116beafeb8a2d53cf52caf0f7ece8671cb49595c4ccd3f4174502d22fe279e40f00e816cf00ce59c9369c9196de350b17263ecd98dec050000"
     );
     assert_eq!(
         hex(&header.signature),
-        "6a89df718943e93d6fc2ad4d54d918f23d91eb864cce5d6ae7dedef52c64079f1eea0a327e99bb79e1aafea9d4962e824162c62be5f8751125de59b0dc95959400"
+        "fccafc617fd68aae65308cb58efa41e5439e60e6e04a17fc40a0e27c303268e02b11a63389075b9e602e51597481c9c2349570bf8511c4eb6b8afcf081f16c2b01"
     );
 }
 

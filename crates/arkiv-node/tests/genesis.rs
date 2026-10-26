@@ -177,9 +177,60 @@ fn every_invariant_is_checked() {
             },
             GenesisError::InputBytes,
         ),
+        // The rent clock: a block period of 1 ms to a day, a rent cap of
+        // 1 s to 100 years.
+        (
+            ChainParams {
+                block_period_ms: 0,
+                ..PARAMS
+            },
+            GenesisError::BlockPeriod,
+        ),
+        (
+            ChainParams {
+                block_period_ms: arkiv_node::gas::MAX_BLOCK_PERIOD_MS + 1,
+                ..PARAMS
+            },
+            GenesisError::BlockPeriod,
+        ),
+        (
+            ChainParams {
+                max_rent_lifetime_seconds: 0,
+                ..PARAMS
+            },
+            GenesisError::RentLifetime,
+        ),
+        (
+            ChainParams {
+                max_rent_lifetime_seconds: arkiv_node::gas::MAX_RENT_CAP_SECONDS + 1,
+                ..PARAMS
+            },
+            GenesisError::RentLifetime,
+        ),
+        (
+            ChainParams {
+                max_rent_lifetime_seconds: u64::MAX,
+                ..PARAMS
+            },
+            GenesisError::RentLifetime,
+        ),
     ];
     for (params, error) in cases {
         assert_eq!(spec(params, LIMITS).err(), Some(error), "{params:?}");
+    }
+    for params in [
+        ChainParams {
+            block_period_ms: 1,
+            max_rent_lifetime_seconds: arkiv_node::gas::MAX_RENT_CAP_SECONDS,
+            ..PARAMS
+        },
+        ChainParams {
+            block_period_ms: arkiv_node::gas::MAX_BLOCK_PERIOD_MS,
+            max_rent_lifetime_seconds: 1,
+            ..PARAMS
+        },
+    ] {
+        assert!(spec(params, LIMITS).is_ok(), "{params:?}");
     }
     assert!(
         spec(
@@ -244,8 +295,9 @@ fn versions_are_checked() {
         ChainSpec::new(bad).err(),
         Some(GenesisError::UnsupportedFormat(2))
     );
-    // Protocols 1 (payload entities) and 2 (uncapped rent) are retired.
-    for protocol in [0, 1, 2, 4] {
+    // Protocols 1 (payload entities) and 2 (uncapped rent) are retired; 3
+    // (rent charged as gas) was never released.
+    for protocol in [0, 1, 2, 3, 5] {
         let mut bad = genesis();
         bad.protocol_version = protocol;
         assert_eq!(
@@ -259,7 +311,7 @@ fn versions_are_checked() {
 fn the_spec_exposes_the_genesis() {
     let spec = spec(PARAMS, LIMITS).expect("valid");
     assert_eq!(spec.chain_id(), CHAIN);
-    assert_eq!(spec.protocol_version(), 3);
+    assert_eq!(spec.protocol_version(), 4);
     assert!(spec.is_admin(&ADMIN));
     assert!(!spec.is_admin(&ALICE));
     assert_eq!(spec.genesis_header(), &genesis().header());

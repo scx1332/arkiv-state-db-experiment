@@ -144,18 +144,19 @@ fn params_bytes() -> Vec<u8> {
         &be32(4096),
         &be32(8 + 2 * 309 + 4096),
         &be64(100),
-        // The rent cap: a year at 2-second blocks.
-        &be64(15_768_000),
+        // The rent clock: 2-second blocks and a one-year cap in seconds.
+        &be64(2_000),
+        &be64(31_536_000),
     ])
 }
 
 fn genesis_bytes() -> Vec<u8> {
     cat(&[
-        // Format 3: chain parameters carry the rent cap.
-        &be32(3),
-        // Protocol 3: user-defined columns with capped rent and live
-        // permanent entities.
-        &be32(3),
+        // Format 4: chain parameters carry the rent clock, outcomes the rent.
+        &be32(4),
+        // Protocol 4: user-defined columns, live permanent entities and capped
+        // rent per second outside gas.
+        &be32(4),
         &be64(CHAIN),
         &be64(1_000),
         &limits_bytes(),
@@ -190,20 +191,20 @@ fn hash(byte: u8) -> B256 {
 #[test]
 fn chain_params_and_genesis() {
     golden(&PARAMS, &params_bytes());
-    assert_eq!(params_bytes().len(), 60);
+    assert_eq!(params_bytes().len(), 68);
     let genesis = genesis();
     let bytes = genesis_bytes();
-    // 4 + 4 + 8 + 8 + 72 + 256 + 60 + 4 + 20.
-    assert_eq!(bytes.len(), 436);
+    // 4 + 4 + 8 + 8 + 72 + 256 + 68 + 4 + 20.
+    assert_eq!(bytes.len(), 444);
     golden(&genesis, &bytes);
-    assert_eq!(genesis.digest(), digest_of("arkiv/genesis/v2", &bytes));
+    assert_eq!(genesis.digest(), digest_of("arkiv/genesis/v3", &bytes));
 }
 
 #[test]
 fn genesis_versions_are_checked() {
     let mut bytes = genesis_bytes();
     // Format 1 is the retired bare-value entity operation layout.
-    for version in [0u32, 1, 2, 4, u32::MAX] {
+    for version in [0u32, 1, 2, 3, 5, u32::MAX] {
         bytes[..4].copy_from_slice(&version.to_be_bytes());
         rejects::<Genesis>(
             &bytes,
@@ -215,7 +216,7 @@ fn genesis_versions_are_checked() {
     }
     let mut bytes = genesis_bytes();
     // Protocol 1 is the retired payload entity model.
-    for version in [0u32, 1, 2, 4, u32::MAX] {
+    for version in [0u32, 1, 2, 3, 5, u32::MAX] {
         bytes[4..8].copy_from_slice(&version.to_be_bytes());
         rejects::<Genesis>(
             &bytes,
@@ -250,7 +251,7 @@ fn headers_and_block_hashes() {
         state_root: hash(0x44),
     };
     let bytes = cat(&[
-        &be32(3),
+        &be32(4),
         &be64(CHAIN),
         &be64(5),
         &[0x11; 32],
@@ -262,7 +263,7 @@ fn headers_and_block_hashes() {
     assert_eq!(bytes.len(), 156);
     golden(&header, &bytes);
     assert_eq!(header.hash(), digest_of("arkiv/header/v1", &bytes));
-    for version in [0u32, 1, 2, 4, u32::MAX] {
+    for version in [0u32, 1, 2, 3, 5, u32::MAX] {
         let mut other = bytes.clone();
         other[..4].copy_from_slice(&version.to_be_bytes());
         rejects::<Header>(
@@ -291,13 +292,13 @@ fn genesis_block_header() {
         height: 0,
         parent_hash: B256::ZERO,
         timestamp_ms: 1_000,
-        inputs_digest: digest_of("arkiv/genesis/v2", &genesis_bytes()),
-        outcomes_digest: digest_of("arkiv/outcomes/v1", &empty_outcomes),
+        inputs_digest: digest_of("arkiv/genesis/v3", &genesis_bytes()),
+        outcomes_digest: digest_of("arkiv/outcomes/v2", &empty_outcomes),
         state_root: empty_root,
     };
     assert_eq!(header, expected);
     let header_bytes = cat(&[
-        &be32(3),
+        &be32(4),
         &be64(CHAIN),
         &be64(0),
         &[0; 32],
@@ -316,7 +317,7 @@ fn genesis_block_header() {
 
 /// The hash of `support::genesis()`, pinned so a change to any genesis or
 /// header byte is deliberate.
-const GENESIS_HASH: &str = "8d8486fb98776de117146a9968fa35157646ca153d4442509720632971e7686a";
+const GENESIS_HASH: &str = "3c5fbad1245a3b88c4979eaf85f70e311b007723596303dea6ac5c04d8dbbcd3";
 
 #[test]
 fn admin_inputs() {
@@ -630,9 +631,21 @@ fn transaction_outcomes() {
         status: TxStatus::Failed { op_index: 1 },
         ops,
         spent: 136,
+        // A failed transaction's rollback undid every rent debit.
+        rent_wei: alloy_primitives::U256::ZERO,
     };
-    let failed_bytes = cat(&[&[2], &be32(1), &seq(&op_bytes), &be64(136)]);
+    let failed_bytes = cat(&[&[2], &be32(1), &seq(&op_bytes), &be64(136), &[0; 32]]);
     golden(&failed, &failed_bytes);
+    // A committed transaction's burned rent: 32 bytes, big-endian, after spent.
+    let paid = TxOutcome {
+        status: TxStatus::Committed,
+        ops: vec![],
+        spent: 21_000,
+        rent_wei: alloy_primitives::U256::from(0x0102u64),
+    };
+    let mut rent = [0u8; 32];
+    rent[30..].copy_from_slice(&[1, 2]);
+    golden(&paid, &cat(&[&[1], &be32(0), &be64(21_000), &rent]));
 
     let deletion = ExpiryDeletion {
         namespace: ns(2),
@@ -645,7 +658,7 @@ fn transaction_outcomes() {
     let empty = BlockOutcomes::default();
     let empty_bytes = cat(&[&be32(0), &be32(0), &be32(0), &be64(0)]);
     golden(&empty, &empty_bytes);
-    assert_eq!(empty.digest(), digest_of("arkiv/outcomes/v1", &empty_bytes));
+    assert_eq!(empty.digest(), digest_of("arkiv/outcomes/v2", &empty_bytes));
     let outcomes = BlockOutcomes {
         admin: vec![AdminOutcome::Applied],
         expiry: vec![deletion],
@@ -661,7 +674,7 @@ fn transaction_outcomes() {
     golden(&outcomes, &outcomes_bytes);
     assert_eq!(
         outcomes.digest(),
-        digest_of("arkiv/outcomes/v1", &outcomes_bytes)
+        digest_of("arkiv/outcomes/v2", &outcomes_bytes)
     );
 }
 
@@ -673,11 +686,11 @@ fn blocks() {
         parent_hash: hash(0x11),
         timestamp_ms: 2_000,
         inputs_digest: digest_of("arkiv/inputs/v2", &[0; 8]),
-        outcomes_digest: digest_of("arkiv/outcomes/v1", &[0; 20]),
+        outcomes_digest: digest_of("arkiv/outcomes/v2", &[0; 20]),
         state_root: hash(0x44),
     };
     let header_bytes = cat(&[
-        &be32(3),
+        &be32(4),
         &be64(CHAIN),
         &be64(1),
         &[0x11; 32],

@@ -19,7 +19,16 @@ pub const VERSION: u32 = 1;
 /// transaction.
 pub const ETHEREUM_TX_VERSION: u32 = 2;
 pub const SIGNED_TX_OVERHEAD: u32 = 4 + 32 + 8 + 65;
-pub const TX_CAP: u32 = 256 * 1024;
+/// The most bytes of one signed transaction. A transaction submitted through
+/// Ethereum JSON-RPC carries its original bytes beside the decoded envelope,
+/// so its payload counts twice: 384 KiB fits an Ethereum create of a full
+/// 128 KiB entity (about 264 KB signed) next to the [`NATIVE_TX_CAP`]
+/// envelope cap.
+pub const TX_CAP: u32 = 384 * 1024;
+/// The most bytes of the native envelope of a signed transaction, its
+/// overhead included: the default `ChainParams::max_tx_bytes` is this less
+/// [`SIGNED_TX_OVERHEAD`].
+pub const NATIVE_TX_CAP: u32 = 256 * 1024;
 pub const INPUT_CAP: u32 = 768 * 1024;
 pub const BODY_CAP: u32 = 1024 * 1024;
 /// Native outcomes contain only bounded scalar effects/rejections/receipts.
@@ -108,16 +117,17 @@ pub const MAX_CELLS: usize = 64;
 /// The native genesis of a signed chain created without a genesis bundle:
 /// the development workload limits under GLM pricing, without admins, with
 /// the signed wire caps. Its [`MIN_CELLS`] cells per record fit a full entity.
-/// Its rent cap is a year at 2-second blocks
-/// ([`crate::gas::DEFAULT_RENT_CAP_BLOCKS`]); a chain with another block period
-/// sets `params.max_rent_lifetime` from [`crate::gas::rent_cap_blocks`], as the
-/// producer does.
-pub fn default_native_genesis(chain_id: u64, timestamp_ms: u64) -> Genesis {
+/// Its block period is `block_period_ms`, which the [`SignedGenesis`] must
+/// repeat, and its rent cap a year at any period
+/// ([`crate::gas::DEFAULT_RENT_CAP_SECONDS`]).
+pub fn default_native_genesis(chain_id: u64, timestamp_ms: u64, block_period_ms: u64) -> Genesis {
     let mut native = crate::demo::workload::genesis(chain_id, timestamp_ms);
+    native.params.block_period_ms = block_period_ms;
+    native.params.max_rent_lifetime_seconds = crate::gas::DEFAULT_RENT_CAP_SECONDS;
     native.admins.clear();
     native.pricing = crate::gas::schedule();
     native.params.max_admin_per_block = 0;
-    native.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;
+    native.params.max_tx_bytes = NATIVE_TX_CAP - SIGNED_TX_OVERHEAD;
     native.params.max_block_input_bytes = INPUT_CAP;
     native.params.block_budget = crate::gas::DEFAULT_BLOCK_GAS_LIMIT;
     native.params.user_budget = 90_000_000;
@@ -164,6 +174,8 @@ impl SignedGenesis {
         if !self.genesis.admins.is_empty()
             || p.max_admin_per_block != 0
             || self.block_period_ms == 0
+            // Rent is priced at the period the chain's timestamps advance by.
+            || p.block_period_ms != self.block_period_ms
             || p.max_txs_per_block > MAX_TXS
             || p.max_ops_per_tx > 16
             || p.max_ops_per_block > 128

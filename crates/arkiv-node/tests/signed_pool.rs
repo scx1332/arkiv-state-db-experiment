@@ -15,7 +15,7 @@ fn signer(n: u16) -> Signer {
 }
 fn genesis() -> SignedGenesis {
     SignedGenesis::new(
-        default_native_genesis(7, 1_000),
+        default_native_genesis(7, 1_000, 250),
         [0x42; 16],
         *signer(1).address().as_bytes(),
         250,
@@ -34,7 +34,12 @@ trait Admit {
 }
 impl Admit for Pool {
     fn admit(&mut self, tx: SignedTx, next: u64) -> Result<Admission, Error> {
-        self.insert_funded(tx, next, U256::from(10u64).pow(U256::from(30u64)))
+        self.insert_funded(
+            tx,
+            next,
+            U256::from(10u64).pow(U256::from(30u64)),
+            U256::ZERO,
+        )
     }
 }
 /// A namespace creation with a budget of `budget` intrinsic-gas units.

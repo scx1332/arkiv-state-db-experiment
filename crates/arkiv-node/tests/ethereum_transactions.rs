@@ -292,8 +292,9 @@ fn hostile_dynamic_array_counts_and_aliases_fail_before_expansion() {
 
 /// The SDK's `ExpirationTime.permanent()` create (v0.9.0-next.1
 /// network-health test): `expiresAt` = 2^64 − 1 reaches the receipt's
-/// `EntityCreated` log and `getEntity` exactly, pays the capped rent, and the
-/// entity outlives many blocks without ever being due.
+/// `EntityCreated` log and `getEntity` exactly, pays the capped rent outside
+/// its gas (the receipt's `rentFee`), and the entity outlives many blocks
+/// without ever being due.
 #[tokio::test]
 async fn sdk_permanent_create_is_stored_at_the_sentinel() {
     use arkiv_db::durable::Options;
@@ -347,6 +348,8 @@ async fn sdk_permanent_create_is_stored_at_the_sentinel() {
         "{:?}",
         block.outcomes.txs
     );
+    let rent = u128::try_from(block.outcomes.txs[1].rent_wei).unwrap();
+    assert!(rent > 0);
     follower.import(block).unwrap();
     // Only the finite create of the same block (20 blocks) is ever swept.
     let mut swept = 0;
@@ -384,12 +387,23 @@ async fn sdk_permanent_create_is_stored_at_the_sentinel() {
     let receipt = call("eth_getTransactionReceipt", json!([tx_hash])).await;
     let logs = receipt["result"]["logs"].as_array().unwrap();
     assert_eq!(logs.len(), 1, "{receipt}");
+    // Gas is execution only; the year of rent is the receipt's rentFee, a
+    // year of the entity's storage units at 20 gwei a day.
+    let quantity =
+        |v: &Json| u128::from_str_radix(v.as_str().unwrap().trim_start_matches("0x"), 16).unwrap();
+    assert!(
+        quantity(&receipt["result"]["gasUsed"]) < 1_000_000,
+        "{receipt}"
+    );
+    assert_eq!(quantity(&receipt["result"]["rentFee"]), rent);
+    assert_eq!(rent % 7_300_000_000_000, 0);
     assert_eq!(logs[0]["topics"][1], key_hex);
     assert_eq!(
         &logs[0]["data"].as_str().unwrap()[2..66],
         format!("{:064x}", u64::MAX)
     );
-    // Estimation of the same call succeeds with a finite, capped cost.
+    // Estimation of the same call returns execution gas only, far below the
+    // budget: the rent is not gas.
     let vectors: Json =
         serde_json::from_str(include_str!("fixtures/ethereum-sdk-vectors.json")).unwrap();
     let estimate = call(
@@ -405,16 +419,20 @@ async fn sdk_permanent_create_is_stored_at_the_sentinel() {
         16,
     )
     .unwrap();
-    assert!((1_000_000..=20_000_000).contains(&gas), "{estimate}");
+    assert!((21_000..1_000_000).contains(&gas), "{estimate}");
     let status = arkiv_node::signed::runtime::status(&rt.node.lock().unwrap());
     let gas = &status["capabilities"]["gas"];
     assert_eq!(gas["permanentEntitiesSupported"], true);
     assert_eq!(gas["permanentEntities"]["liveCreate"], true);
     assert_eq!(gas["permanentEntities"]["expirySweep"], false);
-    assert_eq!(gas["maxRentLifetimeBlocks"], "15768000");
-    assert_eq!(gas["rentRule"], "glm-rent-v2");
-    // 15,768,000 one-second blocks of this test chain.
-    assert_eq!(gas["maxRentLifetimeSeconds"], "15768000");
+    assert_eq!(gas["rentRule"], "glm-rent-v3");
+    assert_eq!(gas["rentCharging"], "sender-balance-outside-gas");
+    assert_eq!(gas["rentWeiPerStorageUnitDay"], "20000000000");
+    assert_eq!(gas["rentReceiptField"], "rentFee");
+    // A year in seconds, applied as 31,536,000 one-second blocks here.
+    assert_eq!(gas["maxRentLifetimeSeconds"], "31536000");
+    assert_eq!(gas["maxRentLifetimeBlocks"], "31536000");
+    assert_eq!(gas["rentBlockPeriodMs"], "1000");
     let unsupported = status["capabilities"]["sdkRpcProfile"]["unsupported"].to_string();
     assert!(!unsupported.contains("permanent"), "{unsupported}");
 }

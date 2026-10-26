@@ -129,16 +129,6 @@ pub fn entity_bytes<'a>(cells: impl IntoIterator<Item = &'a (CellName, Cell)>) -
         })
         .sum()
 }
-/// The ABI `typeId` of a stored cell: its [`ArkivTypeId`], with
-/// [`INDEXED_FLAG`] when it is indexed.
-pub fn type_id(cell: &Cell) -> Result<u8, ArkivFault> {
-    let base = ArkivTypeId::of(&cell.value)? as u8;
-    Ok(if cell.is_attribute() {
-        base | INDEXED_FLAG
-    } else {
-        base
-    })
-}
 /// Parse decimal scaled units without floating point or rounding.
 pub fn parse_decimal(input: &str) -> Result<[u8; 32], ArkivFault> {
     let (negative, s) = match input.as_bytes().first() {
@@ -409,17 +399,6 @@ pub fn decode_protocol_triples(
         result.push((name, cell));
     }
     Ok(result)
-}
-/// The ABI triple of a stored user attribute, the inverse of
-/// [`decode_protocol_triples`] for one non-tombstone triple.
-pub fn encode_protocol_triple(name: &CellName, cell: &Cell) -> Result<AbiAttribute, ArkivFault> {
-    let mut word = [0u8; 32];
-    word[..name.len()].copy_from_slice(name.as_str().as_bytes());
-    Ok(AbiAttribute {
-        name: word,
-        type_id: type_id(cell)?,
-        value: encode_abi_value(&cell.value)?,
-    })
 }
 
 /// Production's natural-width stored value bytes, distinct from ABI words and

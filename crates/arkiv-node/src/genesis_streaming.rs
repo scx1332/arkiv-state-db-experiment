@@ -221,6 +221,8 @@ fn validate_row(row: &PrefillEntity, permanent: bool) -> Result<()> {
         || row.attributes.iter().any(|(name, cell)| {
             name.as_str().starts_with('$')
                 || cell.value.encoded_len() > crate::arkiv::MAX_BYTES_LENGTH
+                // bytes are stored, never indexed (cell kind 01).
+                || (cell.is_attribute() && matches!(cell.value, arkiv_db::Value::Bytes(_)))
         })
         || crate::arkiv::entity_bytes(&row.attributes) > crate::arkiv::MAX_ENTITY_BYTES
         || row.flags & !3 != 0
@@ -1161,6 +1163,13 @@ mod tests {
         let mut old = stream(&[row(0)]);
         old[8..12].copy_from_slice(&2u32.to_be_bytes());
         assert!(StreamReader::new(old.as_slice(), limits()).is_err());
+        // Indexed bytes (cell kind 01) are refused when the frame is read.
+        let mut indexed = row(0);
+        indexed.attributes[0].1 = Cell::attribute(Value::bytes(b"hello"));
+        let bytes = stream(&[indexed.clone()]);
+        let mut r = StreamReader::new(bytes.as_slice(), limits()).unwrap();
+        assert!(r.next_row().is_err());
+        assert!(crate::genesis_bundle::encode_stream(&[indexed]).is_err());
         // An unknown cell kind does not decode.
         let mut bad_kind = stream(&[row(0)]);
         let body = bad_kind
@@ -1459,8 +1468,6 @@ mod tests {
             ("bad:name", Cell::attribute(Value::U64(1))),
             ("and", Cell::attribute(Value::U64(1))),
             ("okay", Cell::attribute(Value::I64(1))),
-            // User bytes are stored, never indexed.
-            ("okay", Cell::attribute(Value::bytes(b"never indexed"))),
             ("okay", Cell::field(Value::str("control\n"))),
             ("okay", Cell::field(Value::str(&"a".repeat(129)))),
         ] {

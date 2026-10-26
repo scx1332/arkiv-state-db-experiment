@@ -195,6 +195,24 @@ fn invalid_nonces_system_cells_capacity_and_sponsor_fail() {
     let mut huge = row(0, 4);
     huge.attributes[0].1 = Cell::field(Value::bytes(&vec![0; 128 * 1024 + 1]));
     assert!(encode_stream(&[huge]).is_err());
+    // Rows within every per-value and per-entity cap still meet the 1 MiB
+    // canonical stream cap: seven full 128 KiB rows fit, nine do not.
+    let full = |n: usize| {
+        (0..n)
+            .map(|i| {
+                let mut r = row(i as u64, 4);
+                r.attributes[0].1 = Cell::field(Value::bytes(&vec![i as u8; 128 * 1024]));
+                r
+            })
+            .collect::<Vec<_>>()
+    };
+    let seven = encode_stream(&full(7)).unwrap();
+    assert!(seven.len() as u64 <= MAX_CANONICAL_BYTES);
+    assert_eq!(decode_stream(&seven).unwrap().len(), 7);
+    let error = encode_stream(&full(9)).unwrap_err();
+    assert!(error.contains("exceeds 1 MiB"), "{error}");
+    let error = decode_stream(&vec![0; MAX_CANONICAL_BYTES as usize + 1]).unwrap_err();
+    assert!(error.contains("exceeds 1 MiB"), "{error}");
     // Payload-era rows are not a spelling of anything: a stream with the old
     // codec is refused, and so are the removed system names.
     let mut old = encode_stream(&rows).unwrap();

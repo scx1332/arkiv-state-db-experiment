@@ -199,6 +199,13 @@ fn canonical_entities(entities: &[PrefillEntity], permanent: bool) -> Result<Vec
         {
             return Err("prefill value exceeds 128 KiB".into());
         }
+        if row
+            .attributes
+            .iter()
+            .any(|(_, c)| c.is_attribute() && matches!(c.value, Value::Bytes(_)))
+        {
+            return Err("prefill bytes attributes must be unindexed".into());
+        }
         if arkiv::entity_bytes(&row.attributes) > arkiv::MAX_ENTITY_BYTES {
             return Err("prefill entity bytes exceed 128 KiB".into());
         }

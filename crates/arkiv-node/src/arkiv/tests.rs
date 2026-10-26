@@ -355,6 +355,27 @@ fn triple(name_text: &str, type_id: u8, value: Vec<u8>) -> AbiAttribute {
         value,
     }
 }
+/// The ABI `typeId` of a stored cell: its [`ArkivTypeId`], with
+/// [`INDEXED_FLAG`] when it is indexed.
+fn type_id(cell: &Cell) -> Result<u8, ArkivFault> {
+    let base = ArkivTypeId::of(&cell.value)? as u8;
+    Ok(if cell.is_attribute() {
+        base | INDEXED_FLAG
+    } else {
+        base
+    })
+}
+/// The ABI triple of a stored user attribute, the inverse of
+/// [`decode_protocol_triples`] for one non-tombstone triple.
+fn encode_protocol_triple(name: &CellName, cell: &Cell) -> Result<AbiAttribute, ArkivFault> {
+    let mut word = [0u8; 32];
+    word[..name.len()].copy_from_slice(name.as_str().as_bytes());
+    Ok(AbiAttribute {
+        name: word,
+        type_id: type_id(cell)?,
+        value: encode_abi_value(&cell.value)?,
+    })
+}
 fn every_type() -> [Value; 10] {
     [
         Value::Bool(true),

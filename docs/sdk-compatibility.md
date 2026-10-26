@@ -7,6 +7,11 @@
 > write rules, read shapes and error codes see the
 > [node API reference](node-api-reference.md#entities-user-defined-columns).
 > The transport, gas and account behaviour below is unchanged.
+>
+> The current-SDK smoke is `scripts/udc-sdk-smoke.{py,ts}`: it runs the
+> `udc/*` SDK branches (built with `bun run build`; point `ARKIV_SDK_DIR` at
+> that checkout) against disposable producer/full/light nodes, through a
+> three-role restart and follower reads.
 
 The signed node exposes Ethereum/Arkiv JSON-RPC at `/` on its existing public
 listener, over HTTP POST and WebSocket. Native status exposes the structured

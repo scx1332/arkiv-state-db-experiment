@@ -48,17 +48,20 @@ impl std::error::Error for GasError {}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StorageUnits {
     pub entity_overhead: u64,
-    pub payload_bytes: u64,
-    pub attribute_bytes: u64,
+    /// Name, value and two tag bytes of every cell, indexed or not.
+    pub cell_bytes: u64,
+    /// [`INDEX_OVERHEAD_UNITS`] per indexed ([`CellKind::Attribute`]) cell.
     pub index_overhead: u64,
     pub total: u64,
 }
 fn add(a: u64, b: u64) -> Result<u64, GasError> {
     a.checked_add(b).ok_or(GasError::Overflow)
 }
-/// Every committed system and user cell is counted. The payload's name/framing
-/// is covered by entity overhead; other cells count name, value and two tag bytes.
-/// Indexed cells reserve a value and presence posting together, independent of sharing.
+/// Every committed system and user cell is counted the same way, whatever its
+/// name or type: its name, value and two tag bytes are stored data. Only an
+/// indexed cell ([`CellKind::Attribute`]) also reserves a value and presence
+/// posting, independent of sharing; an unindexed one ([`CellKind::Field`],
+/// such as any `bytes` value) pays storage only.
 pub fn storage_units(cells: &[(CellName, Cell)]) -> Result<StorageUnits, GasError> {
     let mut result = StorageUnits {
         entity_overhead: ENTITY_OVERHEAD_UNITS,
@@ -66,21 +69,14 @@ pub fn storage_units(cells: &[(CellName, Cell)]) -> Result<StorageUnits, GasErro
     };
     for (name, cell) in cells {
         let bytes = u64::try_from(cell.value.encoded_len()).map_err(|_| GasError::Overflow)?;
-        if name.as_str() == "$payload" {
-            result.payload_bytes = add(result.payload_bytes, bytes)?;
-        } else {
-            result.attribute_bytes = add(
-                result.attribute_bytes,
-                add(add(name.len() as u64, bytes)?, 2)?,
-            )?;
-        }
+        result.cell_bytes = add(result.cell_bytes, add(add(name.len() as u64, bytes)?, 2)?)?;
         if cell.kind == CellKind::Attribute {
             result.index_overhead = add(result.index_overhead, INDEX_OVERHEAD_UNITS)?;
         }
     }
     result.total = add(
-        add(result.entity_overhead, result.payload_bytes)?,
-        add(result.attribute_bytes, result.index_overhead)?,
+        add(result.entity_overhead, result.cell_bytes)?,
+        result.index_overhead,
     )?;
     Ok(result)
 }
@@ -164,7 +160,7 @@ mod tests {
     fn logical_size_is_content_and_kind_based() {
         let cells = vec![
             (
-                CellName::new("$payload").unwrap(),
+                CellName::new("body").unwrap(),
                 Cell::field(Value::bytes(&[0; 1024])),
             ),
             (
@@ -177,16 +173,32 @@ mod tests {
             units,
             StorageUnits {
                 entity_overhead: 512,
-                payload_bytes: 1024,
-                attribute_bytes: 15,
+                // body: 4 + 1024 + 2; score: 5 + 8 + 2.
+                cell_bytes: 1045,
                 index_overhead: 128,
-                total: 1679
+                total: 1685
             }
         );
         assert_eq!(
             rent(0, units.total, None, Some(17_281), 1).unwrap().gas,
-            13_432
+            13_480
         );
+        // The name never selects a pricing rule: only the bytes and the kind do.
+        for (name, kind) in [("$payload", Cell::field), ("data", Cell::field)] {
+            let renamed = vec![(CellName::new(name).unwrap(), kind(Value::bytes(&[0; 1024])))];
+            assert_eq!(
+                storage_units(&renamed).unwrap().cell_bytes,
+                name.len() as u64 + 1026
+            );
+        }
+        // The same value indexed pays the posting reservation on top.
+        let value = Value::str("hello");
+        let field = storage_units(&[(CellName::new("title").unwrap(), Cell::field(value.clone()))])
+            .unwrap();
+        let indexed =
+            storage_units(&[(CellName::new("title").unwrap(), Cell::attribute(value))]).unwrap();
+        assert_eq!(field.cell_bytes, indexed.cell_bytes);
+        assert_eq!(indexed.total - field.total, INDEX_OVERHEAD_UNITS);
     }
     #[test]
     fn lifecycle_charges_growth_and_extension_without_refunds() {

@@ -1,7 +1,7 @@
 use alloy_primitives::U256;
 use arkiv_db::{
-    Budget, CellName, Projection, RecordKey, SnapshotId, Value, decode_exact, durable::Options,
-    encode,
+    Budget, Cell, CellName, Projection, RecordKey, SnapshotId, Value, decode_exact,
+    durable::Options, encode,
 };
 use arkiv_db_memory::MemoryVersionedStore;
 use arkiv_node::{
@@ -54,9 +54,16 @@ fn row(n: u64, height: u64) -> PrefillEntity {
         salt: 10 + n as u128,
         expires_at_height: height,
         flags: 0,
-        content_type: "text/plain".into(),
-        payload: b"hello".to_vec(),
-        attributes: vec![(CellName::new("label").unwrap(), Value::str("hello"))],
+        attributes: vec![
+            (
+                CellName::new("body").unwrap(),
+                Cell::field(Value::bytes(b"hello")),
+            ),
+            (
+                CellName::new("label").unwrap(),
+                Cell::attribute(Value::str("hello")),
+            ),
+        ],
     }
 }
 fn build(rows: &[PrefillEntity]) -> SignedGenesis {
@@ -100,9 +107,10 @@ fn account_proof(h: &Host, l: &Light, who: u8, height: u64) -> (accounts::Accoun
 #[test]
 fn canonical_stream_and_launch_are_order_independent_and_strict() {
     let mut rows = vec![row(0, 4), row(1, 5)];
-    rows[0]
-        .attributes
-        .push((CellName::new("alpha").unwrap(), Value::U64(42)));
+    rows[0].attributes.push((
+        CellName::new("alpha").unwrap(),
+        Cell::attribute(Value::U64(42)),
+    ));
     let stream = encode_stream(&rows).unwrap();
     let g = build(&rows);
     rows.reverse();
@@ -154,9 +162,10 @@ fn invalid_nonces_system_cells_capacity_and_sponsor_fail() {
         );
     }
     let mut system = row(0, 4);
-    system
-        .attributes
-        .push((CellName::new("$owner").unwrap(), Value::Addr([1; 20])));
+    system.attributes.push((
+        CellName::new("$owner").unwrap(),
+        Cell::attribute(Value::Addr([1; 20])),
+    ));
     assert!(encode_stream(&[system]).is_err());
     let rows = (0..16).map(|n| row(n, 1)).collect::<Vec<_>>();
     assert!(build_genesis(base(), limits(), *signer(2).address().as_bytes(), &rows).is_ok());
@@ -184,8 +193,21 @@ fn invalid_nonces_system_cells_capacity_and_sponsor_fail() {
     cap.max_canonical_bytes = 20;
     assert!(build_genesis(base(), cap, *signer(2).address().as_bytes(), &rows).is_err());
     let mut huge = row(0, 4);
-    huge.payload = vec![0; MAX_CANONICAL_BYTES as usize];
+    huge.attributes[0].1 = Cell::field(Value::bytes(&vec![0; 128 * 1024 + 1]));
     assert!(encode_stream(&[huge]).is_err());
+    // Payload-era rows are not a spelling of anything: a stream with the old
+    // codec is refused, and so are the removed system names.
+    let mut old = encode_stream(&rows).unwrap();
+    old[8..12].copy_from_slice(&1u32.to_be_bytes());
+    assert!(decode_stream(&old).is_err());
+    for removed in ["$payload", "$contentType"] {
+        let mut r = row(0, 4);
+        r.attributes.push((
+            CellName::new(removed).unwrap(),
+            Cell::field(Value::str("x")),
+        ));
+        assert!(encode_stream(&[r]).is_err(), "{removed}");
+    }
 }
 
 #[test]
@@ -227,11 +249,11 @@ fn empty_prefill_has_namespace_and_ordinary_block_one() {
     );
     assert_eq!(
         g.hash().to_string(),
-        "0x3513dc68c22d1b097df6a65706f568ab9806d2244b88ee491c439407e1b8dcf4"
+        "0xfec5d1e48ded474ee51dacd2b44cf8189dd1f02824d482fc1e3540bbe7efbc9f"
     );
     assert_eq!(
         p.stream_hash.to_string(),
-        "0x19b1e7a1632c13ccecf41f294948d27f600161c4254b341a03c7a6fc7a6b0510"
+        "0xbbcd0cc07104e6cdbb52cd26f82c7ae1466474a03dc96f3cff38244fb4ec16dc"
     );
     let mut h = host(
         &g,
@@ -327,7 +349,7 @@ fn prefills_replay_proofs_next_create_expiry_and_restart() {
         assert_eq!(projection.created_at, 0);
         assert_eq!(projection.updated_at, 0);
         assert_eq!(projection.owner, row.creator);
-        assert_eq!(projection.payload, row.payload);
+        assert_eq!(projection.attributes, row.attributes);
         assert_eq!(projection.expires_at, row.expires_at_height);
         assert_eq!(
             genesis_snap
@@ -537,7 +559,7 @@ fn streaming_permanent_genesis_installs_staged_state_and_behaves_the_same() {
     let rows = permanent_chain_rows();
     let small = build_permanent(&rows);
     let mut bytes = b"ARKPFL02".to_vec();
-    bytes.extend_from_slice(&2u32.to_be_bytes());
+    bytes.extend_from_slice(&arkiv_node::genesis_bundle::ROW_CODEC.to_be_bytes());
     bytes.extend_from_slice(&(rows.len() as u64).to_be_bytes());
     for row in &rows {
         let frame = encode(row);
@@ -659,7 +681,10 @@ fn exercise_permanent_chain(
             .map(|r| arkiv::project(&r).unwrap())
     };
     // Live updates of a permanent entity are rejected; it stays permanent.
-    let set = vec![(CellName::new("label").unwrap(), Value::str("changed"))];
+    let set = vec![(
+        CellName::new("label").unwrap(),
+        Cell::attribute(Value::str("changed")),
+    )];
     let attempts = [
         ArkivOperation::Patch {
             key: keys[1].clone(),

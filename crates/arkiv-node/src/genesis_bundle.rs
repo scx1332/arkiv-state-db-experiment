@@ -3,9 +3,9 @@
 use crate::{accounts, arkiv, signed::protocol::SignedGenesis};
 use alloy_primitives::U256;
 use arkiv_db::{
-    B256, Budget, CellName, Decode, DecodeError, Decoder, Encode, Encoder, Engine, NamespaceName,
-    OwnerId, Projection, RecordKey, SealedCandidate, StateHeader, Value, WriteOp, decode_exact,
-    digest, encode,
+    B256, Budget, Cell, CellName, Decode, DecodeError, Decoder, Encode, Encoder, Engine,
+    NamespaceName, OwnerId, Projection, RecordKey, SealedCandidate, StateHeader, Value, WriteOp,
+    decode_exact, digest, encode,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,6 +14,14 @@ pub const MAX_CANONICAL_BYTES: u64 = 1024 * 1024;
 pub const MAX_STORAGE_UNITS: u64 = 8 * 1024 * 1024;
 pub const STREAM_DOMAIN: &str = "arkiv/prefill-stream/v1";
 pub const RECIPE_DOMAIN: &str = "arkiv/genesis-recipe/v1";
+/// Row codec of both prefill stream framings (the `u32` after the magic):
+/// user-defined columns, each attribute an engine [`Cell`] whose kind is its
+/// indexed flag, with no payload or content type. Codecs 1 (`ARKPFL01`) and
+/// 2 (`ARKPFL02`) carried a payload and content type and are refused.
+pub const ROW_CODEC: u32 = 3;
+/// The most user attributes of one prefill row: a create's
+/// [`arkiv::MAX_ATTRIBUTES`].
+pub const MAX_ROW_ATTRIBUTES: u32 = arkiv::MAX_ATTRIBUTES as u32;
 /// The prefill row expiry that never expires, the same `u64::MAX` sentinel the
 /// executor stores for a permanent `$expiresAt` ([`crate::Expiry::PERMANENT`]).
 /// Only a permanent-prefill launch ([`PrefillLaunch::permanent_prefill`]) admits it.
@@ -67,6 +75,13 @@ impl Decode for PrefillLimits {
     }
 }
 
+/// One height-zero entity of a prefill stream, row codec [`ROW_CODEC`]:
+/// `creator[20] ‖ create_nonce u64 ‖ salt u128 ‖ expires_at_height u64 ‖
+/// flags u8 ‖ u32 count ‖ count × (CellName ‖ Cell)`, all in the engine codec.
+/// A `Cell` is `kind ‖ Value`: kind `01` is an indexed attribute
+/// ([`Cell::attribute`]), `02` an unindexed one ([`Cell::field`]); `bytes`
+/// values must be unindexed. It is created exactly like a live `Create` of
+/// those attributes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrefillEntity {
     pub creator: [u8; 20],
@@ -74,9 +89,8 @@ pub struct PrefillEntity {
     pub salt: u128,
     pub expires_at_height: u64,
     pub flags: u8,
-    pub content_type: String,
-    pub payload: Vec<u8>,
-    pub attributes: Vec<(CellName, Value)>,
+    /// User attributes, strictly ascending by name.
+    pub attributes: Vec<(CellName, Cell)>,
 }
 impl Encode for PrefillEntity {
     fn encode_to(&self, e: &mut Encoder) {
@@ -85,15 +99,13 @@ impl Encode for PrefillEntity {
         e.fixed(&self.salt.to_be_bytes());
         e.u64(self.expires_at_height);
         e.u8(self.flags);
-        e.put(&self.content_type);
-        e.bytes(&self.payload);
         e.put(&self.attributes);
     }
 }
 impl Decode for PrefillEntity {
-    const MIN_ENCODED_LEN: usize = 65;
+    const MIN_ENCODED_LEN: usize = 57;
     fn decode_from(d: &mut Decoder<'_>) -> std::result::Result<Self, DecodeError> {
-        Self::decode_with_attribute_limit(d, 23)
+        Self::decode_with_attribute_limit(d, MAX_ROW_ATTRIBUTES)
     }
 }
 impl PrefillEntity {
@@ -106,28 +118,19 @@ impl PrefillEntity {
         let salt = u128::from_be_bytes(d.array()?);
         let expires_at_height = d.u64()?;
         let flags = d.u8()?;
-        let content_type = d.str()?;
-        if content_type.len() > 128 * 1024 {
-            return Err(invalid("content type size"));
-        }
-        let content_type = content_type.to_owned();
-        let payload = d.bytes()?;
-        if payload.len() > 128 * 1024 {
-            return Err(invalid("payload size"));
-        }
-        let payload = payload.to_vec();
         let count = d.u32()?;
-        if count > max_attributes || count as usize > d.remaining() / 7 {
+        // A name is at least 5 bytes and a cell at least 3.
+        if count > max_attributes || count as usize > d.remaining() / 8 {
             return Err(invalid("attribute count"));
         }
         let mut attributes = Vec::with_capacity(count as usize);
         for _ in 0..count {
             let name = d.get()?;
-            let value: Value = d.get()?;
-            if value.encoded_len() > 128 * 1024 {
+            let cell: Cell = d.get()?;
+            if cell.value.encoded_len() > arkiv::MAX_BYTES_LENGTH {
                 return Err(invalid("attribute size"));
             }
-            attributes.push((name, value));
+            attributes.push((name, cell));
         }
         Ok(Self {
             creator,
@@ -135,8 +138,6 @@ impl PrefillEntity {
             salt,
             expires_at_height,
             flags,
-            content_type,
-            payload,
             attributes,
         })
     }
@@ -149,25 +150,23 @@ fn canonical_entities(entities: &[PrefillEntity], permanent: bool) -> Result<Vec
     // larger in-memory recipe than the supported canonical stream.
     let mut bytes = 20usize;
     for row in entities {
-        if row.attributes.len() > 23 {
+        if row.attributes.len() > MAX_ROW_ATTRIBUTES as usize {
             return Err("too many prefill attributes".into());
         }
         bytes = bytes
-            .checked_add(4 + 20 + 8 + 16 + 8 + 1 + 4 + 4 + 4)
-            .and_then(|n| n.checked_add(row.payload.len()))
-            .and_then(|n| n.checked_add(row.content_type.len()))
+            .checked_add(4 + 20 + 8 + 16 + 8 + 1 + 4)
             .ok_or("prefill byte overflow")?;
-        for (name, value) in &row.attributes {
+        for (name, cell) in &row.attributes {
             bytes = bytes
                 .checked_add(
-                    5 + name.len()
-                        + if matches!(value, Value::Str(_) | Value::Bytes(_)) {
+                    6 + name.len()
+                        + if matches!(cell.value, Value::Str(_) | Value::Bytes(_)) {
                             4
                         } else {
                             0
                         },
                 )
-                .and_then(|n| n.checked_add(value.encoded_len()))
+                .and_then(|n| n.checked_add(cell.value.encoded_len()))
                 .ok_or("prefill byte overflow")?;
         }
         if bytes as u64 > MAX_CANONICAL_BYTES {
@@ -184,7 +183,7 @@ fn canonical_entities(entities: &[PrefillEntity], permanent: bool) -> Result<Vec
         }
         *next = next.checked_add(1).ok_or("creation nonce overflow")?;
         row.attributes.sort_by(|a, b| a.0.cmp(&b.0));
-        if row.attributes.len() > 23
+        if row.attributes.len() > MAX_ROW_ATTRIBUTES as usize
             || row.attributes.windows(2).any(|w| w[0].0 == w[1].0)
             || row
                 .attributes
@@ -193,14 +192,15 @@ fn canonical_entities(entities: &[PrefillEntity], permanent: bool) -> Result<Vec
         {
             return Err("invalid, duplicate, system or excessive prefill attributes".into());
         }
-        if row.payload.len() > 128 * 1024
-            || row.content_type.len() > 128 * 1024
-            || row
-                .attributes
-                .iter()
-                .any(|(_, v)| v.encoded_len() > 128 * 1024)
+        if row
+            .attributes
+            .iter()
+            .any(|(_, c)| c.value.encoded_len() > arkiv::MAX_BYTES_LENGTH)
         {
             return Err("prefill value exceeds 128 KiB".into());
+        }
+        if arkiv::entity_bytes(&row.attributes) > arkiv::MAX_ENTITY_BYTES {
+            return Err("prefill entity bytes exceed 128 KiB".into());
         }
         if row.flags & !3 != 0
             || row.expires_at_height == 0
@@ -220,7 +220,7 @@ pub fn encode_stream_with(entities: &[PrefillEntity], permanent: bool) -> Result
     let rows = canonical_entities(entities, permanent)?;
     let mut e = Encoder::new();
     e.fixed(b"ARKPFL01");
-    e.u32(1);
+    e.u32(ROW_CODEC);
     e.u64(rows.len() as u64);
     for row in rows {
         let bytes = encode(&row);
@@ -241,7 +241,7 @@ pub fn decode_stream_with(bytes: &[u8], permanent: bool) -> Result<Vec<PrefillEn
     }
     let parse = || -> std::result::Result<Vec<PrefillEntity>, DecodeError> {
         let mut d = Decoder::new(bytes);
-        if d.array::<8>()? != *b"ARKPFL01" || d.u32()? != 1 {
+        if d.array::<8>()? != *b"ARKPFL01" || d.u32()? != ROW_CODEC {
             return Err(invalid("stream version"));
         }
         let count = d.u64()?;
@@ -481,19 +481,10 @@ fn construct(
         if !keys.insert(key) {
             return Err("prefill derived entity key collision".into());
         }
-        let mut attrs = row.attributes;
-        attrs.push((
-            CellName::new("$payload").map_err(err)?,
-            Value::bytes(&row.payload),
-        ));
-        attrs.push((
-            CellName::new("$contentType").map_err(err)?,
-            Value::str(&row.content_type),
-        ));
         let op = arkiv::ArkivOperation::Create {
             salt: row.salt,
             flags: row.flags,
-            attributes: attrs,
+            attributes: row.attributes,
             expiry: crate::Expiry {
                 expires_at: row.expires_at_height,
                 min_lifetime: 0,
@@ -671,6 +662,53 @@ mod tests {
             }
         }
         assert!(prefill_rent_gas(1, 0, true).is_err());
+    }
+    /// The converter contract of `docs/genesis-bundle-v1.md`, byte for byte.
+    #[test]
+    fn row_codec_layout_is_pinned() {
+        let row = PrefillEntity {
+            creator: [0x22; 20],
+            create_nonce: 0,
+            salt: 2,
+            expires_at_height: 100,
+            flags: 2,
+            attributes: vec![
+                (
+                    CellName::new("arkiv.schema").unwrap(),
+                    Cell::attribute(Value::str("posts")),
+                ),
+                (
+                    CellName::new("body").unwrap(),
+                    Cell::field(Value::bytes(&[1, 2])),
+                ),
+                (
+                    CellName::new("score").unwrap(),
+                    Cell::attribute(Value::I32(-1)),
+                ),
+            ],
+        };
+        let expected = [
+            "2222222222222222222222222222222222222222",
+            "0000000000000000",
+            "00000000000000000000000000000002",
+            "0000000000000064",
+            "02",
+            "00000003",
+            "0000000c61726b69762e736368656d61",
+            "0102",
+            "00000005706f737473",
+            "00000004626f6479",
+            "0203",
+            "000000020102",
+            "0000000573636f7265",
+            "0110",
+            "7fffffff",
+        ]
+        .concat();
+        assert_eq!(alloy_primitives::hex::encode(encode(&row)), expected);
+        let stream = encode_stream(std::slice::from_ref(&row)).unwrap();
+        assert_eq!(&stream[..12], b"ARKPFL01\0\0\0\x03");
+        assert_eq!(decode_stream(&stream).unwrap(), vec![row]);
     }
     #[test]
     fn launch_versions_select_layout_and_permanence() {

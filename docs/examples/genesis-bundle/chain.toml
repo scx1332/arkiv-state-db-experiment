@@ -13,7 +13,7 @@ proposer = "0x1111111111111111111111111111111111111111"
 [profile]
 path = "profiles/fixed-glm-v2.toml"
 bytes = 1013
-sha256 = "fa7abfe2e56853b6f4c22f2c3e8f1a3b9fa575002ee7b475a1a228795d716b8a"
+sha256 = "963562f37cfb9bf9646a7ed9bf89640dd032328c3117940d3b8855a7836e1d21"
 
 [allocations]
 path = "allocations.toml"
@@ -35,7 +35,7 @@ max_storage_units = "1048576"
 
 [[prefill.dataset]]
 id = "catalog"
-format = "arkiv-entities-toml-v1"
+format = "arkiv-entities-toml-v2"
 path = "datasets/catalog.toml"
-bytes = 984
-sha256 = "070a8bc36ce6d0abeb99767478db37fd39120df348038ecddc0d3b25be7f30b6"
+bytes = 1387
+sha256 = "5f57a7ea9c80b05382e9efaacbd523494c78fde0d55d1bf6f6585714a4e74015"

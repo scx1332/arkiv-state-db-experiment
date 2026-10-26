@@ -68,33 +68,76 @@ pub fn sdk_safe_name(name: &str) -> bool {
         ]
         .contains(&name.to_ascii_lowercase().as_str())
 }
+/// Bit 7 of an ABI `typeId`: the attribute is indexed. The low seven bits
+/// are the [`ArkivTypeId`].
+pub const INDEXED_FLAG: u8 = 0x80;
+/// The most attribute triples one create or patch may carry.
+pub const MAX_ATTRIBUTES: usize = 32;
+/// The host cells every entity carries: `$key`, `$creator`, `$owner`,
+/// `$createdAt`, `$updatedAt`, `$expiresAt` and `$creationFlags`.
+pub const SYSTEM_CELLS: usize = 7;
+/// The fewest engine cells per record a chain serving the SDK needs, so that
+/// [`MAX_ATTRIBUTES`] user attributes always fit beside the system cells.
+pub const MIN_ENTITY_CELLS: usize = SYSTEM_CELLS + MAX_ATTRIBUTES;
+/// The largest `str` value, in UTF-8 bytes.
+pub const MAX_STR_BYTES: usize = 128;
+/// The largest single `bytes` value.
+pub const MAX_BYTES_LENGTH: usize = 128 * 1024;
+/// The most data the `bytes` cells of one entity may hold together, after a
+/// create or patch (the SDK's `MAX_ENTITY_BYTES`).
+pub const MAX_ENTITY_BYTES: usize = 128 * 1024;
+
 pub fn validate_value(value: &Value) -> Result<(), ArkivFault> {
     ArkivTypeId::of(value)?;
     match value {
-        Value::Str(s) if s.len() > 128 || s.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}') => {
+        Value::Str(s)
+            if s.len() > MAX_STR_BYTES || s.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}') =>
+        {
             Err(ArkivFault::Value)
         }
-        Value::Bytes(b) if b.len() > 128 * 1024 => Err(ArkivFault::Value),
+        Value::Bytes(b) if b.len() > MAX_BYTES_LENGTH => Err(ArkivFault::Value),
         _ => Ok(()),
     }
 }
-pub fn user_cell(name: &CellName, value: &Value) -> Result<Cell, ArkivFault> {
-    validate_value(value)?;
-    match name.as_str() {
-        "$payload" if matches!(value, Value::Bytes(_)) => Ok(Cell::field(value.clone())),
-        "$contentType" if matches!(value, Value::Str(_)) => Ok(Cell::attribute(value.clone())),
-        n if sdk_safe_name(n) && !matches!(value, Value::Bytes(_)) => {
-            Ok(Cell::attribute(value.clone()))
-        }
-        _ => Err(ArkivFault::Name),
+/// A user attribute as written: an SDK-safe name and an SDK value, indexed
+/// ([`CellKind::Attribute`]) or not ([`CellKind::Field`]). `bytes` is stored
+/// but never indexed. `$` names belong to the host.
+pub fn validate_user_cell(name: &CellName, cell: &Cell) -> Result<(), ArkivFault> {
+    validate_value(&cell.value)?;
+    if !sdk_safe_name(name.as_str()) {
+        return Err(ArkivFault::Name);
     }
+    if cell.is_attribute() && matches!(cell.value, Value::Bytes(_)) {
+        return Err(ArkivFault::Value);
+    }
+    Ok(())
 }
 pub fn validate_remove(name: &CellName) -> Result<(), ArkivFault> {
-    if sdk_safe_name(name.as_str()) || matches!(name.as_str(), "$payload" | "$contentType") {
+    if sdk_safe_name(name.as_str()) {
         Ok(())
     } else {
         Err(ArkivFault::Name)
     }
+}
+/// The bytes held by the `bytes` values among `cells`.
+pub fn entity_bytes<'a>(cells: impl IntoIterator<Item = &'a (CellName, Cell)>) -> usize {
+    cells
+        .into_iter()
+        .map(|(_, cell)| match &cell.value {
+            Value::Bytes(b) => b.len(),
+            _ => 0,
+        })
+        .sum()
+}
+/// The ABI `typeId` of a stored cell: its [`ArkivTypeId`], with
+/// [`INDEXED_FLAG`] when it is indexed.
+pub fn type_id(cell: &Cell) -> Result<u8, ArkivFault> {
+    let base = ArkivTypeId::of(&cell.value)? as u8;
+    Ok(if cell.is_attribute() {
+        base | INDEXED_FLAG
+    } else {
+        base
+    })
 }
 /// Parse decimal scaled units without floating point or rounding.
 pub fn parse_decimal(input: &str) -> Result<[u8; 32], ArkivFault> {
@@ -154,9 +197,18 @@ pub struct ArkivEntityProjection {
     pub updated_at: u64,
     pub expires_at: u64,
     pub creation_flags: u8,
-    pub content_type: String,
-    pub payload: Vec<u8>,
-    pub attributes: Vec<(CellName, Value)>,
+    /// User attributes in name order; the cell kind says whether each is
+    /// indexed ([`CellKind::Attribute`]) or only stored ([`CellKind::Field`]).
+    pub attributes: Vec<(CellName, Cell)>,
+}
+impl ArkivEntityProjection {
+    /// The user attribute `name`, if the entity holds one.
+    pub fn attribute(&self, name: &str) -> Option<&Cell> {
+        self.attributes
+            .iter()
+            .find(|(n, _)| n.as_str() == name)
+            .map(|(_, c)| c)
+    }
 }
 pub fn project(row: &Row) -> Result<ArkivEntityProjection, ArkivFault> {
     let structural: [u8; 32] = row
@@ -175,23 +227,30 @@ pub fn project(row: &Row) -> Result<ArkivEntityProjection, ArkivFault> {
             return Err(ArkivFault::Corrupt);
         }
         validate_value(&cell.value).map_err(|_| ArkivFault::Corrupt)?;
+        let system = |valid: bool, kind: CellKind| valid && cell.kind == kind;
         let expected = match name.as_str() {
-            "$key" => matches!(cell.value,Value::Key(k) if k==structural),
-            "$creator" | "$owner" => matches!(cell.value, Value::Addr(_)),
-            "$createdAt" | "$updatedAt" | "$expiresAt" => matches!(cell.value, Value::U64(_)),
-            "$creationFlags" => matches!(cell.value,Value::U64(n) if n<=3),
-            "$contentType" => matches!(cell.value, Value::Str(_)),
-            "$payload" => matches!(cell.value, Value::Bytes(_)),
-            n => protocol_name(n) && !matches!(cell.value, Value::Bytes(_)),
+            "$key" => system(
+                matches!(cell.value,Value::Key(k) if k==structural),
+                CellKind::Attribute,
+            ),
+            "$creator" | "$owner" => {
+                system(matches!(cell.value, Value::Addr(_)), CellKind::Attribute)
+            }
+            "$createdAt" | "$updatedAt" | "$expiresAt" => {
+                system(matches!(cell.value, Value::U64(_)), CellKind::Attribute)
+            }
+            "$creationFlags" => system(matches!(cell.value,Value::U64(n) if n<=3), CellKind::Field),
+            // Users write indexed or unindexed attributes; `bytes` only unindexed.
+            n => {
+                protocol_name(n) && !(cell.is_attribute() && matches!(cell.value, Value::Bytes(_)))
+            }
         };
-        let kind = if matches!(name.as_str(), "$payload" | "$creationFlags") {
-            CellKind::Field
-        } else {
-            CellKind::Attribute
-        };
-        if !expected || cell.kind != kind {
+        if !expected {
             return Err(ArkivFault::Corrupt);
         }
+    }
+    if entity_bytes(&row.cells) > MAX_ENTITY_BYTES {
+        return Err(ArkivFault::Corrupt);
     }
     let get = |n: &str| {
         row.cells
@@ -217,19 +276,11 @@ pub fn project(row: &Row) -> Result<ArkivEntityProjection, ArkivFault> {
         updated_at: number("$updatedAt")?,
         expires_at: number("$expiresAt")?,
         creation_flags: number("$creationFlags")? as u8,
-        content_type: match get("$contentType")? {
-            Value::Str(s) => s.to_string(),
-            _ => return Err(ArkivFault::Corrupt),
-        },
-        payload: match get("$payload")? {
-            Value::Bytes(b) => b.to_vec(),
-            _ => return Err(ArkivFault::Corrupt),
-        },
         attributes: row
             .cells
             .iter()
             .filter(|(n, _)| !n.as_str().starts_with('$'))
-            .map(|(n, c)| (n.clone(), c.value.clone()))
+            .cloned()
             .collect(),
     };
     if result.updated_at < result.created_at || result.expires_at <= result.created_at {
@@ -243,7 +294,9 @@ pub fn validate_proven_row(row: &Row) -> Result<(), ArkivFault> {
 
 /// SDK ABI values: fixed scalars occupy a canonical 32-byte Solidity word.
 pub fn decode_abi_value(type_id: u8, bytes: &[u8]) -> Result<Value, ArkivFault> {
-    if (type_id == 7 && bytes.len() > 128 * 1024) || (type_id == 8 && bytes.len() > 128) {
+    if (type_id == 7 && bytes.len() > MAX_BYTES_LENGTH)
+        || (type_id == 8 && bytes.len() > MAX_STR_BYTES)
+    {
         return Err(ArkivFault::Value);
     }
     let value = match type_id {
@@ -302,12 +355,17 @@ pub struct AbiAttribute {
     pub value: Vec<u8>,
 }
 /// Strict protocol triple validation; SDK-safe authoring is a separate policy.
-/// Type zero is accepted only as an empty patch tombstone, never a stored value.
+///
+/// The low seven bits of `typeId` are the [`ArkivTypeId`] and bit 7
+/// ([`INDEXED_FLAG`]) asks for an index: a flagged triple becomes a
+/// [`CellKind::Attribute`] cell, an unflagged one a [`CellKind::Field`].
+/// `bytes` is never indexed, so `0x87` is refused. Type zero is accepted only
+/// as an empty patch tombstone (`None`), never flagged and never stored.
 pub fn decode_protocol_triples(
     triples: &[AbiAttribute],
     patch: bool,
-) -> Result<Vec<(CellName, Option<Value>)>, ArkivFault> {
-    if triples.len() > 32 {
+) -> Result<Vec<(CellName, Option<Cell>)>, ArkivFault> {
+    if triples.len() > MAX_ATTRIBUTES {
         return Err(ArkivFault::Value);
     }
     let mut previous = None;
@@ -322,29 +380,46 @@ pub fn decode_protocol_triples(
             return Err(ArkivFault::Name);
         }
         let text = std::str::from_utf8(&triple.name[..end]).map_err(|_| ArkivFault::Name)?;
-        if !protocol_name(text) && !matches!(text, "$payload" | "$contentType") {
+        if !protocol_name(text) {
             return Err(ArkivFault::Name);
         }
         let name = CellName::new(text).map_err(|_| ArkivFault::Name)?;
-        let value = if triple.type_id == 0 {
+        let cell = if triple.type_id == 0 {
             if !patch || !triple.value.is_empty() {
                 return Err(ArkivFault::Value);
             }
             None
         } else {
-            let v = decode_abi_value(triple.type_id, &triple.value)?;
-            if match text {
-                "$payload" => !matches!(v, Value::Bytes(_)),
-                "$contentType" => !matches!(v, Value::Str(_)),
-                _ => matches!(v, Value::Bytes(_)),
-            } {
+            let indexed = triple.type_id & INDEXED_FLAG != 0;
+            let base = triple.type_id & !INDEXED_FLAG;
+            // A flagged tombstone (0x80) is no type at all.
+            if base == 0 {
                 return Err(ArkivFault::Value);
             }
-            Some(v)
+            let value = decode_abi_value(base, &triple.value)?;
+            if indexed && matches!(value, Value::Bytes(_)) {
+                return Err(ArkivFault::Value);
+            }
+            Some(if indexed {
+                Cell::attribute(value)
+            } else {
+                Cell::field(value)
+            })
         };
-        result.push((name, value));
+        result.push((name, cell));
     }
     Ok(result)
+}
+/// The ABI triple of a stored user attribute, the inverse of
+/// [`decode_protocol_triples`] for one non-tombstone triple.
+pub fn encode_protocol_triple(name: &CellName, cell: &Cell) -> Result<AbiAttribute, ArkivFault> {
+    let mut word = [0u8; 32];
+    word[..name.len()].copy_from_slice(name.as_str().as_bytes());
+    Ok(AbiAttribute {
+        name: word,
+        type_id: type_id(cell)?,
+        value: encode_abi_value(&cell.value)?,
+    })
 }
 
 /// Production's natural-width stored value bytes, distinct from ABI words and

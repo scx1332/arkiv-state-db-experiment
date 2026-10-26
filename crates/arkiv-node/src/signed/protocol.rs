@@ -98,12 +98,20 @@ pub struct SignedGenesis {
 /// The gas profile of every signed chain: GLM pricing, balances and burnt fees.
 pub const GAS_PROFILE: &str = "glm-v2";
 
+/// The fewest and most engine cells per record a signed chain admits. The
+/// floor fits [`crate::arkiv::MAX_ATTRIBUTES`] user attributes beside the
+/// [`crate::arkiv::SYSTEM_CELLS`] system cells, so system cells never reduce
+/// the user attribute budget; the ceiling is the proof verifier's row cap.
+pub const MIN_CELLS: usize = crate::arkiv::MIN_ENTITY_CELLS;
+pub const MAX_CELLS: usize = 64;
+
 /// The native genesis of a signed chain created without a genesis bundle:
 /// the development workload limits under GLM pricing, without admins, with
-/// the signed wire caps.
+/// the signed wire caps and room for a full entity ([`MIN_CELLS`]).
 pub fn default_native_genesis(chain_id: u64, timestamp_ms: u64) -> Genesis {
     let mut native = crate::demo::workload::genesis(chain_id, timestamp_ms);
     native.admins.clear();
+    native.limits.max_cells = MIN_CELLS;
     native.pricing = crate::gas::schedule();
     native.params.max_admin_per_block = 0;
     native.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;
@@ -158,12 +166,7 @@ impl SignedGenesis {
             || p.max_ops_per_block > 128
             || p.expiry_per_block > 16
             || self.genesis.limits.namespace_cap > 1024
-            || self.genesis.limits.max_cells
-                > if self.prefill.as_ref().is_some_and(|p| p.is_streaming()) {
-                    64
-                } else {
-                    32
-                }
+            || !(MIN_CELLS..=MAX_CELLS).contains(&self.genesis.limits.max_cells)
             || self.genesis.limits.max_payload_len() > 128 * 1024
             || self.genesis.limits.max_page > 64
             || self.genesis.limits.max_groups > 8

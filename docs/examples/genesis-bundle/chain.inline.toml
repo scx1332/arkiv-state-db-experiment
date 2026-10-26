@@ -3,7 +3,7 @@
 schema = "arkiv-genesis-bundle-v1"
 protocol = "arkiv-launch-prefill-v1"
 name = "Small catalog"
-profile = { preset = "arkiv-entity-v2/glm-v2@1" }
+profile = { preset = "arkiv-entity-v3/glm-v2@1" }
 
 [chain]
 id = "9002"
@@ -37,6 +37,5 @@ create_nonce = "0"
 salt = "10"
 expires_at_height = "86400"
 flags = 0
-content_type = "text/plain"
-payload_text = "Welcome to Arkiv."
-attributes.title = { str = "Welcome" }
+attributes.body = { bytes_text = "Welcome to Arkiv.", indexed = false }
+attributes.title = { str = "Welcome", indexed = true }

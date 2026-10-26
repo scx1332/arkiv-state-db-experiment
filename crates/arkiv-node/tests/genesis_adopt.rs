@@ -6,7 +6,7 @@
 //! them, as a crash would; the binary tests run `arkiv-proposer` itself.
 use alloy_primitives::U256;
 use arkiv_db::{
-    Budget, CellName, Literal, Projection, Query, RecordKey, Term, Value, decode_exact,
+    Budget, Cell, CellName, Literal, Projection, Query, RecordKey, Term, Value, decode_exact,
     durable::Options, encode,
 };
 use arkiv_db_redb::{RedbConfig, RedbStore};
@@ -77,12 +77,12 @@ fn inputs(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
         prefill: None,
     };
     let mut stream = b"ARKPFL02".to_vec();
-    stream.extend_from_slice(&2u32.to_be_bytes());
+    stream.extend_from_slice(&arkiv_node::genesis_bundle::ROW_CODEC.to_be_bytes());
     stream.extend_from_slice(&ROWS.to_be_bytes());
     for n in 0..ROWS {
-        let mut payload = format!("entity {n} ").into_bytes();
+        let mut body = format!("entity {n} ").into_bytes();
         if n == 5 {
-            payload.extend_from_slice(MARKER);
+            body.extend_from_slice(MARKER);
         }
         let frame = encode(&PrefillEntity {
             creator: [2; 20],
@@ -90,12 +90,20 @@ fn inputs(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
             salt: n as u128,
             expires_at_height: 1000 + n / 4,
             flags: 0,
-            content_type: "text/plain".into(),
-            payload,
             attributes: vec![
-                (CellName::new("kind").unwrap(), Value::str("fixture")),
-                (CellName::new("mod").unwrap(), Value::U64(n % 3)),
-                (CellName::new("n").unwrap(), Value::U64(n)),
+                (
+                    CellName::new("body").unwrap(),
+                    Cell::field(Value::bytes(&body)),
+                ),
+                (
+                    CellName::new("kind").unwrap(),
+                    Cell::attribute(Value::str("fixture")),
+                ),
+                (
+                    CellName::new("mod").unwrap(),
+                    Cell::attribute(Value::U64(n % 3)),
+                ),
+                (CellName::new("n").unwrap(), Cell::attribute(Value::U64(n))),
             ],
         });
         stream.extend_from_slice(&(frame.len() as u32).to_be_bytes());
@@ -539,7 +547,7 @@ fn producer_adopts_serves_the_copy_s_state_and_resumes() {
     let proof = expected["proof"]
         .as_str()
         .unwrap_or_else(|| panic!("{expected}"));
-    // Every fixture entity's payload is in the proof page.
+    // Every fixture entity's unindexed body is in the proof page.
     assert!(proof.contains(&hex(b"entity 47 ")), "{expected}");
     assert!(!copy.log().contains("prefill_genesis_adopt"));
     drop(copy);

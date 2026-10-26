@@ -188,10 +188,12 @@ pub fn parse(raw: &[u8]) -> Result<EthereumTransaction> {
         tx_type: if typed { 2 } else { 0 },
     })
 }
+/// The ABI triples as cells: bit 7 of `typeId` selects an indexed attribute
+/// or an unindexed field; `None` is a patch tombstone.
 fn triples(
     attrs: Vec<Attribute>,
     patch: bool,
-) -> Result<Vec<(arkiv_db::CellName, Option<arkiv_db::Value>)>> {
+) -> Result<Vec<(arkiv_db::CellName, Option<arkiv_db::Cell>)>> {
     let attrs = attrs
         .into_iter()
         .map(|a| arkiv::AbiAttribute {
@@ -248,7 +250,7 @@ pub fn operations(input: &[u8]) -> Result<Vec<ArkivOperation>> {
                         },
                         attributes: triples(v.attributes, false)?
                             .into_iter()
-                            .map(|(n, v)| (n, v.expect("create has no tombstones")))
+                            .map(|(n, c)| (n, c.expect("create has no tombstones")))
                             .collect(),
                     }
                 }
@@ -256,9 +258,9 @@ pub fn operations(input: &[u8]) -> Result<Vec<ArkivOperation>> {
                     let v = decode!(Patch);
                     let mut set = Vec::new();
                     let mut remove = Vec::new();
-                    for (n, v) in triples(v.mutations, true)? {
-                        if let Some(v) = v {
-                            set.push((n, v))
+                    for (n, c) in triples(v.mutations, true)? {
+                        if let Some(c) = c {
+                            set.push((n, c))
                         } else {
                             remove.push(n)
                         }

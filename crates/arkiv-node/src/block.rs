@@ -39,8 +39,10 @@ use arkiv_db::{
 /// Headers carry it, so a decoder never reinterprets another layout.
 pub const FORMAT_VERSION: u32 = 1;
 
-/// Version of the execution rules a genesis selects.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Version of the execution rules a genesis selects. Version 2 is the
+/// user-defined-columns entity model: per-attribute indexed flags, user
+/// `bytes` and no payload or content type ([`crate::arkiv`]).
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Domain of the block hash.
 pub const HEADER_DOMAIN: &str = "arkiv/header/v1";

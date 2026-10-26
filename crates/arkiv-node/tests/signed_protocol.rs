@@ -61,9 +61,29 @@ fn signed_genesis_bounds_native_state_and_reserves_complete_outcomes() {
     let mut g = genesis();
     g.genesis.limits.max_bytes_len = 128 * 1024 + 1;
     assert!(g.validate().is_err());
-    let mut g = genesis();
-    g.genesis.limits.max_cells = 33;
-    assert!(g.validate().is_err());
+    // 32 user attributes always fit beside the 7 system cells: a signed
+    // genesis admits 39 to 64 cells per record, whatever its prefill.
+    for (cells, valid) in [
+        (32, false),
+        (38, false),
+        (39, true),
+        (64, true),
+        (65, false),
+    ] {
+        let mut g = genesis();
+        g.genesis.limits.max_cells = cells;
+        assert_eq!(g.validate().is_ok(), valid, "{cells} cells");
+    }
+    assert_eq!(
+        arkiv_node::arkiv::MIN_ENTITY_CELLS,
+        arkiv_node::arkiv::SYSTEM_CELLS + arkiv_node::arkiv::MAX_ATTRIBUTES
+    );
+    assert_eq!(
+        arkiv_node::signed::protocol::default_native_genesis(7, 0)
+            .limits
+            .max_cells,
+        arkiv_node::arkiv::MIN_ENTITY_CELLS
+    );
 }
 fn independent_digest(domain: &str, bytes: &[u8]) -> B256 {
     let mut h = Keccak256::new();
@@ -166,31 +186,31 @@ fn preimages_are_explicit_and_golden() {
     // Explicit byte-layout vectors pinned across dependency changes.
     assert_eq!(
         hex(g.hash().as_slice()),
-        "04d50c66adbee6be851b10d7ac2a9e0f47a5c9e326aa2e3decb5c750049d01ea"
+        "9331a53f8d5b6e4ced56215a834c1b098daae6072bc52c9148dcb49ba22d897a"
     );
     assert_eq!(
         hex(tx.intent_digest().as_slice()),
-        "63883fe22ec6dd84888068953be4b6a903e2789a9e628fdf1496006ca7298672"
+        "89d9bd0c4530d2ab793cd6bb382fd99290fe7cb602a81fdd98aff56f788eaaf0"
     );
     assert_eq!(
         hex(tx.hash().as_slice()),
-        "4bc4e2115f899da44e265c3f47d587b206d6cccbc1563c6bc7d7723168c4d8e2"
+        "0b2e91dcfbecfd1a587e2641ebf77b93f679b6802fa49e6f0000212b7d401aa5"
     );
     assert_eq!(
         hex(inputs.digest().as_slice()),
-        "5735348f26921c5c2321928082bd3df3033025e9aa7065543ba5b05ef6ee10dd"
+        "f2d2b2ef095d4b51ee1df89759aa2ae30e41f980b526d0a12b50a683265e086d"
     );
     assert_eq!(
         hex(header.intent_digest().as_slice()),
-        "137119d9f8b9023508175a3e769d9fd9a539c85253e4350cc8516fd6bfd21ce9"
+        "9122f7a381e222bbc0da11a70b7e7f5d971bd084e3da1de27a9aa467b5259ae0"
     );
     assert_eq!(
         hex(&tx.signature),
-        "efc4a2d030cae9aaac725c89da9fa508f8c75572132a3f6776a5058f55589cad5332c707797a7ac6e28020a1fef6930cd8e08b415f6138c9e1b5aefddb0b044500"
+        "81458b2697a790375f286a4b518e9d2900a2bde6988c9aa95fb68e3c46dfb5a62bc89410f171d36086f60e81631b6bed57862b8c4c5ab275dd93d956d5e40f3501"
     );
     assert_eq!(
         hex(&header.signature),
-        "823d7851d56a4003f7ac3d022dcc418b471fce097f87da99005644b8c63e182e5c34730af3a2b5036b1c6d913788a626833732fc8c14aa0ad365b2cbc840e6ba00"
+        "93361d8d67cb512e3bc37094884564ef44ec3f1d2456f6decdce7d2f70d039726e6ec66d429de0e8e1d30a3d7f025167e2a743116276bd3ac8a6fd8a5564873a00"
     );
 }
 
@@ -318,10 +338,13 @@ fn every_authority_field_and_operation_is_signed() {
                 flags: 1,
                 expiry: Expiry::PERMANENT,
                 attributes: vec![
-                    (CellName::new("group").unwrap(), Value::U64(2)),
                     (
-                        CellName::new("$payload").unwrap(),
-                        Value::bytes(b"signed payload"),
+                        CellName::new("group").unwrap(),
+                        arkiv_db::Cell::attribute(Value::U64(2)),
+                    ),
+                    (
+                        CellName::new("body").unwrap(),
+                        arkiv_db::Cell::field(Value::bytes(b"signed payload")),
                     ),
                 ],
             },
@@ -385,7 +408,17 @@ fn every_authority_field_and_operation_is_signed() {
         ..
     } = &mut v.tx.ops[0]
     {
-        attributes[0].1 = Value::U64(3);
+        attributes[0].1 = arkiv_db::Cell::attribute(Value::U64(3));
+    }
+    variants.push(v);
+    // The indexed flag is part of the signed operation.
+    let mut v = tx.clone();
+    if let TxOp::Arkiv {
+        operation: ArkivOperation::Create { attributes, .. },
+        ..
+    } = &mut v.tx.ops[0]
+    {
+        attributes[0].1 = arkiv_db::Cell::field(Value::U64(2));
     }
     variants.push(v);
     let mut v = tx.clone();
@@ -394,7 +427,7 @@ fn every_authority_field_and_operation_is_signed() {
         ..
     } = &mut v.tx.ops[0]
     {
-        attributes[1].1 = Value::bytes(b"altered payload");
+        attributes[1].1 = arkiv_db::Cell::field(Value::bytes(b"altered payload"));
     }
     variants.push(v);
     let mut v = tx.clone();

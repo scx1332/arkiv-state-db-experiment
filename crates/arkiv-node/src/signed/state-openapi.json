@@ -1319,9 +1319,9 @@
               "example": {
                 "height": "1",
                 "namespace": "1",
-                "attribute": "$contentType",
+                "attribute": "arkiv.schema",
                 "valueType": "str",
-                "value": "application/json",
+                "value": "posts",
                 "limit": 16
               }
             }
@@ -1665,9 +1665,9 @@
               "example": {
                 "height": "1",
                 "namespace": "1",
-                "attribute": "$contentType",
+                "attribute": "arkiv.schema",
                 "valueType": "str",
-                "value": "application/json",
+                "value": "posts",
                 "limit": 16
               }
             }
@@ -1758,9 +1758,9 @@
               "example": {
                 "height": "1",
                 "namespace": "1",
-                "attribute": "$contentType",
+                "attribute": "arkiv.schema",
                 "valueType": "str",
-                "value": "application/json",
+                "value": "posts",
                 "limit": 16
               }
             }
@@ -2143,7 +2143,7 @@
                 "additionalProperties": false
               },
               "example": {
-                "query": "$contentType = \"application/json\""
+                "query": "arkiv.schema = str('posts')"
               }
             }
           }
@@ -2211,7 +2211,7 @@
                 "$ref": "#/components/schemas/TextQuery"
               },
               "example": {
-                "query": "$contentType = \"application/json\"",
+                "query": "arkiv.schema = str('posts')",
                 "requireProof": true,
                 "height": "1",
                 "namespace": "1",
@@ -2770,7 +2770,7 @@
         ],
         "operationId": "jsonRpc",
         "summary": "Execute SDK and Ethereum-compatible JSON-RPC calls",
-        "description": "Native Ethereum-compatible JSON-RPC over HTTP (also supported over WebSocket at the same path). This is not a complete Ethereum API: hashes are native commitments, not Ethereum MPT roots; arbitrary EVM execution is unsupported. Full/producer nodes read locally; light nodes forward all methods to their peer without proof verification. eth_sendRawTransaction is forwarded by full followers as well. No bearer authentication.\n\nRequests are limited to 1 MiB and responses to 8 MiB. A batch contains 1\u201364 calls. Notifications omit id and produce no response; all-notification requests return HTTP 204. JSON-RPC errors normally return HTTP 200. Block selectors: latest, pending, safe, finalized (all resolve to the native head), earliest, or hexadecimal height. These aliases do not imply Ethereum finality.\n\n### Supported methods\n\n**`web3_clientVersion`** \u2014 Client implementation string.\n\n**`net_version`** \u2014 Decimal chain ID string.\n\n**`net_listening`** \u2014 Always true.\n\n**`eth_chainId`** \u2014 Chain ID as a hexadecimal quantity.\n\n**`eth_blockNumber`** \u2014 Latest height as a hexadecimal quantity.\n\n**`eth_syncing`** \u2014 Always false; use signed status for native node health.\n\n**`eth_gasPrice`** \u2014 Fixed gas price as a hexadecimal quantity.\n\n**`eth_maxPriorityFeePerGas`** \u2014 Always 0x0; priority fees are unsupported.\n\n**`eth_accounts`** \u2014 Empty list; this node does not manage wallet keys.\n\n**`eth_getBalance`** \u2014 Address, optional block selector \u2192 balance in wei as a hexadecimal quantity.\n\n**`eth_getTransactionCount`** \u2014 Address, optional block selector \u2192 nonce; pending includes contiguous pending transactions.\n\n**`eth_getCode`** \u2014 Address, optional block selector \u2192 0x. Arbitrary EVM contracts are unsupported.\n\n**`eth_getBlockByNumber`** \u2014 Block selector, fullTransactions boolean \u2192 native block compatibility object or null.\n\n**`eth_getBlockByHash`** \u2014 Block hash, fullTransactions boolean \u2192 block object or null.\n\n**`eth_getBlockTransactionCountByNumber`** \u2014 Block selector \u2192 transaction count as a hexadecimal quantity.\n\n**`eth_getTransactionByHash`** \u2014 Transaction hash \u2192 committed/pending transaction object or null.\n\n**`eth_getTransactionReceipt`** \u2014 Transaction hash \u2192 committed receipt object or null.\n\n**`eth_getTransactionByBlockNumberAndIndex`** \u2014 Block selector, hexadecimal transaction index \u2192 transaction object or null.\n\n**`eth_sendRawTransaction`** \u2014 Signed Ethereum transaction bytes \u2192 transaction hash. Replace the illustrative 0x with signed EIP-155 legacy or EIP-1559 bytes with an empty access list; forwarded to the producer by full followers and light nodes.\n\n**`eth_estimateGas`** \u2014 Call object, optional latest/pending selector \u2192 gas estimate. Historical simulation is unsupported.\n\n**`eth_call`** \u2014 Arkiv contract call object and optional block selector \u2192 ABI result bytes. Replace illustrative data with ABI call data. Only native Arkiv calls are supported; entityNonce supports historical reads, other simulation requires the current head.\n\n**`eth_getLogs`** \u2014 Log filter \u2192 logs. At most 256 blocks per query; blockHash is mutually exclusive with fromBlock/toBlock.\n\n**`eth_newFilter`** \u2014 Log filter \u2192 process-local filter ID. Filters expire after 15 minutes without access; maximum 1024 filters.\n\n**`eth_newBlockFilter`** \u2014 Creates a block filter and returns its hexadecimal filter ID.\n\n**`eth_uninstallFilter`** \u2014 Filter ID \u2192 boolean indicating removal.\n\n**`eth_getFilterChanges`** \u2014 Filter ID \u2192 new logs or block hashes; advances the filter cursor.\n\n**`eth_getFilterLogs`** \u2014 Log filter ID \u2192 all matching logs within its bounds; block filters are unsupported.\n\n**`eth_feeHistory`** \u2014 Hexadecimal block count, newest block selector, optional ascending percentiles (0\u2013100) \u2192 oldestBlock, baseFeePerGas, gasUsedRatio, reward. Count capped at 1024; at most 100 percentiles; rewards are zero.\n\n**`arkiv_query`** \u2014 Query text and optional options \u2192 {data,blockNumber,cursor?}. Options: atBlock (integer or hexadecimal quantity), limit (1\u2013200; default 100), select, cursor. Explicit atBlock required for continuation; cursors are process-local and expire on eviction/restart. Results are unverified.\n\n**`arkiv_getEntityCount`** \u2014 Optional options object with block (integer height) and query (text) \u2192 JSON integer count. Results are unverified.\n\n**`arkiv_getBlockTiming`** \u2014 Returns current_block, current_block_time and duration as JSON integers; times are seconds.\n\n### Result schemas\n\nBlock reads return RpcBlock or null; transaction reads return RpcTransaction or null; receipts return RpcReceipt or null. Log reads return arrays of RpcLog; eth_getFilterChanges returns RpcLog[] or block-hash strings. eth_feeHistory returns RpcFeeHistory. arkiv_query returns RpcQueryResult containing projected RpcEntity rows; arkiv_getEntityCount returns an integer; arkiv_getBlockTiming returns RpcBlockTiming. Request variants below describe each method\u2019s positional parameters.\n\n### State retention\n\nA full node started with --state-retention N serves state only at heights >= stateFloor = head - N (status stateFloor; it never decreases). Reads of older state (eth_getBalance, eth_getTransactionCount, eth_call entityNonce, arkiv_getEntityCount, arkiv_query, including later pages of an arkiv_query cursor) fail with code -32001, message \"history pruned: requested N, floor F\" and data {requested, floor}. Logs, receipts and block objects of block h (logsBloom) are derived from state h-1, so eth_getLogs, eth_getFilterLogs/Changes, eth_getTransactionReceipt and eth_getBlockByNumber/ByHash refuse blocks below receiptFloor = stateFloor+1 (block 0 is always served); the whole eth_getLogs range is checked up front. Body-only reads (eth_getTransactionByHash, eth_getTransactionByBlockNumberAndIndex, eth_getBlockTransactionCountByNumber, eth_feeHistory, block filters, eth_getCode) are served at every height. A WebSocket subscription whose replay position falls below the floor receives one eth_subscription notification carrying params.error (code -32001) and is closed. Archive retention (the default) serves every height.",
+        "description": "Native Ethereum-compatible JSON-RPC over HTTP (also supported over WebSocket at the same path). This is not a complete Ethereum API: hashes are native commitments, not Ethereum MPT roots; arbitrary EVM execution is unsupported. Full/producer nodes read locally; light nodes forward all methods to their peer without proof verification. eth_sendRawTransaction is forwarded by full followers as well. No bearer authentication.\n\nRequests are limited to 1 MiB and responses to 8 MiB. A batch contains 1\u201364 calls. Notifications omit id and produce no response; all-notification requests return HTTP 204. JSON-RPC errors normally return HTTP 200. Block selectors: latest, pending, safe, finalized (all resolve to the native head), earliest, or hexadecimal height. These aliases do not imply Ethereum finality.\n\n### Supported methods\n\n**`web3_clientVersion`** \u2014 Client implementation string.\n\n**`net_version`** \u2014 Decimal chain ID string.\n\n**`net_listening`** \u2014 Always true.\n\n**`eth_chainId`** \u2014 Chain ID as a hexadecimal quantity.\n\n**`eth_blockNumber`** \u2014 Latest height as a hexadecimal quantity.\n\n**`eth_syncing`** \u2014 Always false; use signed status for native node health.\n\n**`eth_gasPrice`** \u2014 Fixed gas price as a hexadecimal quantity.\n\n**`eth_maxPriorityFeePerGas`** \u2014 Always 0x0; priority fees are unsupported.\n\n**`eth_accounts`** \u2014 Empty list; this node does not manage wallet keys.\n\n**`eth_getBalance`** \u2014 Address, optional block selector \u2192 balance in wei as a hexadecimal quantity.\n\n**`eth_getTransactionCount`** \u2014 Address, optional block selector \u2192 nonce; pending includes contiguous pending transactions.\n\n**`eth_getCode`** \u2014 Address, optional block selector \u2192 0x. Arbitrary EVM contracts are unsupported.\n\n**`eth_getBlockByNumber`** \u2014 Block selector, fullTransactions boolean \u2192 native block compatibility object or null.\n\n**`eth_getBlockByHash`** \u2014 Block hash, fullTransactions boolean \u2192 block object or null.\n\n**`eth_getBlockTransactionCountByNumber`** \u2014 Block selector \u2192 transaction count as a hexadecimal quantity.\n\n**`eth_getTransactionByHash`** \u2014 Transaction hash \u2192 committed/pending transaction object or null.\n\n**`eth_getTransactionReceipt`** \u2014 Transaction hash \u2192 committed receipt object or null.\n\n**`eth_getTransactionByBlockNumberAndIndex`** \u2014 Block selector, hexadecimal transaction index \u2192 transaction object or null.\n\n**`eth_sendRawTransaction`** \u2014 Signed Ethereum transaction bytes \u2192 transaction hash. Replace the illustrative 0x with signed EIP-155 legacy or EIP-1559 bytes with an empty access list; forwarded to the producer by full followers and light nodes.\n\n**`eth_estimateGas`** \u2014 Call object, optional latest/pending selector \u2192 gas estimate. Historical simulation is unsupported.\n\n**`eth_call`** \u2014 Arkiv contract call object and optional block selector \u2192 ABI result bytes. Replace illustrative data with ABI call data. Only native Arkiv calls are supported; entityNonce supports historical reads, other simulation requires the current head.\n\n**`eth_getLogs`** \u2014 Log filter \u2192 logs. At most 256 blocks per query; blockHash is mutually exclusive with fromBlock/toBlock.\n\n**`eth_newFilter`** \u2014 Log filter \u2192 process-local filter ID. Filters expire after 15 minutes without access; maximum 1024 filters.\n\n**`eth_newBlockFilter`** \u2014 Creates a block filter and returns its hexadecimal filter ID.\n\n**`eth_uninstallFilter`** \u2014 Filter ID \u2192 boolean indicating removal.\n\n**`eth_getFilterChanges`** \u2014 Filter ID \u2192 new logs or block hashes; advances the filter cursor.\n\n**`eth_getFilterLogs`** \u2014 Log filter ID \u2192 all matching logs within its bounds; block filters are unsupported.\n\n**`eth_feeHistory`** \u2014 Hexadecimal block count, newest block selector, optional ascending percentiles (0\u2013100) \u2192 oldestBlock, baseFeePerGas, gasUsedRatio, reward. Count capped at 1024; at most 100 percentiles; rewards are zero.\n\n**`arkiv_query`** \u2014 Query text and optional options \u2192 {data,blockNumber,cursor?}. Options: atBlock (integer or hexadecimal quantity), limit (1\u2013200; default 100), select, cursor. Explicit atBlock required for continuation; cursors are process-local and expire on eviction/restart. Results are unverified.\n\n**`arkiv_getEntityCount`** \u2014 Optional options object with block (integer height) and query (text) \u2192 JSON integer count. Results are unverified.\n\n**`arkiv_getBlockTiming`** \u2014 Returns current_block, current_block_time and duration as JSON integers; times are seconds.\n\n### Result schemas\n\nBlock reads return RpcBlock or null; transaction reads return RpcTransaction or null; receipts return RpcReceipt or null. Log reads return arrays of RpcLog; eth_getFilterChanges returns RpcLog[] or block-hash strings. eth_feeHistory returns RpcFeeHistory. arkiv_query returns RpcQueryResult containing projected RpcEntity rows; arkiv_getEntityCount returns an integer; arkiv_getBlockTiming returns RpcBlockTiming. Request variants below describe each method\u2019s positional parameters.\n\n### Entities and query errors\n\nEntities follow the user-defined-columns model: an entity is its system fields plus up to 32 named, typed attributes per create or patch. Bit 7 (0x80) of an attribute's ABI typeId marks it indexed; bytes may never be indexed. Every attribute is stored and returned (attributes, attributeSchema with indexed), but predicates only ever match indexed attributes. There is no payload or content type: $payload and $contentType are unknown, and select rejects payload and contentType.\n\narkiv_query and arkiv_getEntityCount refusals use the SDK's code table: -32001 parse (data {position, expected, got}), -32002 type, -32003 literal, -32004 limits, -32005 cursor, -32006 block (atBlock above the head or below the retention floor). Malformed parameters are -32602. ServerBusy is -32010.\n\n### State retention\n\nA full node started with --state-retention N serves state only at heights >= stateFloor = head - N (status stateFloor; it never decreases). Reads of older state (eth_getBalance, eth_getTransactionCount, eth_call entityNonce, arkiv_getEntityCount, arkiv_query, including later pages of an arkiv_query cursor) fail with code -32006, message \"history pruned: requested N, floor F\" and data {requested, floor}. Logs, receipts and block objects of block h (logsBloom) are derived from state h-1, so eth_getLogs, eth_getFilterLogs/Changes, eth_getTransactionReceipt and eth_getBlockByNumber/ByHash refuse blocks below receiptFloor = stateFloor+1 (block 0 is always served); the whole eth_getLogs range is checked up front. Body-only reads (eth_getTransactionByHash, eth_getTransactionByBlockNumberAndIndex, eth_getBlockTransactionCountByNumber, eth_feeHistory, block filters, eth_getCode) are served at every height. A WebSocket subscription whose replay position falls below the floor receives one eth_subscription notification carrying params.error (code -32006) and is closed. Archive retention (the default) serves every height.",
         "requestBody": {
           "required": true,
           "content": {
@@ -3220,7 +3220,7 @@
                       "jsonrpc": "2.0",
                       "id": 1,
                       "error": {
-                        "code": -32005,
+                        "code": -32010,
                         "message": "ServerBusy"
                       }
                     }
@@ -5664,14 +5664,6 @@
             "type": "string",
             "pattern": "^0x[0-9a-fA-F]{40}$"
           },
-          "payload": {
-            "type": "string",
-            "pattern": "^0x([0-9a-fA-F]{2})*$",
-            "description": "0x-prefixed hex bytes. Native canonical payloads use the Arkiv binary codec, not JSON or base64."
-          },
-          "contentType": {
-            "type": "string"
-          },
           "creationFlags": {
             "type": "object",
             "properties": {
@@ -5706,18 +5698,61 @@
             "type": "string",
             "pattern": "^(0|[1-9][0-9]*)$",
             "description": "Unsigned decimal string (not a JSON number)."
+          },
+          "attributes": {
+            "type": "array",
+            "description": "Every user attribute of the proven row, indexed or not, in name order. Values use the arkiv_query encoding.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "bool",
+                    "i32",
+                    "u64",
+                    "u256",
+                    "dec",
+                    "bytes32",
+                    "bytes",
+                    "str",
+                    "addr",
+                    "key"
+                  ]
+                },
+                "indexed": {
+                  "type": "boolean",
+                  "description": "Whether the attribute is indexed (matched by equality proofs and queries). bytes is never indexed."
+                },
+                "value": {
+                  "type": [
+                    "string",
+                    "integer",
+                    "boolean"
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "type",
+                "indexed",
+                "value"
+              ]
+            }
           }
         },
         "required": [
           "key",
           "owner",
           "creator",
-          "payload",
-          "contentType",
           "creationFlags",
           "createdAt",
           "updatedAt",
-          "expiresAt"
+          "expiresAt",
+          "attributes"
         ]
       },
       "VerifiedEquality": {
@@ -7054,7 +7089,7 @@
             "properties": {
               "code": {
                 "type": "integer",
-                "description": "-32700 parse error; -32600 invalid request; -32601 unknown method; -32602 invalid params; 3 execution reverted; -32001 history pruned (state below the node's retention floor; message \"history pruned: requested N, floor F\"); -32000 runtime error."
+                "description": "-32700 parse error; -32600 invalid request; -32601 unknown method; -32602 invalid params; 3 execution reverted; arkiv_query/arkiv_getEntityCount refusals use the SDK's table: -32001 parse, -32002 type, -32003 literal, -32004 limits, -32005 cursor, -32006 block (the requested height is outside the retained range: above the head, or below the retention floor on any method, message \"history pruned: requested N, floor F\"); -32010 ServerBusy (detached-read permits taken; retry); -32011 WebSocket subscription limit; -32000 runtime error."
               },
               "message": {
                 "type": "string"
@@ -7079,6 +7114,26 @@
                     "required": [
                       "requested",
                       "floor"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "description": "Query error location (parse, type and literal errors): the UTF-8 byte offset, the source text found there, and for a parse error what was expected.",
+                    "properties": {
+                      "position": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "expected": {
+                        "type": "string"
+                      },
+                      "got": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "position",
+                      "got"
                     ]
                   }
                 ]
@@ -7760,7 +7815,7 @@
               "integer",
               "boolean"
             ],
-            "description": "Boolean/integer for small numeric types; u64/u256 as hex quantity, decimal as text, byte/address/key types as hex, str as text."
+            "description": "Typed by `type`, never by magnitude: bool as a boolean, i32 as a number, u64/u256 as a hex quantity, dec as decimal text, bytes/bytes32/addr/key as 0x hex, str as text."
           }
         },
         "required": [
@@ -7810,14 +7865,9 @@
               "permissionlessExtension"
             ]
           },
-          "contentType": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/RpcBytes"
-          },
           "attributeSchema": {
             "type": "array",
+            "description": "Every user attribute's name, type tag and indexing, without values.",
             "items": {
               "type": "object",
               "properties": {
@@ -7825,12 +7875,29 @@
                   "type": "string"
                 },
                 "type": {
-                  "type": "string"
+                  "type": "string",
+                  "enum": [
+                    "bool",
+                    "i32",
+                    "u64",
+                    "u256",
+                    "dec",
+                    "bytes32",
+                    "bytes",
+                    "str",
+                    "addr",
+                    "key"
+                  ]
+                },
+                "indexed": {
+                  "type": "boolean",
+                  "description": "true for an indexed attribute (ABI typeId with bit 7 set); false for one that is only stored. Predicates never match an unindexed attribute."
                 }
               },
               "required": [
                 "name",
-                "type"
+                "type",
+                "indexed"
               ]
             }
           },
@@ -7838,10 +7905,11 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/RpcAttribute"
-            }
+            },
+            "description": "Every selected user attribute, indexed or not, bytes values included."
           }
         },
-        "description": "Projected SDK entity: only selected fields are returned; key defaults to selected but may explicitly be false."
+        "description": "Projected SDK entity (user-defined columns): only selected fields are returned; key defaults to selected but may explicitly be false. There is no payload or content type."
       },
       "RpcEntitySelection": {
         "type": "object",
@@ -7867,12 +7935,6 @@
           "creationFlags": {
             "type": "boolean"
           },
-          "contentType": {
-            "type": "boolean"
-          },
-          "payload": {
-            "type": "boolean"
-          },
           "attributeSchema": {
             "type": "boolean"
           },
@@ -7891,7 +7953,8 @@
             ]
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "description": "The SDK's RpcSelect. Unknown keys, including the removed payload and contentType, are invalid params (-32602)."
       },
       "RpcQueryOptions": {
         "type": "object",
@@ -9035,8 +9098,8 @@
         "properties": {
           "profile": {
             "type": "string",
-            "const": "arkiv-entity-v2",
-            "description": "Arkiv entity rules served by this node."
+            "const": "arkiv-entity-v3",
+            "description": "Arkiv entity rules served by this node: user-defined columns (per-attribute indexed flag, user bytes, no payload or content type)."
           },
           "layoutVersion": {
             "type": "integer"
@@ -9098,10 +9161,27 @@
                 "items": {
                   "type": "string"
                 },
-                "description": "Arkiv SDK attribute types (bytes only as $payload)."
+                "description": "Arkiv SDK attribute types; every one may be indexed except bytes."
               },
-              "payloadBytes": {
-                "type": "integer"
+              "unindexedValueTypes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Types that are stored but never indexed: bytes."
+              },
+              "indexedTypeIdFlag": {
+                "type": "integer",
+                "const": 128,
+                "description": "Bit of the ABI typeId that marks an attribute indexed (0x80)."
+              },
+              "maxAttributes": {
+                "type": "integer",
+                "description": "Most attribute triples per create or patch."
+              },
+              "entityBytes": {
+                "type": "integer",
+                "description": "Most data the bytes attributes of one entity may hold together."
               },
               "systemEquality": {
                 "type": "array",

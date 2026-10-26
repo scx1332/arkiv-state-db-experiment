@@ -1,6 +1,6 @@
 //! Signed execution, independent replay, retained metadata and publication faults.
 use arkiv_db::{
-    B256, Budget, CellName, OwnerId, Projection, RecordKey, Value,
+    B256, Budget, Cell, CellName, OwnerId, Projection, RecordKey, Value,
     durable::{Options, WriterState},
     encode,
     proof::{EqQuery, EqRequest, SnapshotRef, VerifiedEq},
@@ -89,7 +89,8 @@ fn tx(key: u8, nonce: u64, request: u8, operations: Vec<ArkivOperation>) -> Sign
     )
     .unwrap()
 }
-fn create_entity(salt: u128, payload: &[u8]) -> ArkivOperation {
+/// An entity with an indexed `group` and its data in an unindexed `body`.
+fn create_entity(salt: u128, body: &[u8]) -> ArkivOperation {
     ArkivOperation::Create {
         salt,
         flags: 0,
@@ -98,9 +99,21 @@ fn create_entity(salt: u128, payload: &[u8]) -> ArkivOperation {
             min_lifetime: 1_000,
         },
         attributes: vec![
-            (CellName::new("group").unwrap(), Value::U64(1)),
-            (CellName::new("$payload").unwrap(), Value::bytes(payload)),
+            (
+                CellName::new("body").unwrap(),
+                Cell::field(Value::bytes(body)),
+            ),
+            (
+                CellName::new("group").unwrap(),
+                Cell::attribute(Value::U64(1)),
+            ),
         ],
+    }
+}
+fn body(e: &arkiv::ArkivEntityProjection) -> Vec<u8> {
+    match e.attribute("body").map(|c| &c.value) {
+        Some(Value::Bytes(b)) => b.to_vec(),
+        other => panic!("no bytes body: {other:?}"),
     }
 }
 fn entity_key(key: u8, creation_nonce: u64, salt: u128) -> RecordKey {
@@ -189,10 +202,7 @@ fn signed_lifecycle_replays_bootstrap_ownership_failures_and_native_proofs() {
     producer.produce().unwrap();
     relay(&producer, &mut full, &mut light);
     let key = entity_key(2, 0, 10);
-    assert_eq!(
-        entity(&producer, &key).unwrap().payload,
-        b"original payload"
-    );
+    assert_eq!(body(&entity(&producer, &key).unwrap()), b"original payload");
     assert_eq!(producer.committed_nonce(alice).unwrap(), 1);
     let transfer = tx(
         2,
@@ -213,8 +223,8 @@ fn signed_lifecycle_replays_bootstrap_ownership_failures_and_native_proofs() {
         vec![ArkivOperation::Patch {
             key: key.clone(),
             set: vec![(
-                CellName::new("$payload").unwrap(),
-                Value::bytes(b"new owner update"),
+                CellName::new("body").unwrap(),
+                Cell::field(Value::bytes(b"new owner update")),
             )],
             remove: vec![],
         }],
@@ -241,10 +251,7 @@ fn signed_lifecycle_replays_bootstrap_ownership_failures_and_native_proofs() {
     assert_eq!(producer.committed_nonce(bob).unwrap(), 1);
     assert_eq!(entity(&producer, &key).unwrap().owner, *bob.as_bytes());
     assert_eq!(entity(&producer, &key).unwrap().creator, *alice.as_bytes());
-    assert_eq!(
-        entity(&producer, &key).unwrap().payload,
-        b"new owner update"
-    );
+    assert_eq!(body(&entity(&producer, &key).unwrap()), b"new owner update");
     assert_eq!(producer.submit(failed).unwrap()["status"], "included");
     let request = EqRequest {
         snapshot: SnapshotRef {
@@ -268,7 +275,7 @@ fn signed_lifecycle_replays_bootstrap_ownership_failures_and_native_proofs() {
     };
     assert_eq!(page.rows.len(), 1);
     assert_eq!(
-        arkiv::project(&page.rows[0]).unwrap().payload,
+        body(&arkiv::project(&page.rows[0]).unwrap()),
         b"new owner update"
     );
     producer.produce().unwrap();
@@ -343,7 +350,7 @@ fn multi_operation_failure_rolls_back_entity_nonce_but_consumes_transaction_nonc
     producer.produce().unwrap();
     full.import(producer.block(4).unwrap()).unwrap();
     assert_eq!(
-        entity(&producer, &rolled_back_key).unwrap().payload,
+        body(&entity(&producer, &rolled_back_key).unwrap()),
         b"retained"
     );
     assert!(entity(&producer, &entity_key(2, 3, 12)).is_none());
@@ -450,7 +457,7 @@ fn reference_only_engine_envelope_excludes_calldata_and_preserves_intended_entit
             .any(|slice| slice == sentinel)
     );
     assert_eq!(
-        entity(&producer, &entity_key(2, 0, 10)).unwrap().payload,
+        body(&entity(&producer, &entity_key(2, 0, 10)).unwrap()),
         sentinel
     );
     // Exact closed decode of the host packet proves its contents, instead of a
@@ -573,7 +580,7 @@ fn included_budget_failure_consumes_nonce_before_the_same_block_successor() {
     assert_eq!(creation_nonce(&producer, signer(2).address()), 1);
     assert!(entity(&producer, &entity_key(2, 0, 10)).is_none());
     assert_eq!(
-        entity(&producer, &entity_key(2, 0, 11)).unwrap().payload,
+        body(&entity(&producer, &entity_key(2, 0, 11)).unwrap()),
         b"following failed transaction"
     );
     let mut full = memory(false);

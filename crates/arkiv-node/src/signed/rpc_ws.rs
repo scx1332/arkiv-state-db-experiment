@@ -18,6 +18,9 @@ const RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const SUBSCRIPTIONS: usize = 16;
 const BATCH: usize = 32;
 const MAX_LAG: u64 = 128;
+/// JSON-RPC code of a refused `eth_subscribe` past the per-connection cap;
+/// outside the SDK's query table (-32001 to -32006).
+pub const SUBSCRIPTION_LIMIT_CODE: i64 = -32011;
 static CONNECTIONS: Semaphore = Semaphore::const_new(16);
 
 pub async fn upgrade(State(rt): State<Shared>, ws: WebSocketUpgrade) -> Response {
@@ -89,7 +92,7 @@ async fn dispatch(
         return json!({"jsonrpc":"2.0","id":id,"result":subscriptions.remove(params[0].as_str().unwrap()).is_some()});
     }
     if subscriptions.len() >= SUBSCRIPTIONS {
-        return failure(id, -32005, "Subscription limit exceeded");
+        return failure(id, SUBSCRIPTION_LIMIT_CODE, "Subscription limit exceeded");
     }
     let filter = match params.first().and_then(Value::as_str) {
         Some("newHeads") if params.len() == 1 => None,
@@ -350,7 +353,7 @@ mod tests {
             &mut serial,
         )
         .await;
-        assert_eq!(result["error"]["code"], -32005);
+        assert_eq!(result["error"]["code"], SUBSCRIPTION_LIMIT_CODE);
         for expected in [true, false] {
             let result = dispatch(
                 &rt,

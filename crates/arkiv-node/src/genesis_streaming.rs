@@ -25,7 +25,8 @@ fn err(e: impl std::fmt::Debug) -> String {
 }
 pub const STREAM_DOMAIN: &str = "arkiv/prefill-stream/v2";
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
-pub const MAX_USER_ATTRIBUTES: u32 = 55;
+/// The most user attributes of one row, as in a live create.
+pub const MAX_USER_ATTRIBUTES: u32 = crate::genesis_bundle::MAX_ROW_ATTRIBUTES;
 pub const MAX_ENTITIES: u64 = 100_915_200;
 pub const MAX_CANONICAL_BYTES: u64 = 1 << 40;
 pub const MAX_STORAGE_UNITS: u64 = 1 << 50;
@@ -116,7 +117,9 @@ impl<R: Read> StreamReader<R> {
         validate_limits(limits)?;
         let mut header = [0u8; 20];
         reader.read_exact(&mut header).map_err(err)?;
-        if &header[..8] != b"ARKPFL02" || header[8..12] != 2u32.to_be_bytes() {
+        if &header[..8] != b"ARKPFL02"
+            || header[8..12] != crate::genesis_bundle::ROW_CODEC.to_be_bytes()
+        {
             return Err("invalid streaming prefill header".into());
         }
         let rows = u64::from_be_bytes(header[12..20].try_into().unwrap());
@@ -148,7 +151,9 @@ impl<R: Read> StreamReader<R> {
         let mut length = [0u8; 4];
         self.reader.read_exact(&mut length).map_err(err)?;
         let length_usize = u32::from_be_bytes(length) as usize;
-        if !(65..=MAX_FRAME_BYTES).contains(&length_usize) {
+        if !(<PrefillEntity as arkiv_db::Decode>::MIN_ENCODED_LEN..=MAX_FRAME_BYTES)
+            .contains(&length_usize)
+        {
             return Err("invalid streaming prefill frame length".into());
         }
         let next_bytes = self
@@ -213,12 +218,11 @@ fn validate_row(row: &PrefillEntity, permanent: bool) -> Result<()> {
     }
     if row.attributes.len() > MAX_USER_ATTRIBUTES as usize
         || row.attributes.windows(2).any(|w| w[0].0 >= w[1].0)
-        || row
-            .attributes
-            .iter()
-            .any(|(name, value)| name.as_str().starts_with('$') || value.encoded_len() > 128 * 1024)
-        || row.payload.len() > 128 * 1024
-        || row.content_type.len() > 128 * 1024
+        || row.attributes.iter().any(|(name, cell)| {
+            name.as_str().starts_with('$')
+                || cell.value.encoded_len() > crate::arkiv::MAX_BYTES_LENGTH
+        })
+        || crate::arkiv::entity_bytes(&row.attributes) > crate::arkiv::MAX_ENTITY_BYTES
         || row.flags & !3 != 0
         || row.expires_at_height == 0
     {
@@ -601,7 +605,7 @@ mod tests {
     use super::*;
     use crate::accounts;
     use crate::signed::protocol::{SignedLimits, default_native_genesis};
-    use arkiv_db::{CellName, OwnerId, Value};
+    use arkiv_db::{Cell, CellName, OwnerId, Value};
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     struct Temp(std::path::PathBuf);
@@ -643,10 +647,26 @@ mod tests {
             salt: n as u128,
             expires_at_height: 100 + n / 16,
             flags: 0,
-            content_type: "text/plain".into(),
-            payload: b"hello".to_vec(),
-            attributes: vec![(CellName::new("label").unwrap(), Value::str("hello"))],
+            attributes: vec![
+                (
+                    CellName::new("body").unwrap(),
+                    Cell::field(Value::bytes(b"hello")),
+                ),
+                (
+                    CellName::new("label").unwrap(),
+                    Cell::attribute(Value::str("hello")),
+                ),
+            ],
         }
+    }
+    /// The same row with one byte of its unindexed `body` changed.
+    fn flip_body(row: &mut PrefillEntity) {
+        let Value::Bytes(body) = &row.attributes[0].1.value else {
+            panic!("body")
+        };
+        let mut body = body.to_vec();
+        body[0] ^= 1;
+        row.attributes[0].1 = Cell::field(Value::bytes(&body));
     }
     fn limits() -> PrefillLimits {
         PrefillLimits {
@@ -657,7 +677,7 @@ mod tests {
     }
     fn stream(rows: &[PrefillEntity]) -> Vec<u8> {
         let mut b = b"ARKPFL02".to_vec();
-        b.extend_from_slice(&2u32.to_be_bytes());
+        b.extend_from_slice(&crate::genesis_bundle::ROW_CODEC.to_be_bytes());
         b.extend_from_slice(&(rows.len() as u64).to_be_bytes());
         for row in rows {
             let f = encode(row);
@@ -905,8 +925,9 @@ mod tests {
             build_bundle(&finite_base, &finite_path, &tmp.0.join("v2"), [2; 20], 4096).unwrap();
         assert_eq!(report["version"], 2);
         assert!(report.get("permanentPrefill").is_none());
-        // Pinned from `genesis stream-build` of the pre-permanence binary
-        // (9af427f) on these same base and stream bytes: version 2 is unchanged.
+        // Pinned at the user-defined-columns row codec (protocol 2) on these
+        // same base and stream bytes, so any later change to how a version-2
+        // launch is built shows up here.
         assert_eq!(
             (
                 report["genesisHash"].as_str(),
@@ -915,10 +936,10 @@ mod tests {
                 report["storageUnits"].as_str()
             ),
             (
-                Some("0xc0795b49219ed0402b55c9336d910c428590040fdc6a8aed3bd12ada79018c8a"),
-                Some("0x10e9279a1cae020d9a9970510bdad08a6c32bbe2ca4a904880cfc3b73d7b2f80"),
-                Some("656000000000"),
-                Some("14056")
+                Some("0xc06237facbac9114169341c62a1c6586e5ecc136ca5aec2e6e0d7b9c84191659"),
+                Some("0x592448eaf0dbb8695a272c7ece687a4025cf92027d546e9886ac0023fee34dd4"),
+                Some("600000000000"),
+                Some("12888")
             )
         );
         assert_eq!(open("v2").prefill.unwrap().version, 2);
@@ -989,7 +1010,7 @@ mod tests {
             let verified = VerifiedStream::open(&g, &path).unwrap();
             let changed = if mutation {
                 let mut rows = rows.clone();
-                rows[1].payload[0] ^= 1;
+                flip_body(&mut rows[1]);
                 stream(&rows)
             } else {
                 valid[..valid.len() - 1].to_vec()
@@ -1055,7 +1076,7 @@ mod tests {
         drop(engine);
         let verified = VerifiedStream::open(&g, &path).unwrap();
         let mut changed_rows = rows.clone();
-        changed_rows[0].payload[0] ^= 1;
+        flip_body(&mut changed_rows[0]);
         fs::write(&path, stream(&changed_rows)).unwrap();
         // The post-install audit must also reject an in-place same-size change
         // after bulk construction, while a retained path is used by the serving layer.
@@ -1106,21 +1127,64 @@ mod tests {
         }
     }
     #[test]
-    fn v2_attributes_do_not_weaken_v1() {
-        let mut entity = row(0);
-        entity.attributes = (0..29)
-            .map(|i| {
-                (
-                    CellName::new(&format!("attr{i:02}")).unwrap(),
-                    Value::str("x"),
-                )
-            })
-            .collect();
-        assert!(crate::genesis_bundle::encode_stream(&[entity.clone()]).is_err());
-        let bytes = stream(&[entity]);
+    fn both_framings_admit_exactly_a_creates_attribute_count() {
+        let with = |n: usize| {
+            let mut entity = row(0);
+            entity.attributes = (0..n)
+                .map(|i| {
+                    (
+                        CellName::new(&format!("attr{i:02}")).unwrap(),
+                        Cell::field(Value::str("x")),
+                    )
+                })
+                .collect();
+            entity
+        };
+        let full = with(crate::arkiv::MAX_ATTRIBUTES);
+        assert!(crate::genesis_bundle::encode_stream(std::slice::from_ref(&full)).is_ok());
+        let bytes = stream(&[full]);
         let mut r = StreamReader::new(bytes.as_slice(), limits()).unwrap();
-        assert_eq!(r.next_row().unwrap().unwrap().attributes.len(), 29);
+        assert_eq!(
+            r.next_row().unwrap().unwrap().attributes.len(),
+            crate::arkiv::MAX_ATTRIBUTES
+        );
         r.finish().unwrap();
+        let over = with(crate::arkiv::MAX_ATTRIBUTES + 1);
+        assert!(crate::genesis_bundle::encode_stream(std::slice::from_ref(&over)).is_err());
+        let bytes = stream(&[over]);
+        let mut r = StreamReader::new(bytes.as_slice(), limits()).unwrap();
+        assert!(r.next_row().is_err());
+    }
+    #[test]
+    fn old_payload_streams_and_flagged_bytes_are_refused() {
+        // The payload-era codec in the header is refused outright.
+        let mut old = stream(&[row(0)]);
+        old[8..12].copy_from_slice(&2u32.to_be_bytes());
+        assert!(StreamReader::new(old.as_slice(), limits()).is_err());
+        // An unknown cell kind does not decode.
+        let mut bad_kind = stream(&[row(0)]);
+        let body = bad_kind
+            .windows(4)
+            .position(|w| w == b"body")
+            .expect("body name");
+        bad_kind[body + 4] = 3;
+        let mut r = StreamReader::new(bad_kind.as_slice(), limits()).unwrap();
+        assert!(r.next_row().is_err());
+        // The entity bytes cap applies to a row as to a live create.
+        let mut big = row(0);
+        big.attributes = vec![
+            (
+                CellName::new("a").unwrap(),
+                Cell::field(Value::bytes(&vec![0; 64 * 1024])),
+            ),
+            (
+                CellName::new("b").unwrap(),
+                Cell::field(Value::bytes(&vec![0; 64 * 1024 + 1])),
+            ),
+        ];
+        let bytes = stream(&[big]);
+        let mut r = StreamReader::new(bytes.as_slice(), limits()).unwrap();
+        assert!(r.next_row().is_err());
     }
     #[test]
     fn bulk_matches_v1_oracle_across_progress_settings_and_reopen() {
@@ -1315,7 +1379,19 @@ mod tests {
                 r.attributes = values
                     .iter()
                     .enumerate()
-                    .map(|(i, v)| (CellName::new(&format!("attr{i}")).unwrap(), v.clone()))
+                    .map(|(i, v)| {
+                        // Alternate indexed and unindexed, and add a user `bytes`.
+                        let cell = if (i + n as usize).is_multiple_of(2) {
+                            Cell::attribute(v.clone())
+                        } else {
+                            Cell::field(v.clone())
+                        };
+                        (CellName::new(&format!("attr{i}")).unwrap(), cell)
+                    })
+                    .chain([(
+                        CellName::new("blob").unwrap(),
+                        Cell::field(Value::bytes(&[n as u8; 3])),
+                    )])
                     .collect();
                 rows.push(r);
             }
@@ -1352,7 +1428,6 @@ mod tests {
                 assert_eq!(record.id.ordinal(), i as u64 + 1);
                 let projected = crate::arkiv::project(&record).unwrap();
                 assert_eq!(projected.attributes, r.attributes);
-                assert_eq!(projected.payload, r.payload);
             }
             for creator in [[2; 20], [3; 20]] {
                 assert_eq!(
@@ -1380,31 +1455,31 @@ mod tests {
     fn bulk_rejects_protocol_engine_capacity_and_funding_violations() {
         let tmp = Temp::new();
         let mut cases = Vec::new();
-        for (name, value) in [
-            ("bad:name", Value::U64(1)),
-            ("and", Value::U64(1)),
-            ("okay", Value::I64(1)),
-            ("okay", Value::bytes(b"not an attribute")),
-            ("okay", Value::str("control\n")),
+        for (name, cell) in [
+            ("bad:name", Cell::attribute(Value::U64(1))),
+            ("and", Cell::attribute(Value::U64(1))),
+            ("okay", Cell::attribute(Value::I64(1))),
+            // User bytes are stored, never indexed.
+            ("okay", Cell::attribute(Value::bytes(b"never indexed"))),
+            ("okay", Cell::field(Value::str("control\n"))),
+            ("okay", Cell::field(Value::str(&"a".repeat(129)))),
         ] {
             let mut r = row(0);
-            r.attributes = vec![(CellName::new(name).unwrap(), value)];
+            r.attributes = vec![(CellName::new(name).unwrap(), cell)];
             cases.push((base(), vec![r]));
         }
+        // A full create needs every system cell beside its 32 attributes.
         let mut r = row(0);
-        r.content_type = "a".repeat(129);
-        cases.push((base(), vec![r]));
-        let mut r = row(0);
-        r.attributes = (0..31)
+        r.attributes = (0..crate::arkiv::MAX_ATTRIBUTES)
             .map(|i| {
                 (
                     CellName::new(&format!("attr{i:02}")).unwrap(),
-                    Value::U64(1),
+                    Cell::attribute(Value::U64(1)),
                 )
             })
             .collect();
         let mut g = base();
-        g.genesis.limits.max_cells = 64;
+        g.genesis.limits.max_cells = crate::arkiv::MIN_ENTITY_CELLS - 1;
         cases.push((g, vec![r]));
         let mut g = base();
         g.genesis.limits.max_cells = 8;
@@ -1422,7 +1497,10 @@ mod tests {
         g.genesis.params.max_lifetime = u64::MAX;
         let mut r = row(0);
         r.expires_at_height = u64::MAX - 1;
-        r.payload = vec![5; 128 * 1024];
+        r.attributes = vec![(
+            CellName::new("body").unwrap(),
+            Cell::field(Value::bytes(&vec![5; 128 * 1024])),
+        )];
         cases.push((g, vec![r]));
         for (i, (g, rows)) in cases.into_iter().enumerate() {
             let path = tmp.0.join(format!("{i}.bin"));

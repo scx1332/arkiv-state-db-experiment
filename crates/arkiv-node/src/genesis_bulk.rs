@@ -11,8 +11,7 @@ use crate::{
 };
 use alloy_primitives::U256;
 use arkiv_db::{
-    CellName, NamespaceDescriptor, NamespaceName, OwnerId, RecordKey, Revision, Value,
-    decode_exact, digest,
+    NamespaceDescriptor, NamespaceName, OwnerId, RecordKey, Revision, decode_exact, digest,
     durable::{BulkGenesisBuilder, DurableEngine, EngineGenesis, Initialization, Options},
     encode,
 };
@@ -225,15 +224,6 @@ pub(crate) fn build_file(
             row.create_nonce,
             row.salt,
         );
-        let mut attrs = row.attributes;
-        attrs.push((
-            CellName::new("$payload").map_err(debug_err)?,
-            Value::bytes(&row.payload),
-        ));
-        attrs.push((
-            CellName::new("$contentType").map_err(debug_err)?,
-            Value::str(&row.content_type),
-        ));
         let context = arkiv::ArkivExecutionContext {
             caller: row.creator,
             block_height: 0,
@@ -250,7 +240,7 @@ pub(crate) fn build_file(
         let op = arkiv::ArkivOperation::Create {
             salt: row.salt,
             flags: row.flags,
-            attributes: attrs,
+            attributes: row.attributes,
             expiry,
         };
         op.validate().map_err(debug_err)?;

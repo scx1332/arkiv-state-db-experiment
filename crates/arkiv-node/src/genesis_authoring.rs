@@ -9,7 +9,7 @@ use std::{
 };
 
 use alloy_primitives::U256;
-use arkiv_db::{CellName, Limits, OwnerId, PriceSchedule, Value, decode_exact, encode};
+use arkiv_db::{Cell, CellName, Limits, OwnerId, PriceSchedule, Value, decode_exact, encode};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rustix::fs::{self, AtFlags, Mode, OFlags, RenameFlags};
 use serde::{
@@ -31,7 +31,12 @@ const DOCUMENT_CAP: usize = 1024 * 1024;
 const INPUT_CAP: usize = 8 * DOCUMENT_CAP;
 const ROW_CAP: usize = 256;
 const LOCK_FILE: &str = "genesis.lock.toml";
-const PRESET_ID: &str = "arkiv-entity-v2/glm-v2@1";
+const PRESET_ID: &str = "arkiv-entity-v3/glm-v2@1";
+/// The entity rules of the profile: user-defined columns.
+const ENTITY_RULES: &str = "arkiv-entity-v3";
+/// Entity dataset formats; v1 (payload and content type) is refused.
+const TOML_DATASET: &str = "arkiv-entities-toml-v2";
+const JSONL_DATASET: &str = "arkiv-entities-jsonl-v2";
 const PRESET: &str =
     include_str!("../../../docs/examples/genesis-bundle/profiles/fixed-glm-v2.toml");
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -145,27 +150,29 @@ struct Entity {
     salt: String,
     expires_at_height: String,
     flags: u8,
-    content_type: String,
-    payload_text: Option<String>,
-    payload_base64: Option<String>,
-    payload: Option<FileRef>,
     #[serde(default)]
-    attributes: BTreeMap<String, TypedValue>,
+    attributes: BTreeMap<String, Attribute>,
 }
+/// One user attribute: exactly one typed value and an explicit `indexed`.
+/// `bytes` is Base64; `bytes_text` (exact UTF-8) and `bytes_file` (a pinned
+/// source file) are other spellings of a `bytes` value. `bytes` is never
+/// indexed.
 #[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum TypedValue {
-    Bool(bool),
-    I32(String),
-    I64(String),
-    U64(String),
-    U256(String),
-    Dec(String),
-    Str(String),
-    Bytes(String),
-    Bytes32(String),
-    Addr(String),
-    Key(String),
+#[serde(deny_unknown_fields)]
+struct Attribute {
+    indexed: bool,
+    bool: Option<bool>,
+    i32: Option<String>,
+    u64: Option<String>,
+    u256: Option<String>,
+    dec: Option<String>,
+    str: Option<String>,
+    bytes: Option<String>,
+    bytes_text: Option<String>,
+    bytes_file: Option<FileRef>,
+    bytes32: Option<String>,
+    addr: Option<String>,
+    key: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -364,19 +371,57 @@ fn decimal_units(s: &str) -> Result<[u8; 32]> {
     }
     Ok(units.to_be_bytes())
 }
-fn value(v: TypedValue) -> Result<Value> {
-    Ok(match v {
-        TypedValue::Bool(v) => Value::Bool(v),
-        TypedValue::I32(v) => Value::I32(signed_number(&v)?),
-        TypedValue::I64(v) => Value::I64(signed_number(&v)?),
-        TypedValue::U64(v) => Value::U64(number(&v)?),
-        TypedValue::U256(v) => Value::U256(uint256(&v)?.to_be_bytes()),
-        TypedValue::Dec(v) => Value::Dec(decimal_units(&v)?),
-        TypedValue::Str(v) => Value::str(&v),
-        TypedValue::Bytes(v) => Value::bytes(&base64_bytes(&v)?),
-        TypedValue::Bytes32(v) => Value::Bytes32(fixed_hex(&v)?),
-        TypedValue::Addr(v) => Value::Addr(fixed_hex(&v)?),
-        TypedValue::Key(v) => Value::Key(fixed_hex(&v)?),
+fn cell(a: Attribute, inputs: &mut Inputs) -> Result<Cell> {
+    let mut values = Vec::new();
+    if let Some(v) = a.bool {
+        values.push(Value::Bool(v));
+    }
+    if let Some(v) = a.i32 {
+        values.push(Value::I32(signed_number(&v)?));
+    }
+    if let Some(v) = a.u64 {
+        values.push(Value::U64(number(&v)?));
+    }
+    if let Some(v) = a.u256 {
+        values.push(Value::U256(uint256(&v)?.to_be_bytes()));
+    }
+    if let Some(v) = a.dec {
+        values.push(Value::Dec(decimal_units(&v)?));
+    }
+    if let Some(v) = a.str {
+        values.push(Value::str(&v));
+    }
+    if let Some(v) = a.bytes {
+        values.push(Value::bytes(&base64_bytes(&v)?));
+    }
+    if let Some(v) = a.bytes_text {
+        values.push(Value::bytes(v.as_bytes()));
+    }
+    if let Some(f) = a.bytes_file {
+        values.push(Value::bytes(&inputs.read(
+            &f.path,
+            f.bytes,
+            f.sha256.as_deref(),
+        )?));
+    }
+    if let Some(v) = a.bytes32 {
+        values.push(Value::Bytes32(fixed_hex(&v)?));
+    }
+    if let Some(v) = a.addr {
+        values.push(Value::Addr(fixed_hex(&v)?));
+    }
+    if let Some(v) = a.key {
+        values.push(Value::Key(fixed_hex(&v)?));
+    }
+    let [value] = <[Value; 1]>::try_from(values)
+        .map_err(|_| "each attribute requires exactly one typed value")?;
+    if a.indexed && matches!(value, Value::Bytes(_)) {
+        return Err("bytes attributes are stored, never indexed: use indexed = false".into());
+    }
+    Ok(if a.indexed {
+        Cell::attribute(value)
+    } else {
+        Cell::field(value)
     })
 }
 fn address(s: &str, aliases: &BTreeMap<String, [u8; 20]>) -> Result<[u8; 20]> {
@@ -469,7 +514,9 @@ fn no_multiline(text: &str) -> Result<()> {
             }
             None if matches!(bytes[i], b'"' | b'\'') => {
                 if bytes.get(i + 1) == Some(&bytes[i]) && bytes.get(i + 2) == Some(&bytes[i]) {
-                    return Err("multiline TOML strings are unsupported; use a payload file".into());
+                    return Err(
+                        "multiline TOML strings are unsupported; use a bytes_file reference".into(),
+                    );
                 }
                 quote = Some(bytes[i]);
             }
@@ -669,7 +716,7 @@ fn profile_native(profile: &Profile, chain: &Chain) -> Result<Genesis> {
         "arkiv-genesis-profile-v1",
         "profile schema",
     )?;
-    expect(&profile.entity_rules, "arkiv-entity-v2", "entity rules")?;
+    expect(&profile.entity_rules, ENTITY_RULES, "entity rules")?;
     expect(&profile.account_rules, "glm-v2", "account rules")?;
     expect(&profile.pricing.rent_rule, "glm-rent-v1", "rent rule")?;
     if profile.state_layout != arkiv_db::LAYOUT_VERSION
@@ -725,27 +772,22 @@ fn normalize_entity(
     if let Some(label) = &e.label {
         identifier(label)?;
     }
-    let payload = match (e.payload_text, e.payload_base64, e.payload) {
-        (Some(text), None, None) => text.into_bytes(),
-        (None, Some(b64), None) => base64_bytes(&b64)?,
-        (None, None, Some(f)) => inputs.read(&f.path, f.bytes, f.sha256.as_deref())?,
-        _ => return Err(
-            "each entity requires exactly one payload_text, payload_base64, or payload reference"
-                .into(),
-        ),
-    };
-    if payload.len() > 128 * 1024 || e.content_type.len() > 128 * 1024 || e.attributes.len() > 23 {
-        return Err("entity exceeds payload, content type, or attribute count cap".into());
+    if e.attributes.len() > crate::arkiv::MAX_ATTRIBUTES {
+        return Err("entity exceeds the 32-attribute cap".into());
     }
     let mut attributes = Vec::with_capacity(e.attributes.len());
-    for (name, v) in e.attributes {
+    for (name, a) in e.attributes {
         if name.starts_with('$') {
             return Err("system attributes cannot be authored".into());
         }
+        let cell = cell(a, inputs).map_err(|e| format!("attribute {}: {e}", err(&name)))?;
         attributes.push((
             CellName::new(&name).map_err(|e| format!("invalid attribute {}: {e:?}", err(&name)))?,
-            value(v)?,
+            cell,
         ));
+    }
+    if crate::arkiv::entity_bytes(&attributes) > crate::arkiv::MAX_ENTITY_BYTES {
+        return Err("entity bytes attributes exceed 128 KiB together".into());
     }
     Ok(PrefillEntity {
         creator: address(&e.creator, aliases)?,
@@ -753,8 +795,6 @@ fn normalize_entity(
         salt: number(&e.salt)?,
         expires_at_height: number(&e.expires_at_height)?,
         flags: e.flags,
-        content_type: e.content_type,
-        payload,
         attributes,
     })
 }
@@ -886,12 +926,12 @@ fn compile(path: &Path) -> Result<Compiled> {
         }
         let bytes = inputs.read(&source.path, source.bytes, source.sha256.as_deref())?;
         match source.format.as_str() {
-            "arkiv-entities-toml-v1" => {
+            TOML_DATASET => {
                 let doc: EntityDocument = parse_toml(&bytes, &source.path)?;
-                expect(&doc.schema, "arkiv-entities-toml-v1", "dataset schema")?;
+                expect(&doc.schema, TOML_DATASET, "dataset schema")?;
                 rows.extend(doc.entity);
             }
-            "arkiv-entities-jsonl-v1" => {
+            JSONL_DATASET => {
                 let text = utf8(&bytes)?;
                 for (i, line) in text.lines().enumerate() {
                     if line.is_empty() {
@@ -1222,7 +1262,7 @@ mod tests {
             let dataset = source["prefill"]["dataset"].as_array_mut().unwrap()[0]
                 .as_table_mut()
                 .unwrap();
-            dataset.insert("format".into(), "arkiv-entities-jsonl-v1".into());
+            dataset.insert("format".into(), JSONL_DATASET.into());
             dataset.insert("path".into(), "datasets/catalog.jsonl".into());
             dataset.remove("bytes");
             dataset.remove("sha256");
@@ -1239,7 +1279,7 @@ mod tests {
     fn compiled_preset_expansion_is_frozen() {
         assert_eq!(
             sha256(PRESET.as_bytes()),
-            "fa7abfe2e56853b6f4c22f2c3e8f1a3b9fa575002ee7b475a1a228795d716b8a"
+            "963562f37cfb9bf9646a7ed9bf89640dd032328c3117940d3b8855a7836e1d21"
         );
     }
 
@@ -1381,27 +1421,67 @@ mod tests {
     }
 
     #[test]
-    fn inline_payload_encodings_normalize_to_exact_bytes() {
+    fn inline_bytes_encodings_normalize_to_exact_bytes() {
         let fixture = Fixture::new();
         let original = compile(&fixture.inline()).unwrap();
         fixture.change(
             &fixture.inline(),
-            "payload_text = \"Welcome to Arkiv.\"",
-            &format!(
-                "payload_base64 = {:?}",
-                STANDARD.encode(b"Welcome to Arkiv.")
-            ),
+            "bytes_text = \"Welcome to Arkiv.\"",
+            &format!("bytes = {:?}", STANDARD.encode(b"Welcome to Arkiv.")),
         );
         assert_eq!(original.stream, compile(&fixture.inline()).unwrap().stream);
         fixture.change(
             &fixture.inline(),
-            &format!(
-                "payload_base64 = {:?}",
-                STANDARD.encode(b"Welcome to Arkiv.")
-            ),
-            "payload_base64 = \"V2VsY29tZSB0byBBcmtpdi4\"",
+            &format!("bytes = {:?}", STANDARD.encode(b"Welcome to Arkiv.")),
+            "bytes = \"V2VsY29tZSB0byBBcmtpdi4\"",
         );
         assert!(compile(&fixture.inline()).is_err());
+    }
+
+    #[test]
+    fn attributes_carry_their_indexed_flag_into_the_stream() {
+        let fixture = Fixture::new();
+        let rows =
+            genesis_bundle::decode_stream(&compile(&fixture.inline()).unwrap().stream).unwrap();
+        assert_eq!(
+            rows[0].attributes,
+            vec![
+                (
+                    CellName::new("body").unwrap(),
+                    Cell::field(Value::bytes(b"Welcome to Arkiv."))
+                ),
+                (
+                    CellName::new("title").unwrap(),
+                    Cell::attribute(Value::str("Welcome"))
+                ),
+            ]
+        );
+        // The flag is part of the entity, and so of the chain's identity.
+        let indexed = compile(&fixture.inline()).unwrap();
+        fixture.change(
+            &fixture.inline(),
+            "{ str = \"Welcome\", indexed = true }",
+            "{ str = \"Welcome\", indexed = false }",
+        );
+        assert_ne!(
+            encode(&indexed.genesis),
+            encode(&compile(&fixture.inline()).unwrap().genesis)
+        );
+        // `bytes` is never indexed, and `indexed` is required.
+        for (from, to) in [
+            (
+                "{ bytes_text = \"Welcome to Arkiv.\", indexed = false }",
+                "{ bytes_text = \"Welcome to Arkiv.\", indexed = true }",
+            ),
+            (
+                "{ str = \"Welcome\", indexed = false }",
+                "{ str = \"Welcome\" }",
+            ),
+        ] {
+            fixture.change(&fixture.inline(), from, to);
+            assert!(compile(&fixture.inline()).is_err(), "accepted {to}");
+            fixture.change(&fixture.inline(), to, from);
+        }
     }
 
     #[test]
@@ -1415,20 +1495,26 @@ mod tests {
             ("salt = \"10\"", "salt = 10"),
             ("flags = 0", "flags = 0.0"),
             (
-                "payload_text = \"Welcome to Arkiv.\"",
-                "payload_text = \"\"\"Welcome to Arkiv.\"\"\"",
+                "bytes_text = \"Welcome to Arkiv.\"",
+                "bytes_text = \"\"\"Welcome to Arkiv.\"\"\"",
             ),
             (
-                "attributes.title = { str = \"Welcome\" }",
-                "attributes.title = { str = \"Welcome\", u64 = \"1\" }",
+                "attributes.title = { str = \"Welcome\", indexed = true }",
+                "attributes.title = { str = \"Welcome\", u64 = \"1\", indexed = true }",
             ),
             (
-                "attributes.title = { str = \"Welcome\" }",
-                "attributes.title = { str = \"Welcome\" }\nattributes.\"$owner\" = { addr = \"0x2222222222222222222222222222222222222222\" }",
+                "attributes.title = { str = \"Welcome\", indexed = true }",
+                "attributes.title = { str = \"Welcome\", indexed = true }\nattributes.\"$owner\" = { addr = \"0x2222222222222222222222222222222222222222\", indexed = true }",
             ),
             (
-                "payload_text = \"Welcome to Arkiv.\"",
-                "payload_text = \"Welcome to Arkiv.\"\npayload_base64 = \"\"",
+                "bytes_text = \"Welcome to Arkiv.\"",
+                "bytes_text = \"Welcome to Arkiv.\", bytes = \"\"",
+            ),
+            // The removed payload model is not a spelling of anything.
+            ("flags = 0", "flags = 0\ncontent_type = \"text/plain\""),
+            (
+                "flags = 0",
+                "flags = 0\npayload_text = \"Welcome to Arkiv.\"",
             ),
         ] {
             let fixture = Fixture::new();

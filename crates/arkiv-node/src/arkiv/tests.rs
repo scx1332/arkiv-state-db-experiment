@@ -1,5 +1,5 @@
 use super::*;
-use arkiv_db::{Engine, Limits, NamespaceName, OwnerId, PriceSchedule};
+use arkiv_db::{Engine, Limits, NamespaceName, OwnerId, PriceSchedule, Term};
 fn setup() -> (Engine, Branch, ArkivExecutionContext) {
     let engine = Engine::with_limits(
         PriceSchedule::FIXTURE,
@@ -38,7 +38,7 @@ fn create(flags: u8) -> ArkivOperation {
             expires_at: 10,
             min_lifetime: 0,
         },
-        attributes: vec![(name("score"), Value::I32(-1))],
+        attributes: vec![(name("score"), Cell::attribute(Value::I32(-1)))],
     }
 }
 fn key(c: &ArkivExecutionContext, nonce: u64) -> RecordKey {
@@ -67,8 +67,11 @@ fn lifecycle_is_committed_owner_authority() {
     let k = key(&c, 0);
     let original = read(&b, &k);
     assert_eq!(original.creator, [1; 20]);
-    assert_eq!(original.content_type, "");
-    assert!(original.payload.is_empty());
+    // No payload or content type: the entity holds exactly what was written.
+    assert_eq!(
+        original.attributes,
+        vec![(name("score"), Cell::attribute(Value::I32(-1)))]
+    );
     c.block_height = 2;
     applied(run(
         &mut b,
@@ -199,7 +202,7 @@ fn authority_and_projection_reject_corrupt_system_cells() {
     let (_e, mut b, c) = setup();
     let mut op = create(0);
     if let ArkivOperation::Create { attributes, .. } = &mut op {
-        attributes.push((name("$owner"), Value::Addr([2; 20])))
+        attributes.push((name("$owner"), Cell::attribute(Value::Addr([2; 20]))))
     }
     assert_eq!(run(&mut b, &c, &op), rejected(ArkivFault::Name));
     applied(run(&mut b, &c, &create(0)));
@@ -335,44 +338,374 @@ fn sdk_generated_key_and_decimal_fixtures() {
     }
 }
 #[test]
-fn system_tombstones_restore_empty_and_scalar_types_stay_distinct() {
-    let (_e, mut b, c) = setup();
-    applied(run(&mut b, &c, &create(0)));
-    let k = key(&c, 0);
-    applied(run(
-        &mut b,
-        &c,
-        &ArkivOperation::Patch {
-            key: k.clone(),
-            set: vec![
-                (name("$payload"), Value::bytes(&[1, 2])),
-                (name("$contentType"), Value::str("text/plain")),
-                (name("ref"), Value::Key([99; 32])),
-            ],
-            remove: vec![],
-        },
-    ));
-    applied(run(
-        &mut b,
-        &c,
-        &ArkivOperation::Patch {
-            key: k.clone(),
-            set: vec![],
-            remove: vec![name("$payload"), name("$contentType")],
-        },
-    ));
-    let p = read(&b, &k);
-    assert!(p.payload.is_empty());
-    assert_eq!(p.content_type, "");
-    assert!(
-        p.attributes
-            .iter()
-            .any(|(n, v)| n.as_str() == "ref" && *v == Value::Key([99; 32]))
-    );
+fn scalar_types_stay_distinct() {
     assert!(ArkivTypeId::of(&Value::I64(1)).is_err());
     assert_ne!(
         ArkivTypeId::of(&Value::Bytes32([0; 32])),
         ArkivTypeId::of(&Value::Key([0; 32]))
+    );
+}
+
+fn triple(name_text: &str, type_id: u8, value: Vec<u8>) -> AbiAttribute {
+    let mut n = [0; 32];
+    n[..name_text.len()].copy_from_slice(name_text.as_bytes());
+    AbiAttribute {
+        name: n,
+        type_id,
+        value,
+    }
+}
+fn every_type() -> [Value; 10] {
+    [
+        Value::Bool(true),
+        Value::I32(i32::MIN),
+        Value::U64(u64::MAX),
+        Value::U256([255; 32]),
+        Value::Dec([255; 32]),
+        Value::Bytes32([3; 32]),
+        Value::bytes(&[0, 255]),
+        Value::str("é"),
+        Value::Addr([4; 20]),
+        Value::Key([5; 32]),
+    ]
+}
+
+#[test]
+fn every_type_id_decodes_with_and_without_the_indexed_flag() {
+    for value in every_type() {
+        let base = ArkivTypeId::of(&value).unwrap() as u8;
+        let abi = encode_abi_value(&value).unwrap();
+        for patch in [false, true] {
+            let unindexed =
+                decode_protocol_triples(&[triple("a", base, abi.clone())], patch).unwrap();
+            assert_eq!(
+                unindexed,
+                vec![(name("a"), Some(Cell::field(value.clone())))],
+                "{value:?}"
+            );
+            let flagged =
+                decode_protocol_triples(&[triple("a", base | INDEXED_FLAG, abi.clone())], patch);
+            if matches!(value, Value::Bytes(_)) {
+                // 0x87: bytes are stored, never indexed.
+                assert_eq!(flagged, Err(ArkivFault::Value));
+            } else {
+                assert_eq!(
+                    flagged.unwrap(),
+                    vec![(name("a"), Some(Cell::attribute(value.clone())))],
+                    "{value:?}"
+                );
+            }
+        }
+        // The stored cell encodes back to the same triple, flag included.
+        for cell in [Cell::field(value.clone()), Cell::attribute(value.clone())] {
+            if cell.is_attribute() && matches!(value, Value::Bytes(_)) {
+                continue;
+            }
+            let encoded = encode_protocol_triple(&name("a"), &cell).unwrap();
+            assert_eq!(encoded.type_id, type_id(&cell).unwrap());
+            assert_eq!(encoded.type_id & INDEXED_FLAG != 0, cell.is_attribute());
+            assert_eq!(
+                decode_protocol_triples(&[encoded], false).unwrap(),
+                vec![(name("a"), Some(cell))]
+            );
+        }
+    }
+    assert_eq!(
+        decode_protocol_triples(&[triple("a", 0x87, vec![1])], false),
+        Err(ArkivFault::Value)
+    );
+    // Types 11..=127, flagged or not, are unknown.
+    for unknown in [11, 0x7f, 0x8b, 0xff] {
+        assert_eq!(
+            decode_protocol_triples(&[triple("a", unknown, vec![0; 32])], true),
+            Err(ArkivFault::Value)
+        );
+    }
+}
+
+#[test]
+fn tombstones_are_unflagged_empty_and_patch_only() {
+    assert_eq!(
+        decode_protocol_triples(&[triple("a", 0, vec![])], true).unwrap(),
+        vec![(name("a"), None)]
+    );
+    for (type_id, value, patch) in [
+        (0, vec![], false),
+        (0, vec![0], true),
+        // A flagged tombstone carries no type, so it is not a tombstone.
+        (INDEXED_FLAG, vec![], true),
+        (INDEXED_FLAG, vec![], false),
+    ] {
+        assert_eq!(
+            decode_protocol_triples(&[triple("a", type_id, value)], patch),
+            Err(ArkivFault::Value),
+            "{type_id:#x}"
+        );
+    }
+}
+
+#[test]
+fn payload_and_content_type_are_gone_from_every_write_path() {
+    // Not protocol names on the wire, whatever their type.
+    for (n, type_id, value) in [
+        ("$payload", 7, vec![1, 2, 3]),
+        ("$contentType", 8, b"text/plain".to_vec()),
+        ("$contentType", 0x88, b"text/plain".to_vec()),
+    ] {
+        assert_eq!(
+            decode_protocol_triples(&[triple(n, type_id, value)], false),
+            Err(ArkivFault::Name)
+        );
+        assert_eq!(
+            decode_protocol_triples(&[triple(n, 0, vec![])], true),
+            Err(ArkivFault::Name)
+        );
+    }
+    let (_e, mut b, c) = setup();
+    for (n, cell) in [
+        ("$payload", Cell::field(Value::bytes(&[1]))),
+        ("$contentType", Cell::attribute(Value::str("text/plain"))),
+        ("$contentType", Cell::field(Value::str("text/plain"))),
+    ] {
+        let op = ArkivOperation::Create {
+            salt: 1,
+            flags: 0,
+            expiry: Expiry {
+                expires_at: 10,
+                min_lifetime: 0,
+            },
+            attributes: vec![(name(n), cell)],
+        };
+        assert_eq!(op.validate(), Err(ArkivFault::Name));
+        assert_eq!(run(&mut b, &c, &op), rejected(ArkivFault::Name));
+    }
+    applied(run(&mut b, &c, &create(0)));
+    let k = key(&c, 0);
+    for removed in ["$payload", "$contentType"] {
+        let op = ArkivOperation::Patch {
+            key: k.clone(),
+            set: vec![],
+            remove: vec![name(removed)],
+        };
+        assert_eq!(run(&mut b, &c, &op), rejected(ArkivFault::Name));
+    }
+    let row = b
+        .try_get_record(
+            entity_namespace(),
+            &k,
+            &Projection::ALL,
+            Budget::unlimited(),
+        )
+        .unwrap()
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(row.cells.len(), SYSTEM_CELLS + 1);
+    assert!(
+        row.cells
+            .iter()
+            .all(|(n, _)| !matches!(n.as_str(), "$payload" | "$contentType"))
+    );
+}
+
+#[test]
+fn indexed_and_unindexed_attributes_are_attributes_and_fields() {
+    let (_e, mut b, c) = setup();
+    let attributes = vec![
+        (name("arkiv.schema"), Cell::attribute(Value::str("posts"))),
+        (name("body"), Cell::field(Value::bytes(&[1, 2, 3]))),
+        (name("score"), Cell::attribute(Value::U64(42))),
+        (name("title"), Cell::field(Value::str("hello"))),
+    ];
+    let op = ArkivOperation::Create {
+        salt: 7,
+        flags: 0,
+        expiry: Expiry {
+            expires_at: 10,
+            min_lifetime: 0,
+        },
+        attributes: attributes.clone(),
+    };
+    applied(run(&mut b, &c, &op));
+    let k = key(&c, 0);
+    assert_eq!(read(&b, &k).attributes, attributes);
+    // Only indexed cells reach the index: the unindexed str is not found.
+    let count = |b: &Branch, term: Term| {
+        b.try_count(
+            entity_namespace(),
+            &arkiv_db::Query::term(term),
+            Budget::unlimited(),
+        )
+        .unwrap()
+        .unwrap()
+        .value
+    };
+    assert_eq!(count(&b, Term::eq(name("score"), Value::U64(42))), 1);
+    assert_eq!(
+        count(&b, Term::eq(name("arkiv.schema"), Value::str("posts"))),
+        1
+    );
+    assert_eq!(count(&b, Term::eq(name("title"), Value::str("hello"))), 0);
+    // A user `bytes` value on a user name, but never indexed.
+    let mut indexed_bytes = op.clone();
+    if let ArkivOperation::Create { attributes, .. } = &mut indexed_bytes {
+        attributes[1].1 = Cell::attribute(Value::bytes(&[1, 2, 3]));
+    }
+    assert_eq!(indexed_bytes.validate(), Err(ArkivFault::Value));
+}
+
+#[test]
+fn a_patch_writes_each_attribute_with_the_flag_of_its_new_triple() {
+    let (_e, mut b, c) = setup();
+    applied(run(&mut b, &c, &create(0)));
+    let k = key(&c, 0);
+    let indexed = |b: &Branch| {
+        b.try_count(
+            entity_namespace(),
+            &arkiv_db::Query::term(Term::eq(name("score"), Value::I32(-1))),
+            Budget::unlimited(),
+        )
+        .unwrap()
+        .unwrap()
+        .value
+    };
+    assert_eq!(indexed(&b), 1);
+    for cell in [
+        Cell::field(Value::I32(-1)),
+        Cell::attribute(Value::I32(-1)),
+        Cell::field(Value::I32(-1)),
+    ] {
+        applied(run(
+            &mut b,
+            &c,
+            &ArkivOperation::Patch {
+                key: k.clone(),
+                set: vec![(name("score"), cell.clone())],
+                remove: vec![],
+            },
+        ));
+        assert_eq!(read(&b, &k).attributes, vec![(name("score"), cell.clone())]);
+        assert_eq!(indexed(&b), u64::from(cell.is_attribute()));
+    }
+}
+
+#[test]
+fn the_entity_bytes_cap_holds_on_create_and_across_patches() {
+    let (_e, mut b, c) = setup();
+    let blob = |n: usize| Cell::field(Value::bytes(&vec![7; n]));
+    let create_with = |attributes| ArkivOperation::Create {
+        salt: 7,
+        flags: 0,
+        expiry: Expiry {
+            expires_at: 10,
+            min_lifetime: 0,
+        },
+        attributes,
+    };
+    // Two values within the per-value cap that exceed the entity cap.
+    let over = create_with(vec![
+        (name("a"), blob(64 * 1024)),
+        (name("b"), blob(64 * 1024 + 1)),
+    ]);
+    assert_eq!(over.validate(), Err(ArkivFault::EntityTooLarge));
+    assert_eq!(run(&mut b, &c, &over), rejected(ArkivFault::EntityTooLarge));
+    // Exactly the cap is accepted.
+    applied(run(
+        &mut b,
+        &c,
+        &create_with(vec![
+            (name("a"), blob(64 * 1024)),
+            (name("b"), blob(64 * 1024)),
+        ]),
+    ));
+    let k = key(&c, 0);
+    let patch = |set: Vec<(CellName, Cell)>, remove: Vec<CellName>| ArkivOperation::Patch {
+        key: k.clone(),
+        set,
+        remove,
+    };
+    // Each patch is small; the entity it would leave is not.
+    let grow = patch(vec![(name("c"), blob(1))], vec![]);
+    assert!(grow.validate().is_ok());
+    assert_eq!(run(&mut b, &c, &grow), rejected(ArkivFault::EntityTooLarge));
+    // Replacing a value counts only the new one.
+    applied(run(
+        &mut b,
+        &c,
+        &patch(vec![(name("a"), blob(1024))], vec![]),
+    ));
+    applied(run(
+        &mut b,
+        &c,
+        &patch(vec![(name("c"), blob(63 * 1024))], vec![]),
+    ));
+    assert_eq!(entity_bytes(&read(&b, &k).attributes), 128 * 1024);
+    assert_eq!(
+        run(&mut b, &c, &patch(vec![(name("d"), blob(1))], vec![])),
+        rejected(ArkivFault::EntityTooLarge)
+    );
+    // Removing frees room in the same patch.
+    applied(run(
+        &mut b,
+        &c,
+        &patch(vec![(name("d"), blob(64 * 1024))], vec![name("b")]),
+    ));
+    assert_eq!(entity_bytes(&read(&b, &k).attributes), 128 * 1024);
+    // Non-bytes values do not count.
+    applied(run(
+        &mut b,
+        &c,
+        &patch(
+            vec![(name("note"), Cell::field(Value::str(&"x".repeat(128))))],
+            vec![],
+        ),
+    ));
+}
+
+#[test]
+fn system_cells_leave_room_for_every_user_attribute() {
+    let engine = Engine::with_limits(
+        PriceSchedule::FIXTURE,
+        Limits {
+            max_cells: MIN_ENTITY_CELLS,
+            ..Limits::DEFAULT
+        },
+    );
+    let mut b = engine.begin(engine.head(), None).unwrap();
+    b.try_execute(
+        OwnerId::new([1; 20]),
+        WriteOp::CreateNamespace {
+            name: NamespaceName::new("entities").unwrap(),
+        },
+        Budget::unlimited(),
+    )
+    .unwrap()
+    .unwrap();
+    let (_e, _b, c) = setup();
+    let attributes = |n: usize| {
+        (0..n)
+            .map(|i| {
+                (
+                    name(&format!("attr{i:02}")),
+                    Cell::attribute(Value::U64(i as u64)),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let create_with = |attributes| ArkivOperation::Create {
+        salt: 7,
+        flags: 0,
+        expiry: Expiry {
+            expires_at: 10,
+            min_lifetime: 0,
+        },
+        attributes,
+    };
+    applied(run(&mut b, &c, &create_with(attributes(MAX_ATTRIBUTES))));
+    assert_eq!(read(&b, &key(&c, 0)).attributes.len(), MAX_ATTRIBUTES);
+    assert_eq!(
+        create_with(attributes(MAX_ATTRIBUTES + 1)).validate(),
+        Err(ArkivFault::Value)
     );
 }
 
@@ -559,7 +892,7 @@ fn glm_rejects_live_permanence_and_updates_of_permanent_entities() {
     for op in [
         ArkivOperation::Patch {
             key: k.clone(),
-            set: vec![(name("score"), Value::I32(7))],
+            set: vec![(name("score"), Cell::attribute(Value::I32(7)))],
             remove: vec![],
         },
         ArkivOperation::Patch {

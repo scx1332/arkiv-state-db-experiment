@@ -110,10 +110,13 @@ fn create(who: u8, nonce: u64, salt: u128) -> SignedTx {
                         min_lifetime: 1_000,
                     },
                     attributes: vec![
-                        (CellName::new("group").unwrap(), DbValue::U64(1)),
                         (
-                            CellName::new("$payload").unwrap(),
-                            DbValue::bytes(b"private canonical payload"),
+                            CellName::new("group").unwrap(),
+                            arkiv_db::Cell::attribute(DbValue::U64(1)),
+                        ),
+                        (
+                            CellName::new("body").unwrap(),
+                            arkiv_db::Cell::field(DbValue::bytes(b"private canonical payload")),
                         ),
                     ],
                 },
@@ -933,7 +936,10 @@ async fn range_inspection_exposes_only_complete_authenticated_branching_witnesse
         else {
             panic!()
         };
-        attributes[0] = (CellName::new("price").unwrap(), DbValue::U64(price));
+        attributes[0] = (
+            CellName::new("price").unwrap(),
+            arkiv_db::Cell::attribute(DbValue::U64(price)),
+        );
         source
             .submit(SignedTx::sign(&genesis(), nonce as u64, tx, &signer(2)).unwrap())
             .unwrap();

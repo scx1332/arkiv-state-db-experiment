@@ -4,6 +4,7 @@ use super::{
     Error, Result, ethereum,
     host::Host,
     protocol::SignedTx,
+    rpc_reads::{QueryErrorKind, ReadError},
     runtime::{Node, Shared},
 };
 use crate::{
@@ -35,6 +36,8 @@ pub struct RpcState {
     filters: BTreeMap<u64, Filter>,
     next_filter: u64,
     revert_data: Option<String>,
+    /// The detail of a refused SDK query answered under the lock.
+    query_error: Option<super::rpc_reads::QueryError>,
 }
 struct Filter {
     spec: Value,
@@ -800,8 +803,15 @@ fn simulation(
 }
 fn dispatch(host: &mut Host, state: &mut RpcState, method: &str, params: &Value) -> Result<Value> {
     state.revert_data = None;
+    state.query_error = None;
     if let Some(result) = super::rpc_reads::dispatch(host, method, params) {
-        return result;
+        return result.map_err(|e| match e {
+            ReadError::Node(e) => e,
+            ReadError::Query(q) => {
+                state.query_error = Some(q);
+                Error("QueryRejected")
+            }
+        });
     }
     let a = args(params)?;
     match method {
@@ -1108,8 +1118,19 @@ fn dispatch(host: &mut Host, state: &mut RpcState, method: &str, params: &Value)
         _ => Err(Error("MethodNotFound")),
     }
 }
-/// JSON-RPC code of a state-retention refusal (`HistoryPruned`).
-pub const HISTORY_PRUNED_CODE: i64 = -32001;
+/// JSON-RPC code of a state-retention refusal (`HistoryPruned`) on every
+/// method: the SDK's `block` kind, a height outside the retained range.
+pub const HISTORY_PRUNED_CODE: i64 = QueryErrorKind::Block.code();
+/// JSON-RPC code of a detached read refused at admission (`ServerBusy`).
+/// Retryable; outside the SDK's query table (-32001 to -32006).
+pub const SERVER_BUSY_CODE: i64 = -32010;
+/// The response to a refused SDK read.
+fn read_error(id: Value, e: ReadError, pruned: Option<(u64, u64)>) -> Value {
+    match e {
+        ReadError::Node(e) => error_with(id, e, pruned),
+        ReadError::Query(q) => json!({"jsonrpc":"2.0","id":id,"error":q.to_json()}),
+    }
+}
 fn error(id: Value, e: Error) -> Value {
     error_with(id, e, None)
 }
@@ -1129,8 +1150,9 @@ fn error_with(id: Value, e: Error, pruned: Option<(u64, u64)>) -> Value {
         "InsufficientBalance" => "insufficient funds for gas * price + value",
         _ => e.0,
     };
-    // A refused detached read is a retryable limit (EIP-1474 "limit exceeded").
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":match e.0{"MethodNotFound"=>-32601,"InvalidParams"=>-32602,"InvalidRequest"=>-32600,"ExecutionReverted"=>3,"ServerBusy"=>-32005,_=>-32000},"message":message}})
+    // A refused detached read is retryable; its code stays outside the SDK's
+    // query table (-32001 to -32006).
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":match e.0{"MethodNotFound"=>-32601,"InvalidParams"=>-32602,"InvalidRequest"=>-32600,"ExecutionReverted"=>3,"ServerBusy"=>SERVER_BUSY_CODE,_=>-32000},"message":message}})
 }
 async fn single(rt: &Shared, request: Value) -> Value {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
@@ -1195,8 +1217,10 @@ async fn locked(rt: &Shared, method: String, params: Value, id: Value) -> Result
                 Node::Full(h) => match dispatch(h, &mut state, &method, &params) {
                     Ok(v) => Ok(json!({"jsonrpc":"2.0","id":response_id,"result":v})),
                     Err(e) => {
-                        let mut response = error_with(response_id, e, h.refusal.take());
-                        if let Some(data) = state.revert_data.take() {
+                        let mut response = error_with(response_id.clone(), e, h.refusal.take());
+                        if let Some(query) = state.query_error.take() {
+                            response = read_error(response_id, query.into(), None);
+                        } else if let Some(data) = state.revert_data.take() {
                             response["error"]["data"] = json!(data);
                         }
                         Ok(response)
@@ -1234,13 +1258,13 @@ async fn detached(rt: &Shared, method: String, params: Value, id: Value) -> Resu
                 };
                 match super::rpc_reads::plan(h, &method, &params, runtime.reads.limits()) {
                     Some(Ok(planned)) => planned,
-                    Some(Err(e)) => return Ok(Some(error_with(id, e, h.refusal.take()))),
+                    Some(Err(e)) => return Ok(Some(read_error(id, e, h.refusal.take()))),
                     None => return Err(Error("MethodNotFound")),
                 }
             };
             Ok(Some(match planned.run() {
                 Ok(v) => json!({"jsonrpc":"2.0","id":id,"result":v}),
-                Err(e) => error(id, e),
+                Err(e) => read_error(id, e, None),
             }))
         })
         .await
@@ -1387,7 +1411,10 @@ mod tests {
                 expires_at: 0,
                 min_lifetime: 20,
             },
-            attributes: vec![(CellName::new("$payload").unwrap(), DbValue::bytes(b"test"))],
+            attributes: vec![(
+                CellName::new("data").unwrap(),
+                arkiv_db::Cell::field(DbValue::bytes(b"test")),
+            )],
         };
         let tx = native(
             &h,
@@ -1939,6 +1966,46 @@ mod tests {
                 "11".repeat(32)
             )
         );
+    }
+    #[tokio::test]
+    async fn sdk_query_refusals_answer_with_the_sdk_code_table() {
+        let rt =
+            super::super::runtime::Runtime::new(Node::Full(Box::new(host())), None, None, None)
+                .unwrap();
+        let call = |params: Value| {
+            handle_request(
+                &rt,
+                json!({"jsonrpc":"2.0","id":1,"method":"arkiv_query","params":params}),
+            )
+        };
+        for (params, code) in [
+            (json!(["n ="]), -32001),
+            (json!(["n > str('x')"]), -32002),
+            (json!(["n = i32(2147483648)"]), -32003),
+            (json!([format!("{}a = true", "NOT ".repeat(40))]), -32004),
+            (
+                json!(["*", {"atBlock":"0x0","cursor":format!("0x{}", "00".repeat(32))}]),
+                -32005,
+            ),
+            (json!(["*", {"atBlock":"0xffff"}]), -32006),
+        ] {
+            let answer = call(params.clone()).await;
+            assert_eq!(answer["error"]["code"], code, "{params}: {answer}");
+        }
+        let parse = call(json!(["n ="])).await;
+        assert_eq!(
+            parse["error"]["data"],
+            json!({"position":3,"expected":"a value","got":"end of query"})
+        );
+        // The removed payload model is an unknown select key: invalid params.
+        for removed in ["payload", "contentType"] {
+            let answer = call(json!(["*", {"select": {"key": true, removed: true}}])).await;
+            assert_eq!(answer["error"]["code"], -32602, "{answer}");
+        }
+        // No other error uses the query table.
+        assert!(!(-32006..=-32001).contains(&SERVER_BUSY_CODE));
+        assert!(!(-32006..=-32001).contains(&super::super::rpc_ws::SUBSCRIPTION_LIMIT_CODE));
+        assert_eq!(HISTORY_PRUNED_CODE, QueryErrorKind::Block.code());
     }
     #[test]
     fn fee_history_rejects_allocation_amplification_before_building_rewards() {

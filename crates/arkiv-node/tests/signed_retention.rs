@@ -66,7 +66,10 @@ fn create(nonce: u64) -> SignedTx {
                         expires_at: 0,
                         min_lifetime: 1_000,
                     },
-                    attributes: vec![(CellName::new("group").unwrap(), DbValue::U64(1))],
+                    attributes: vec![(
+                        CellName::new("group").unwrap(),
+                        arkiv_db::Cell::attribute(DbValue::U64(1)),
+                    )],
                 },
             }],
         },
@@ -139,7 +142,8 @@ fn entity_nonce_call() -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn json_rpc_refuses_state_below_the_floor() {
-    assert_eq!(rpc::HISTORY_PRUNED_CODE, -32001);
+    // The SDK's `block` kind: a height outside the retained range.
+    assert_eq!(rpc::HISTORY_PRUNED_CODE, -32006);
     let (rt, tx_in_block_2) = node(Retention::Window(2));
     // Floor 4; receipts/logs need state h-1, so their floor is 5.
     for method in ["eth_getBalance", "eth_getTransactionCount"] {

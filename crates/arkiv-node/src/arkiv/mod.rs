@@ -25,6 +25,9 @@ pub enum ArkivFault {
     GasOverflow = 13,
     PermanentStorageUnsupported = 14,
     UnsupportedGasOperation = 15,
+    /// The `bytes` cells of the resulting entity would hold more than
+    /// [`MAX_ENTITY_BYTES`].
+    EntityTooLarge = 16,
 }
 impl Encode for ArkivFault {
     fn encode_to(&self, e: &mut Encoder) {
@@ -50,6 +53,7 @@ impl Decode for ArkivFault {
             13 => Self::GasOverflow,
             14 => Self::PermanentStorageUnsupported,
             15 => Self::UnsupportedGasOperation,
+            16 => Self::EntityTooLarge,
             tag => {
                 return Err(DecodeError::UnknownTag {
                     kind: "ArkivFault",
@@ -59,17 +63,23 @@ impl Decode for ArkivFault {
         })
     }
 }
+/// One entity operation. User attributes travel as engine cells: an indexed
+/// attribute (ABI `typeId` with [`INDEXED_FLAG`]) is a [`Cell::attribute`],
+/// an unindexed one a [`Cell::field`], so the flag is carried, validated,
+/// executed and stored as the cell kind.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ArkivOperation {
     Create {
         salt: u128,
         flags: u8,
         expiry: Expiry,
-        attributes: Vec<(CellName, Value)>,
+        attributes: Vec<(CellName, Cell)>,
     },
+    /// Sets (each with the indexed flag of its new triple) and removes
+    /// attributes.
     Patch {
         key: RecordKey,
-        set: Vec<(CellName, Value)>,
+        set: Vec<(CellName, Cell)>,
         remove: Vec<CellName>,
     },
     ExtendExpiry {
@@ -117,19 +127,23 @@ impl ArkivOperation {
             Self::Patch { set, .. } => set.as_slice(),
             _ => &[],
         };
-        if attrs.len() > 32 {
+        if attrs.len() > MAX_ATTRIBUTES {
             return Err(ArkivFault::Value);
         }
         if let Self::Patch { remove, .. } = self
-            && attrs.len() + remove.len() > 32
+            && attrs.len() + remove.len() > MAX_ATTRIBUTES
         {
             return Err(ArkivFault::Value);
         }
-        for (name, value) in attrs {
+        for (name, cell) in attrs {
             if !names.insert(name) {
                 return Err(ArkivFault::Duplicate);
             }
-            user_cell(name, value)?;
+            validate_user_cell(name, cell)?;
+        }
+        // A create's values are the whole entity; a patch's set is part of it.
+        if entity_bytes(attrs) > MAX_ENTITY_BYTES {
+            return Err(ArkivFault::EntityTooLarge);
         }
         if let Self::Patch { remove, .. } = self {
             for name in remove {
@@ -296,15 +310,16 @@ pub(crate) fn expiry(exp: &Expiry, c: &ArkivExecutionContext) -> Result<u64, Hos
     }
     Ok(target)
 }
-/// Canonical creation cells shared by live execution and bulk genesis.
-/// Callers validate the operation and expiry before invoking this helper.
+/// Canonical creation cells shared by live execution and bulk genesis: the
+/// [`SYSTEM_CELLS`] host cells, then the user attributes as given. Callers
+/// validate the operation and expiry before invoking this helper.
 pub(crate) fn create_cells(
     key: [u8; 32],
     creator: [u8; 20],
     height: u64,
     expires: u64,
     flags: u8,
-    attributes: &[(CellName, Value)],
+    attributes: &[(CellName, Cell)],
 ) -> Vec<(CellName, Cell)> {
     let mut cells = vec![
         (name("$key"), Cell::attribute(Value::Key(key))),
@@ -318,15 +333,12 @@ pub(crate) fn create_cells(
             Cell::field(Value::U64(u64::from(flags))),
         ),
     ];
-    for (n, v) in attributes {
-        cells.push((n.clone(), user_cell(n, v).expect("validated")))
-    }
-    if !attributes.iter().any(|(n, _)| n.as_str() == "$payload") {
-        cells.push((name("$payload"), Cell::field(Value::bytes(&[]))))
-    }
-    if !attributes.iter().any(|(n, _)| n.as_str() == "$contentType") {
-        cells.push((name("$contentType"), Cell::attribute(Value::str(""))))
-    }
+    debug_assert!(
+        attributes
+            .iter()
+            .all(|(n, c)| validate_user_cell(n, c).is_ok())
+    );
+    cells.extend_from_slice(attributes);
     cells
 }
 /// Execute one operation; the enclosing transaction checkpoint provides atomic batches.
@@ -447,18 +459,8 @@ pub fn execute_operation(
                     if p.creation_flags & 1 != 0 {
                         return Ok(rejected(ArkivFault::Readonly));
                     }
-                    for (n, v) in changes {
-                        set.push((n.clone(), user_cell(n, v).expect("validated")))
-                    }
-                    for n in deleted {
-                        match n.as_str() {
-                            "$payload" => set.push((n.clone(), Cell::field(Value::bytes(&[])))),
-                            "$contentType" => {
-                                set.push((n.clone(), Cell::attribute(Value::str(""))))
-                            }
-                            _ => remove.push(n.clone()),
-                        }
-                    }
+                    set.extend_from_slice(changes);
+                    remove.extend_from_slice(deleted);
                 }
                 ArkivOperation::ExtendExpiry { .. } => set.push((
                     name("$expiresAt"),
@@ -480,24 +482,26 @@ pub fn execute_operation(
             }
         }
     };
+    // The entity as this operation leaves it (empty for a delete).
+    let after_cells = match &write {
+        WriteOp::CreateRecord { cells, .. } => cells.clone(),
+        WriteOp::PatchRecord { set, remove, .. } => {
+            let mut cells = current_cells.clone();
+            cells.retain(|(name, _)| !remove.contains(name) && !set.iter().any(|(n, _)| n == name));
+            cells.extend(set.iter().cloned());
+            cells
+        }
+        _ => Vec::new(),
+    };
+    if entity_bytes(&after_cells) > MAX_ENTITY_BYTES {
+        return Ok(rejected(ArkivFault::EntityTooLarge));
+    }
     let rent = if crate::gas::is_active(branch.pricing()) {
         let quoted = (|| {
             let before = if current.is_some() {
                 crate::gas::storage_units(&current_cells)?.total
             } else {
                 0
-            };
-            let after_cells = match &write {
-                WriteOp::CreateRecord { cells, .. } => cells.clone(),
-                WriteOp::PatchRecord { set, remove, .. } => {
-                    let mut cells = current_cells.clone();
-                    cells.retain(|(name, _)| {
-                        !remove.contains(name) && !set.iter().any(|(n, _)| n == name)
-                    });
-                    cells.extend(set.clone());
-                    cells
-                }
-                _ => Vec::new(),
             };
             let deleted = matches!(write, WriteOp::DeleteRecord { .. });
             let after = if deleted {

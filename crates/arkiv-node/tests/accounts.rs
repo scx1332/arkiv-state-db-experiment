@@ -98,10 +98,13 @@ fn create(salt: u128) -> TxOp {
                 min_lifetime: 17280,
             },
             attributes: vec![
-                (CellName::new("group").unwrap(), Value::U64(1)),
                 (
-                    CellName::new("$payload").unwrap(),
-                    Value::bytes(b"fee-test"),
+                    CellName::new("body").unwrap(),
+                    arkiv_db::Cell::field(Value::bytes(b"fee-test")),
+                ),
+                (
+                    CellName::new("group").unwrap(),
+                    arkiv_db::Cell::attribute(Value::U64(1)),
                 ),
             ],
         },

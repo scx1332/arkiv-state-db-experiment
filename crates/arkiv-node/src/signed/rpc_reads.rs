@@ -17,12 +17,18 @@
 //! a query beyond them still takes the bounded scan fallback (pages) or is
 //! refused (counts). Block execution evaluates no SDK query, so neither
 //! choice reaches consensus.
+//!
+//! Entities follow the user-defined-columns model: every user attribute is
+//! returned, indexed or not, but a predicate on a user name only ever
+//! matches an indexed one ([`arkiv_db::CellKind::Attribute`]). Refused
+//! queries answer with the SDK's code table ([`QueryErrorKind`]).
 use super::{Error, Result, host::Host, reads::ReadLimits};
 use crate::{
     arkiv,
     simulator::{
         query_language::{
             ast::{AnnotKey, AttributeValue, BuiltIn, Query as Ast},
+            error::{ParseError, ParseErrorKind},
             lexer::{self, SpannedToken, Token},
             parse,
         },
@@ -46,6 +52,10 @@ const RESPONSE_CAP: usize = 8 * 1024 * 1024;
 const CURSOR_CAP: usize = 1024;
 const GROUP_CAP: usize = 64;
 const LITERAL_CAP: usize = 256;
+const QUERY_BYTES: usize = 8192;
+const MAX_DEPTH: usize = 32;
+const MAX_PREDICATES: usize = 64;
+/// The `select` keys, in response order. Matches the SDK's `RpcSelect`.
 const FIELDS: &[&str] = &[
     "key",
     "owner",
@@ -54,11 +64,136 @@ const FIELDS: &[&str] = &[
     "updatedAt",
     "expiresAt",
     "creationFlags",
-    "contentType",
-    "payload",
     "attributeSchema",
     "attributes",
 ];
+
+/// What a node rejected an `arkiv_query` (or `arkiv_getEntityCount`) for:
+/// the SDK's frozen code table (`src/query/errors.ts`, `QueryErrorKind`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryErrorKind {
+    /// The query string does not parse (`-32001`).
+    Parse,
+    /// A well-formed predicate is ill-typed: a range operator on an
+    /// equality-only type, an unknown tag (`-32002`).
+    Type,
+    /// A literal failed validation: an `i32` out of range, a bad EIP-55
+    /// checksum, more than 18 decimal places (`-32003`).
+    Literal,
+    /// A node budget was exceeded: query length, predicate count, nesting
+    /// depth, Boolean expansion, read budget or response size (`-32004`).
+    Limits,
+    /// The cursor expired, is malformed, or belongs to another query, block
+    /// or selection (`-32005`).
+    Cursor,
+    /// The requested block is outside the range the node retains: above the
+    /// head or below the state floor (`-32006`).
+    Block,
+}
+impl QueryErrorKind {
+    /// The JSON-RPC error code.
+    pub const fn code(self) -> i64 {
+        match self {
+            Self::Parse => -32001,
+            Self::Type => -32002,
+            Self::Literal => -32003,
+            Self::Limits => -32004,
+            Self::Cursor => -32005,
+            Self::Block => -32006,
+        }
+    }
+    /// The SDK's name for the kind.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Parse => "parse",
+            Self::Type => "type",
+            Self::Literal => "literal",
+            Self::Limits => "limits",
+            Self::Cursor => "cursor",
+            Self::Block => "block",
+        }
+    }
+}
+/// A refused SDK query: its kind, a human-readable message and, for errors
+/// at a known place in the query string, `data`: `{position, got}` plus
+/// `expected` for a parse error. `position` is a UTF-8 byte offset.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QueryError {
+    pub kind: QueryErrorKind,
+    pub message: String,
+    pub data: Option<Json>,
+}
+impl QueryError {
+    pub fn new(kind: QueryErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            data: None,
+        }
+    }
+    /// An error at byte `position` of `source`.
+    fn at(kind: QueryErrorKind, source: &str, position: usize, message: impl Into<String>) -> Self {
+        let message = message.into();
+        let position = position.min(source.len());
+        let rest = source.get(position..).unwrap_or("");
+        let got: String = rest
+            .split_whitespace()
+            .next()
+            .map_or_else(|| "end of query".into(), |t| t.chars().take(32).collect());
+        let mut data = json!({"position": position, "got": got});
+        if kind == QueryErrorKind::Parse {
+            data["expected"] = json!(message);
+        }
+        Self {
+            kind,
+            message,
+            data: Some(data),
+        }
+    }
+    /// The JSON-RPC `error` object.
+    pub fn to_json(&self) -> Json {
+        let mut error = json!({"code": self.kind.code(), "message": format!("query rejected ({}): {}", self.kind.name(), self.message)});
+        if let Some(data) = &self.data {
+            error["data"] = data.clone();
+        }
+        error
+    }
+}
+/// Why an SDK read was refused: a query error in the SDK's table, or a node
+/// error (invalid parameters, a pruned height, storage).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReadError {
+    Query(QueryError),
+    Node(Error),
+}
+impl From<Error> for ReadError {
+    fn from(error: Error) -> Self {
+        Self::Node(error)
+    }
+}
+impl From<QueryError> for ReadError {
+    fn from(error: QueryError) -> Self {
+        Self::Query(error)
+    }
+}
+type Read<T> = std::result::Result<T, ReadError>;
+fn limits(message: &str) -> QueryError {
+    QueryError::new(QueryErrorKind::Limits, message)
+}
+fn cursor_mismatch() -> ReadError {
+    QueryError::new(
+        QueryErrorKind::Cursor,
+        "the cursor expired, is malformed, or belongs to another query, block or selection",
+    )
+    .into()
+}
+fn unknown_block(height: u64, head: u64) -> ReadError {
+    QueryError::new(
+        QueryErrorKind::Block,
+        format!("block {height} is above the head {head}"),
+    )
+    .into()
+}
 
 #[derive(Clone)]
 struct CachedCursor {
@@ -75,7 +210,7 @@ static CURSORS: OnceLock<Mutex<Cursors>> = OnceLock::new();
 
 /// Plans and runs an SDK read under the default read limits, or `None` for
 /// another method.
-pub fn dispatch(host: &Host, method: &str, params: &Json) -> Option<Result<Json>> {
+pub fn dispatch(host: &Host, method: &str, params: &Json) -> Option<Read<Json>> {
     plan(host, method, params, ReadLimits::default()).map(|planned| planned.and_then(Planned::run))
 }
 /// The methods whose evaluation runs after the node lock is released.
@@ -106,35 +241,32 @@ pub struct PageRead {
 }
 /// Validates an SDK read and pins its snapshot, or `None` for another method.
 /// `reads` supplies the node's query bounds.
-pub fn plan(
-    host: &Host,
-    method: &str,
-    params: &Json,
-    reads: ReadLimits,
-) -> Option<Result<Planned>> {
+pub fn plan(host: &Host, method: &str, params: &Json, reads: ReadLimits) -> Option<Read<Planned>> {
     let bounds = reads.query_limits(&host.genesis.genesis.limits);
     Some(match method {
         "arkiv_query" => {
             plan_query(host, params, bounds).map(|page| Planned::Page(Box::new(page)))
         }
         "arkiv_getEntityCount" => plan_count(host, params, bounds),
-        "arkiv_getBlockTiming" => empty_params(params).and_then(|()| {
-            let current_block_time = host.head.timestamp_ms / 1000;
-            let duration = if host.head.height == 0 {
-                0
-            } else {
-                let previous = host.certificate(host.head.height - 1)?.header;
-                current_block_time.saturating_sub(previous.timestamp_ms / 1000)
-            };
-            Ok(Planned::Ready(json!({"current_block": host.head.height, "current_block_time": current_block_time, "duration": duration})))
-        }),
+        "arkiv_getBlockTiming" => empty_params(params)
+            .and_then(|()| {
+                let current_block_time = host.head.timestamp_ms / 1000;
+                let duration = if host.head.height == 0 {
+                    0
+                } else {
+                    let previous = host.certificate(host.head.height - 1)?.header;
+                    current_block_time.saturating_sub(previous.timestamp_ms / 1000)
+                };
+                Ok(Planned::Ready(json!({"current_block": host.head.height, "current_block_time": current_block_time, "duration": duration})))
+            })
+            .map_err(ReadError::from),
         _ => return None,
     })
 }
 impl Planned {
     /// Evaluates the read against its pinned snapshot. Its metered reads stop
     /// early when an enclosing [`arkiv_db::Interrupt`] is raised.
-    pub fn run(self) -> Result<Json> {
+    pub fn run(self) -> Read<Json> {
         match self {
             Self::Ready(value) => Ok(value),
             Self::Count {
@@ -147,11 +279,12 @@ impl Planned {
                         arkiv::entity_namespace(),
                         &query,
                         read_budget(READ_BUDGET, bounds),
-                    )?
+                    )
+                    .map_err(Error::from)?
                     .map_err(read_error)?
                     .value;
                 if n > 9_007_199_254_740_991 {
-                    return Err(Error("ResourceLimit"));
+                    return Err(limits("the count exceeds the JSON safe-integer range").into());
                 }
                 Ok(json!(n))
             }
@@ -167,7 +300,7 @@ fn read_budget(units: u64, bounds: QueryLimits) -> Budget {
         .planned()
         .with_query_limits(bounds)
 }
-fn plan_count(host: &Host, params: &Json, bounds: QueryLimits) -> Result<Planned> {
+fn plan_count(host: &Host, params: &Json, bounds: QueryLimits) -> Read<Planned> {
     let empty = json!({});
     let options = if params.is_null() {
         &empty
@@ -184,7 +317,7 @@ fn plan_count(host: &Host, params: &Json, bounds: QueryLimits) -> Result<Planned
         None => host.head.height,
     };
     if height > host.head.height {
-        return Err(Error("UnknownBlock"));
+        return Err(unknown_block(height, host.head.height));
     }
     let query = match options.get("query").filter(|v| !v.is_null()) {
         Some(value) => parse_query(value.as_str().ok_or(Error("InvalidParams"))?)?,
@@ -219,13 +352,16 @@ fn quantity(value: &Json) -> Result<u64> {
     }
     u64::from_str_radix(s, 16).map_err(|_| Error("InvalidParams"))
 }
-fn read_error(error: arkiv_db::Rejected) -> Error {
+fn read_error(error: arkiv_db::Rejected) -> ReadError {
     match error.reason {
-        arkiv_db::Rejection::CursorMismatch => Error("CursorMismatch"),
-        arkiv_db::Rejection::OutOfBudget => Error("ResourceLimit"),
-        _ => Error("QueryRejected"),
+        arkiv_db::Rejection::CursorMismatch => cursor_mismatch(),
+        arkiv_db::Rejection::OutOfBudget => limits("the read budget is exhausted").into(),
+        _ => limits("the query exceeds the node's query bounds").into(),
     }
 }
+/// The `select` object: every key one of [`FIELDS`] with a boolean, except
+/// `attributes`, which may also map attribute names to booleans. Anything
+/// else, including the removed `payload` and `contentType`, is refused.
 fn selection(value: Option<&Json>) -> Result<Json> {
     let selected = value.cloned().unwrap_or_else(|| json!({}));
     let object = selected.as_object().ok_or(Error("InvalidParams"))?;
@@ -255,7 +391,7 @@ fn selection(value: Option<&Json>) -> Result<Json> {
         .or_insert(Json::Bool(true));
     Ok(selected)
 }
-fn plan_query(host: &Host, params: &Json, bounds: QueryLimits) -> Result<PageRead> {
+fn plan_query(host: &Host, params: &Json, bounds: QueryLimits) -> Read<PageRead> {
     let args = params
         .as_array()
         .filter(|p| !p.is_empty() && p.len() <= 2)
@@ -272,7 +408,7 @@ fn plan_query(host: &Host, params: &Json, bounds: QueryLimits) -> Result<PageRea
         .keys()
         .any(|k| !["atBlock", "select", "limit", "cursor"].contains(&k.as_str()))
     {
-        return Err(Error("InvalidParams"));
+        return Err(Error("InvalidParams").into());
     }
     let height = options
         .get("atBlock")
@@ -280,7 +416,7 @@ fn plan_query(host: &Host, params: &Json, bounds: QueryLimits) -> Result<PageRea
         .transpose()?
         .unwrap_or(host.head.height);
     if height > host.head.height {
-        return Err(Error("UnknownBlock"));
+        return Err(unknown_block(height, host.head.height));
     }
     // Checked on every page: a cursor is not a lease on its snapshot.
     host.require_state(height)?;
@@ -291,7 +427,7 @@ fn plan_query(host: &Host, params: &Json, bounds: QueryLimits) -> Result<PageRea
         .transpose()?
         .unwrap_or(100);
     if !(1..=200).contains(&limit) {
-        return Err(Error("InvalidParams"));
+        return Err(Error("InvalidParams").into());
     }
     let binding: [u8; 32] = keccak256(
         serde_json::to_vec(&json!([
@@ -306,12 +442,12 @@ fn plan_query(host: &Host, params: &Json, bounds: QueryLimits) -> Result<PageRea
     .into();
     let cursor = if let Some(token) = options.get("cursor") {
         if !options.contains_key("atBlock") {
-            return Err(Error("CursorMismatch"));
+            return Err(cursor_mismatch());
         }
         let token = token
             .as_str()
             .filter(|s| s.len() == 66)
-            .ok_or(Error("CursorMismatch"))?;
+            .ok_or_else(cursor_mismatch)?;
         let cache = CURSORS
             .get_or_init(Default::default)
             .lock()
@@ -320,7 +456,7 @@ fn plan_query(host: &Host, params: &Json, bounds: QueryLimits) -> Result<PageRea
             .entries
             .get(token)
             .filter(|e| e.binding == binding)
-            .ok_or(Error("CursorMismatch"))?;
+            .ok_or_else(cursor_mismatch)?;
         Some(entry.cursor.clone())
     } else {
         None
@@ -338,7 +474,7 @@ fn plan_query(host: &Host, params: &Json, bounds: QueryLimits) -> Result<PageRea
     })
 }
 impl PageRead {
-    fn run(self) -> Result<Json> {
+    fn run(self) -> Read<Json> {
         let Self {
             snapshot,
             query,
@@ -359,7 +495,7 @@ fn page_result(
     selected: &Json,
     binding: [u8; 32],
     height: u64,
-) -> Result<Json> {
+) -> Read<Json> {
     let data = page
         .rows
         .iter()
@@ -371,14 +507,17 @@ fn page_result(
         .len()
         > RESPONSE_CAP
     {
-        return Err(Error("ResourceLimit"));
+        return Err(limits("the response exceeds 8 MiB; lower the limit or select less").into());
     }
     if let Some(cursor) = page.next {
         let mut cache = CURSORS
             .get_or_init(Default::default)
             .lock()
             .map_err(|_| Error("ReadUnavailable"))?;
-        cache.serial = cache.serial.checked_add(1).ok_or(Error("ResourceLimit"))?;
+        cache.serial = cache
+            .serial
+            .checked_add(1)
+            .ok_or_else(|| limits("cursor serials are exhausted"))?;
         let token =
             hex(keccak256([binding.as_slice(), &cache.serial.to_be_bytes()].concat()).as_slice());
         while cache.entries.len() >= CURSOR_CAP {
@@ -405,7 +544,8 @@ fn read_page(
     bounds: QueryLimits,
     limit: usize,
     mut cursor: Option<Cursor>,
-) -> Result<arkiv_db::QueryPage> {
+) -> Read<arkiv_db::QueryPage> {
+    let exhausted = || ReadError::from(self::limits("the read budget is exhausted"));
     let scan = query.groups.len() > bounds.max_groups
         || query.groups.iter().any(|g| g.len() > bounds.max_literals);
     let all = Query::match_all();
@@ -420,7 +560,7 @@ fn read_page(
             (limit - rows.len()).min(limits.max_page)
         };
         if page_size == 0 {
-            return Err(Error("ResourceLimit"));
+            return Err(exhausted());
         }
         let metered = snapshot
             .try_query(
@@ -430,11 +570,12 @@ fn read_page(
                 page_size,
                 cursor.as_ref(),
                 read_budget(remaining, bounds),
-            )?
+            )
+            .map_err(Error::from)?
             .map_err(read_error)?;
         remaining = remaining
             .checked_sub(metered.receipt.spent.units())
-            .ok_or(Error("ResourceLimit"))?;
+            .ok_or_else(exhausted)?;
         let page = metered.value;
         for row in page.rows {
             if !scan || matches_query(query, &row) {
@@ -450,8 +591,10 @@ fn read_page(
             return Ok(arkiv_db::QueryPage { rows, next: cursor });
         }
     }
-    Err(Error("ResourceLimit"))
+    Err(exhausted())
 }
+/// The scan fallback's evaluation of `query` on one row. Like the index, it
+/// only sees indexed cells: an unindexed field never matches a predicate.
 fn matches_query(query: &Query, row: &Row) -> bool {
     query.groups.iter().any(|group| {
         group.iter().all(|literal| {
@@ -505,6 +648,22 @@ fn scalar(value: &Value) -> Result<(&'static str, Json)> {
         _ => return Err(Error("InvalidEntity")),
     })
 }
+/// Every user attribute of a verified entity, indexed or not, as
+/// `{name, type, indexed, value}` with the `arkiv_query` value encoding.
+pub(crate) fn verified_attributes(e: &arkiv::ArkivEntityProjection) -> Result<Json> {
+    e.attributes
+        .iter()
+        .map(|(n, c)| {
+            scalar(&c.value).map(
+                |(t, v)| json!({"name":n.as_str(),"type":t,"indexed":c.is_attribute(),"value":v}),
+            )
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Json::Array)
+}
+/// One entity in the SDK's `RpcEntity` shape, with only the selected keys.
+/// `attributeSchema` entries are `{name, type, indexed}`; `attributes`
+/// carries every user attribute, indexed or not, `bytes` values included.
 fn project(row: &Row, selected: &Json) -> Result<Json> {
     let e = arkiv::project(row).map_err(|_| Error("InvalidEntity"))?;
     let mut result = serde_json::Map::new();
@@ -523,20 +682,22 @@ fn project(row: &Row, selected: &Json) -> Result<Json> {
             "creationFlags" => {
                 json!({"raw":e.creation_flags,"readonly":e.creation_flags&1!=0,"permissionlessExtension":e.creation_flags&2!=0})
             }
-            "contentType" => json!(e.content_type),
-            "payload" => json!(hex(&e.payload)),
             "attributeSchema" => Json::Array(
                 e.attributes
                     .iter()
-                    .map(|(n, v)| scalar(v).map(|(t, _)| json!({"name":n.as_str(),"type":t})))
+                    .map(|(n, c)| {
+                        scalar(&c.value).map(
+                            |(t, _)| json!({"name":n.as_str(),"type":t,"indexed":c.is_attribute()}),
+                        )
+                    })
                     .collect::<Result<_>>()?,
             ),
             "attributes" => Json::Array(
                 e.attributes
                     .iter()
                     .filter(|(n, _)| choice == true || choice[n.as_str()] == true)
-                    .map(|(n, v)| {
-                        scalar(v).map(|(t, v)| json!({"name":n.as_str(),"type":t,"value":v}))
+                    .map(|(n, c)| {
+                        scalar(&c.value).map(|(t, v)| json!({"name":n.as_str(),"type":t,"value":v}))
                     })
                     .collect::<Result<_>>()?,
             ),
@@ -548,22 +709,24 @@ fn project(row: &Row, selected: &Json) -> Result<Json> {
 }
 
 // Boolean conversion is bounded before expansion, not after allocating a DNF.
-fn bounded(groups: Vec<Vec<Literal>>) -> Result<Query> {
+fn bounded(groups: Vec<Vec<Literal>>) -> std::result::Result<Query, QueryError> {
     if groups.len() > GROUP_CAP || groups.iter().map(Vec::len).sum::<usize>() > LITERAL_CAP {
-        return Err(Error("QueryLimit"));
+        return Err(limits(
+            "the query expands to more than 64 groups or 256 literals",
+        ));
     }
     Ok(Query { groups })
 }
-fn union(mut a: Query, b: Query) -> Result<Query> {
+fn union(mut a: Query, b: Query) -> std::result::Result<Query, QueryError> {
     if a.groups.len() + b.groups.len() > GROUP_CAP {
-        return Err(Error("QueryLimit"));
+        return Err(limits("the query expands to more than 64 groups"));
     }
     a.groups.extend(b.groups);
     bounded(a.groups)
 }
-fn intersect(a: Query, b: Query) -> Result<Query> {
+fn intersect(a: Query, b: Query) -> std::result::Result<Query, QueryError> {
     if a.groups.len().saturating_mul(b.groups.len()) > GROUP_CAP {
-        return Err(Error("QueryLimit"));
+        return Err(limits("the query expands to more than 64 groups"));
     }
     let total = a
         .groups
@@ -577,7 +740,7 @@ fn intersect(a: Query, b: Query) -> Result<Query> {
             .sum::<usize>()
             .saturating_mul(a.groups.len());
     if total > LITERAL_CAP {
-        return Err(Error("QueryLimit"));
+        return Err(limits("the query expands to more than 256 literals"));
     }
     bounded(
         a.groups
@@ -590,7 +753,7 @@ fn intersect(a: Query, b: Query) -> Result<Query> {
             .collect(),
     )
 }
-fn complement(query: Query) -> Result<Query> {
+fn complement(query: Query) -> std::result::Result<Query, QueryError> {
     let mut out = Query::match_all();
     for group in query.groups {
         out = intersect(
@@ -608,7 +771,7 @@ fn complement(query: Query) -> Result<Query> {
     }
     Ok(out)
 }
-fn name(key: &AnnotKey) -> Result<CellName> {
+fn name(key: &AnnotKey) -> Option<CellName> {
     let text = match key {
         AnnotKey::User(n) => n.as_str(),
         AnnotKey::BuiltIn(b) => match b {
@@ -617,13 +780,12 @@ fn name(key: &AnnotKey) -> Result<CellName> {
             BuiltIn::Key => "$key",
             BuiltIn::ExpiresAt => "$expiresAt",
             BuiltIn::CreatedAt => "$createdAt",
-            BuiltIn::ContentType => "$contentType",
         },
     };
-    CellName::new(text).map_err(|_| Error("InvalidQuery"))
+    CellName::new(text).ok()
 }
-fn native_value(key: &AnnotKey, value: &AttributeValue) -> Result<Value> {
-    Ok(match value {
+fn native_value(key: &AnnotKey, value: &AttributeValue) -> Option<Value> {
+    Some(match value {
         AttributeValue::Bool(v) => Value::Bool(*v),
         AttributeValue::Int(v) => Value::I32(*v),
         AttributeValue::U64(v) => Value::U64(*v),
@@ -633,11 +795,7 @@ fn native_value(key: &AnnotKey, value: &AttributeValue) -> Result<Value> {
                 AnnotKey::BuiltIn(BuiltIn::CreatedAt | BuiltIn::ExpiresAt)
             ) =>
         {
-            Value::U64(
-                U256::from_be_bytes(*v)
-                    .try_into()
-                    .map_err(|_| Error("InvalidQuery"))?,
-            )
+            Value::U64(U256::from_be_bytes(*v).try_into().ok()?)
         }
         AttributeValue::U256(v) => Value::U256(*v),
         AttributeValue::Decimal(v) => Value::Dec(*v),
@@ -647,7 +805,8 @@ fn native_value(key: &AnnotKey, value: &AttributeValue) -> Result<Value> {
         AttributeValue::EntityKey(v) => Value::Key(*v),
     })
 }
-fn leaf(ast: Ast, neq: bool) -> Result<Query> {
+/// One predicate's term; `source` and `start` locate it for errors.
+fn leaf(ast: Ast, neq: bool, source: &str, start: usize) -> std::result::Result<Query, QueryError> {
     let (key, value, op) = match ast {
         Ast::Eq { key, value } => (key, value, 0),
         Ast::Gt { key, value } => (key, value, 1),
@@ -655,10 +814,25 @@ fn leaf(ast: Ast, neq: bool) -> Result<Query> {
         Ast::Lt { key, value } => (key, value, 3),
         Ast::Lte { key, value } => (key, value, 4),
         Ast::StartsWith { key, value } => (key, value, 5),
-        _ => return Err(Error("InvalidQuery")),
+        _ => {
+            return Err(QueryError::at(
+                QueryErrorKind::Parse,
+                source,
+                start,
+                "a predicate",
+            ));
+        }
     };
-    let n = name(&key)?;
-    let v = native_value(&key, &value)?;
+    let n = name(&key)
+        .ok_or_else(|| QueryError::at(QueryErrorKind::Parse, source, start, "an attribute name"))?;
+    let v = native_value(&key, &value).ok_or_else(|| {
+        QueryError::at(
+            QueryErrorKind::Literal,
+            source,
+            start,
+            "a block height that fits in u64",
+        )
+    })?;
     let term = match op {
         0 if neq => Term::not_eq(n, v),
         0 => Term::eq(n, v),
@@ -668,7 +842,14 @@ fn leaf(ast: Ast, neq: bool) -> Result<Query> {
         4 => Term::range(n, Bound::Unbounded, Bound::Included(v)),
         _ => match v {
             Value::Str(s) => Term::starts_with(n, &s),
-            _ => return Err(Error("InvalidQuery")),
+            _ => {
+                return Err(QueryError::at(
+                    QueryErrorKind::Type,
+                    source,
+                    start,
+                    "STARTSWITH takes a str prefix",
+                ));
+            }
         },
     };
     Ok(Query::term(term))
@@ -691,11 +872,25 @@ struct Parser<'a> {
     depth: usize,
     predicates: usize,
 }
-fn parse_query(source: &str) -> Result<Query> {
-    if source.len() > 8192 {
-        return Err(Error("QueryLimit"));
+/// A source-language error, located in the whole query: `offset` is where
+/// the sub-string the parser saw starts.
+fn source_error(error: ParseError, source: &str, offset: usize) -> QueryError {
+    let kind = match error.kind {
+        ParseErrorKind::MalformedInputError => QueryErrorKind::Parse,
+        ParseErrorKind::TypeError => QueryErrorKind::Type,
+        ParseErrorKind::LiteralError => QueryErrorKind::Literal,
+        ParseErrorKind::QueryLimitError => QueryErrorKind::Limits,
+    };
+    match error.failure_position {
+        Some(position) => QueryError::at(kind, source, offset + position, error.message),
+        None => QueryError::new(kind, error.message),
     }
-    let tokens = lexer::tokenize(source).map_err(|_| Error("InvalidQuery"))?;
+}
+fn parse_query(source: &str) -> std::result::Result<Query, QueryError> {
+    if source.len() > QUERY_BYTES {
+        return Err(limits("the query is longer than 8192 bytes"));
+    }
+    let tokens = lexer::tokenize(source).map_err(|e| source_error(e, source, 0))?;
     if tokens.len() == 1 && tokens[0].token == Token::Star {
         return Ok(Query::match_all());
     }
@@ -708,13 +903,27 @@ fn parse_query(source: &str) -> Result<Query> {
     };
     let q = p.or()?;
     if p.at != p.tokens.len() {
-        return Err(Error("InvalidQuery"));
+        return Err(p.parse_error("AND, OR or the end of the query"));
     }
     Ok(q)
 }
 impl Parser<'_> {
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.at).map(|t| &t.token)
+    }
+    /// Where the next token starts, or the end of the query.
+    fn position(&self) -> usize {
+        self.tokens
+            .get(self.at)
+            .map_or(self.source.len(), |t| t.start)
+    }
+    fn parse_error(&self, expected: &str) -> QueryError {
+        QueryError::at(
+            QueryErrorKind::Parse,
+            self.source,
+            self.position(),
+            expected,
+        )
     }
     fn take(&mut self, t: Token) -> bool {
         if self.peek() == Some(&t) {
@@ -724,75 +933,88 @@ impl Parser<'_> {
             false
         }
     }
-    fn expect(&mut self, t: Token) -> Result<()> {
+    fn expect(&mut self, t: Token, expected: &str) -> std::result::Result<(), QueryError> {
         if self.take(t) {
             Ok(())
         } else {
-            Err(Error("InvalidQuery"))
+            Err(self.parse_error(expected))
         }
     }
-    fn or(&mut self) -> Result<Query> {
+    fn or(&mut self) -> std::result::Result<Query, QueryError> {
         let mut q = self.and()?;
         while self.take(Token::Or) {
             q = union(q, self.and()?)?;
         }
         Ok(q)
     }
-    fn and(&mut self) -> Result<Query> {
+    fn and(&mut self) -> std::result::Result<Query, QueryError> {
         let mut q = self.unary()?;
         while self.take(Token::And) {
             q = intersect(q, self.unary()?)?;
         }
         Ok(q)
     }
-    fn unary(&mut self) -> Result<Query> {
-        if self.depth >= 32 {
-            return Err(Error("QueryLimit"));
+    fn unary(&mut self) -> std::result::Result<Query, QueryError> {
+        if self.depth >= MAX_DEPTH {
+            return Err(limits("the query nests more than 32 levels deep"));
         }
         self.depth += 1;
         let result = if self.take(Token::Not) {
-            complement(self.unary()?)
+            self.unary().and_then(complement)
         } else if self.take(Token::LParen) {
-            let q = self.or()?;
-            self.expect(Token::RParen)?;
-            Ok(q)
+            self.or()
+                .and_then(|q| self.expect(Token::RParen, "')'").map(|()| q))
         } else {
             self.predicate()
         };
         self.depth -= 1;
         result
     }
-    fn predicate(&mut self) -> Result<Query> {
+    fn predicate(&mut self) -> std::result::Result<Query, QueryError> {
         self.predicates += 1;
-        if self.predicates > 64 {
-            return Err(Error("QueryLimit"));
+        if self.predicates > MAX_PREDICATES {
+            return Err(limits("the query has more than 64 predicates"));
         }
         if matches!(self.peek(), Some(Token::Exists | Token::TypeOf)) {
             let typed = self.take(Token::TypeOf);
             if !typed {
-                self.expect(Token::Exists)?;
+                self.expect(Token::Exists, "EXISTS")?;
             }
-            self.expect(Token::LParen)?;
-            let Some(Token::Name(n)) = self.peek().cloned() else {
-                return Err(Error("InvalidQuery"));
+            self.expect(Token::LParen, "'('")?;
+            let n = match self.peek().cloned() {
+                Some(Token::Name(n)) if arkiv::sdk_safe_name(&n) => n,
+                Some(Token::SysName(_)) => {
+                    return Err(QueryError::at(
+                        QueryErrorKind::Type,
+                        self.source,
+                        self.position(),
+                        "a user attribute: system attributes are always present",
+                    ));
+                }
+                _ => return Err(self.parse_error("an attribute name")),
             };
-            if !arkiv::sdk_safe_name(&n) {
-                return Err(Error("InvalidQuery"));
-            }
             self.at += 1;
-            self.expect(Token::RParen)?;
-            let n = CellName::new(&n).map_err(|_| Error("InvalidQuery"))?;
+            self.expect(Token::RParen, "')'")?;
+            let n = CellName::new(&n).map_err(|_| self.parse_error("an attribute name"))?;
             if typed {
-                self.expect(Token::Eq)?;
+                self.expect(Token::Eq, "'='")?;
                 let Some(Token::Name(tag)) = self.peek().cloned() else {
-                    return Err(Error("InvalidQuery"));
+                    return Err(self.parse_error("a type tag"));
                 };
-                self.at += 1;
                 let tag = TAGS
                     .iter()
                     .find(|(s, _)| s.eq_ignore_ascii_case(&tag))
                     .map(|(_, t)| *t)
-                    .ok_or(Error("InvalidQuery"))?;
+                    .ok_or_else(|| {
+                        QueryError::at(
+                            QueryErrorKind::Type,
+                            self.source,
+                            self.position(),
+                            "an indexable type tag: bool, i32, u64, u256, dec, bytes32, str, \
+                             addr or key (bytes is never indexed)",
+                        )
+                    })?;
+                self.at += 1;
                 Ok(Query::term(Term::exists(n, tag)))
             } else {
                 Ok(Query {
@@ -803,30 +1025,37 @@ impl Parser<'_> {
                 })
             }
         } else {
-            let start = self.tokens.get(self.at).ok_or(Error("InvalidQuery"))?.start;
             if !matches!(self.peek(), Some(Token::Name(_) | Token::SysName(_))) {
-                return Err(Error("InvalidQuery"));
+                return Err(self.parse_error("a predicate"));
             }
-            let op = self.tokens.get(self.at + 1).ok_or(Error("InvalidQuery"))?;
+            let start = self.position();
+            let op = self.tokens.get(self.at + 1).ok_or_else(|| {
+                QueryError::at(
+                    QueryErrorKind::Parse,
+                    self.source,
+                    self.source.len(),
+                    "a comparison operator",
+                )
+            })?;
             let neq = op.token == Token::Neq;
             let op_start = op.start;
             self.at += 3;
             if self.at > self.tokens.len() {
-                return Err(Error("InvalidQuery"));
+                return Err(QueryError::at(
+                    QueryErrorKind::Parse,
+                    self.source,
+                    self.source.len(),
+                    "a value",
+                ));
             }
-            let end = self
-                .tokens
-                .get(self.at)
-                .map(|t| t.start)
-                .unwrap_or(self.source.len());
+            let end = self.position();
             let mut predicate = self.source[start..end].to_string();
             if neq {
-                predicate.replace_range(op_start - start..op_start - start + 2, "=");
+                // Same width, so source-parser offsets stay aligned.
+                predicate.replace_range(op_start - start..op_start - start + 2, "= ");
             }
-            leaf(
-                parse::parse(&predicate).map_err(|_| Error("InvalidQuery"))?,
-                neq,
-            )
+            let ast = parse::parse(&predicate).map_err(|e| source_error(e, self.source, start))?;
+            leaf(ast, neq, self.source, start)
         }
     }
 }
@@ -838,11 +1067,21 @@ mod tests {
     fn bounds(host: &Host) -> QueryLimits {
         ReadLimits::default().query_limits(&host.genesis.genesis.limits)
     }
-    fn entity_count(host: &Host, params: &Json) -> Result<Json> {
+    fn entity_count(host: &Host, params: &Json) -> Read<Json> {
         plan_count(host, params, bounds(host)).and_then(Planned::run)
     }
-    fn query(host: &Host, params: &Json) -> Result<Json> {
+    fn query(host: &Host, params: &Json) -> Read<Json> {
         plan_query(host, params, bounds(host)).and_then(PageRead::run)
+    }
+    /// The SDK's `select`: every key sent as an explicit boolean.
+    fn sdk_select(attributes: Json) -> Json {
+        json!({"key":true,"owner":true,"creator":true,"createdAt":true,"updatedAt":true,"expiresAt":true,"creationFlags":true,"attributeSchema":true,"attributes":attributes})
+    }
+    fn kind(result: Read<Json>) -> QueryErrorKind {
+        match result {
+            Err(ReadError::Query(q)) => q.kind,
+            other => panic!("expected a query error, got {other:?}"),
+        }
     }
     #[test]
     fn sdk_operators_and_bounds() {
@@ -889,6 +1128,18 @@ mod tests {
         );
         assert!(selection(Some(&json!({"payload":1}))).is_err());
         assert_eq!(selection(None).unwrap(), json!({"key":true}));
+        // The removed payload model is not selectable at all.
+        for removed in ["payload", "contentType"] {
+            for choice in [true, false] {
+                let mut select = sdk_select(json!(true));
+                select[removed] = json!(choice);
+                assert_eq!(selection(Some(&select)), Err(Error("InvalidParams")));
+            }
+        }
+        // Every SDK `RpcSelect` key is accepted, `arkiv.schema` included.
+        assert!(selection(Some(&sdk_select(json!(true)))).is_ok());
+        assert!(selection(Some(&sdk_select(json!({"arkiv.schema":true,"title":true})))).is_ok());
+        assert!(selection(Some(&sdk_select(json!(false)))).is_ok());
     }
     fn fixture() -> Host {
         fixture_with_period(1_000)
@@ -899,6 +1150,7 @@ mod tests {
             genesis_bundle::*,
             signed::{crypto::Signer, history::History, protocol::*},
         };
+        use arkiv_db::Cell;
         use arkiv_db_memory::MemoryVersionedStore;
         use std::sync::Arc;
         let signer = Signer::from_bytes([1; 32]).unwrap();
@@ -917,6 +1169,8 @@ mod tests {
             .unwrap(),
             prefill: None,
         };
+        let indexed = |name: &str, value| (CellName::new(name).unwrap(), Cell::attribute(value));
+        let field = |name: &str, value| (CellName::new(name).unwrap(), Cell::field(value));
         let rows = (0..4)
             .map(|n| PrefillEntity {
                 creator: *signer.address().as_bytes(),
@@ -924,13 +1178,18 @@ mod tests {
                 salt: n as u128,
                 expires_at_height: 10,
                 flags: 0,
-                content_type: "text/plain".into(),
-                payload: format!("row{n}").into_bytes(),
                 attributes: match n {
-                    0 => vec![(CellName::new("n").unwrap(), Value::U64(7))],
-                    1 => vec![(CellName::new("n").unwrap(), Value::U64(8))],
-                    2 => vec![(CellName::new("n").unwrap(), Value::str("eight"))],
-                    _ => vec![],
+                    0 => vec![
+                        indexed("n", Value::U64(7)),
+                        field("note", Value::str("seven")),
+                    ],
+                    1 => vec![indexed("n", Value::U64(8))],
+                    2 => vec![indexed("n", Value::str("eight"))],
+                    // The same name and value as row 0, but unindexed.
+                    _ => vec![
+                        field("blob", Value::bytes(&[0xab, 0xcd])),
+                        field("n", Value::U64(7)),
+                    ],
                 },
             })
             .collect::<Vec<_>>();
@@ -972,7 +1231,7 @@ mod tests {
             entity_count(&host, &json!([{"block":0,"query":"n = u64(7)"}])).unwrap(),
             json!(1)
         );
-        let page = query(&host, &json!(["*", {"atBlock":"0x0","limit":200,"select":{"key":true,"owner":true,"creator":true,"createdAt":true,"updatedAt":true,"expiresAt":true,"creationFlags":true,"contentType":true,"attributes":true}}])).unwrap();
+        let page = query(&host, &json!(["*", {"atBlock":"0x0","limit":200,"select":{"key":true,"owner":true,"creator":true,"createdAt":true,"updatedAt":true,"expiresAt":true,"creationFlags":true,"attributes":true}}])).unwrap();
         assert_eq!(page["data"].as_array().unwrap().len(), 4);
         assert_eq!(page["blockNumber"], "0x0");
         for params in [
@@ -1016,7 +1275,7 @@ mod tests {
                 .unwrap()["duration"],
             0
         );
-        let selected = json!({"key":true,"attributes":{"n":true},"payload":true,"createdAt":true});
+        let selected = json!({"key":true,"attributes":{"n":true},"createdAt":true});
         let first = query(
             &host,
             &json!(["EXISTS(n)",{"limit":"0x1","select":selected}]),
@@ -1083,8 +1342,12 @@ mod tests {
             ..defaults
         };
         assert_eq!(
-            run("arkiv_getEntityCount", json!([{"query":nine}]), defaults),
-            Err(Error("QueryRejected"))
+            kind(run(
+                "arkiv_getEntityCount",
+                json!([{"query":nine}]),
+                defaults
+            )),
+            QueryErrorKind::Limits
         );
         assert_eq!(
             run("arkiv_getEntityCount", json!([{"query":nine}]), wide),
@@ -1099,8 +1362,12 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" OR ");
         assert_eq!(
-            run("arkiv_getEntityCount", json!([{"query":ors}]), defaults),
-            Err(Error("QueryRejected"))
+            kind(run(
+                "arkiv_getEntityCount",
+                json!([{"query":ors}]),
+                defaults
+            )),
+            QueryErrorKind::Limits
         );
         let many = ReadLimits {
             max_groups: Some(9),
@@ -1126,6 +1393,167 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+    #[test]
+    fn unindexed_attributes_are_returned_but_never_matched() {
+        let host = fixture();
+        let page = |source: &str| {
+            query(
+                &host,
+                &json!([source, {"select": sdk_select(json!(true)), "limit": "0xc8"}]),
+            )
+            .unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .clone()
+        };
+        // Row 3 holds `n = u64(7)` unindexed: only row 0's indexed one matches,
+        // and predicates on `blob`/`note` never match.
+        assert_eq!(page("n = u64(7)").len(), 1);
+        assert_eq!(page("EXISTS(n)").len(), 3);
+        assert_eq!(page("note = str('seven')").len(), 0);
+        assert_eq!(page("EXISTS(note) OR EXISTS(blob)").len(), 0);
+        assert_eq!(
+            dispatch(
+                &host,
+                "arkiv_getEntityCount",
+                &json!([{"query":"n = u64(7)"}])
+            )
+            .unwrap()
+            .unwrap(),
+            json!(1)
+        );
+        let unindexed = page("NOT EXISTS(n)");
+        assert_eq!(unindexed.len(), 1);
+        assert_eq!(
+            unindexed[0]["attributeSchema"],
+            json!([
+                {"name":"blob","type":"bytes","indexed":false},
+                {"name":"n","type":"u64","indexed":false},
+            ])
+        );
+        assert_eq!(
+            unindexed[0]["attributes"],
+            json!([
+                {"name":"blob","type":"bytes","value":"0xabcd"},
+                {"name":"n","type":"u64","value":"0x7"},
+            ])
+        );
+        let indexed = page("n = u64(7)");
+        assert_eq!(
+            indexed[0]["attributeSchema"],
+            json!([
+                {"name":"n","type":"u64","indexed":true},
+                {"name":"note","type":"str","indexed":false},
+            ])
+        );
+        // The SDK's `RpcEntity` keys and nothing else: no payload model.
+        let keys: Vec<_> = indexed[0].as_object().unwrap().keys().cloned().collect();
+        assert_eq!(
+            keys,
+            [
+                "attributeSchema",
+                "attributes",
+                "createdAt",
+                "creationFlags",
+                "creator",
+                "expiresAt",
+                "key",
+                "owner",
+                "updatedAt"
+            ]
+        );
+        // A named subset selects unindexed attributes by name too.
+        let subset = query(
+            &host,
+            &json!(["n = u64(7)", {"select": sdk_select(json!({"note": true}))}]),
+        )
+        .unwrap();
+        assert_eq!(
+            subset["data"][0]["attributes"],
+            json!([{"name":"note","type":"str","value":"seven"}])
+        );
+    }
+    #[test]
+    fn query_errors_use_the_sdk_code_table() {
+        let mut host = fixture();
+        host.produce().unwrap();
+        let error = |source: &str, options: Json| match query(&host, &json!([source, options])) {
+            Err(ReadError::Query(q)) => q,
+            other => panic!("{source}: {other:?}"),
+        };
+        for (source, kind) in [
+            ("n =", QueryErrorKind::Parse),
+            ("(n = u64(1)", QueryErrorKind::Parse),
+            ("n = u64(1) n = u64(2)", QueryErrorKind::Parse),
+            ("EXISTS(and)", QueryErrorKind::Parse),
+            ("n > str('x')", QueryErrorKind::Type),
+            ("TYPEOF(n) = bytes", QueryErrorKind::Type),
+            ("TYPEOF(n) = nope", QueryErrorKind::Type),
+            ("EXISTS($owner)", QueryErrorKind::Type),
+            ("$contentType = str('text/plain')", QueryErrorKind::Type),
+            ("$payload = str('x')", QueryErrorKind::Type),
+            ("n = i32(2147483648)", QueryErrorKind::Literal),
+            ("n = dec(1.0000000000000000001)", QueryErrorKind::Literal),
+        ] {
+            assert_eq!(error(source, json!({})).kind, kind, "{source}");
+        }
+        let explosive = std::iter::repeat_n("(a = true OR b = true)", 8)
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        for source in [
+            "a".repeat(8193),
+            format!("{}a = true", "NOT ".repeat(40)),
+            explosive,
+            vec!["a = true"; 65].join(" AND "),
+        ] {
+            assert_eq!(error(&source, json!({})).kind, QueryErrorKind::Limits);
+        }
+        let cursor = error(
+            "*",
+            json!({"atBlock":"0x0","cursor":format!("0x{}", "00".repeat(32))}),
+        );
+        assert_eq!(cursor.kind, QueryErrorKind::Cursor);
+        assert_eq!(
+            error("*", json!({"cursor":"0x00"})).kind,
+            QueryErrorKind::Cursor
+        );
+        let block = error("*", json!({"atBlock":"0x99"}));
+        assert_eq!(block.kind, QueryErrorKind::Block);
+        assert_eq!(
+            kind(entity_count(&host, &json!([{"block":99}]))),
+            QueryErrorKind::Block
+        );
+        assert_eq!(
+            kind(entity_count(&host, &json!([{"query":"n ="}]))),
+            QueryErrorKind::Parse
+        );
+        // Codes are the SDK's, and a parse error says where.
+        let codes: Vec<i64> = [
+            QueryErrorKind::Parse,
+            QueryErrorKind::Type,
+            QueryErrorKind::Literal,
+            QueryErrorKind::Limits,
+            QueryErrorKind::Cursor,
+            QueryErrorKind::Block,
+        ]
+        .iter()
+        .map(|k| k.code())
+        .collect();
+        assert_eq!(codes, [-32001, -32002, -32003, -32004, -32005, -32006]);
+        let parse = error("n = u64(1) AND (m = u64(2)", json!({}));
+        assert_eq!(
+            parse.to_json()["data"],
+            json!({"position":26,"expected":"')'","got":"end of query"})
+        );
+        assert_eq!(parse.to_json()["code"], -32001);
+        let literal = error("n = i32(2147483648)", json!({}));
+        assert_eq!(literal.to_json()["data"]["position"], 8);
+        // Malformed parameters are not query errors.
+        assert!(matches!(
+            query(&host, &json!(["*", {"limit": 0}])),
+            Err(ReadError::Node(Error("InvalidParams")))
+        ));
     }
     #[test]
     fn timing_uses_numeric_height_and_observed_whole_seconds() {

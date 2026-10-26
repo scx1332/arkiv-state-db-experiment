@@ -14,7 +14,7 @@
 //!   block production answer promptly; the count returns the entity count
 //!   of the height it was admitted at.
 //! - With every read permit taken, another detached read is refused at once
-//!   with `ServerBusy` (JSON-RPC code -32005 and HTTP 429 for a single
+//!   with `ServerBusy` (JSON-RPC code -32010 and HTTP 429 for a single
 //!   request, per-entry in a batch; REST 429), while transaction admission
 //!   and production proceed.
 //! - A read past its deadline is answered `ReadDeadlineExceeded`, and one
@@ -192,9 +192,16 @@ async fn node(limits: ReadLimits) -> Node2 {
             salt: n as u128,
             expires_at_height: 100_000 + n,
             flags: 0,
-            content_type: "text/plain".into(),
-            payload: format!("row{n}").into_bytes(),
-            attributes: vec![(CellName::new("n").unwrap(), DbValue::U64(n % 4))],
+            attributes: vec![
+                (
+                    CellName::new("body").unwrap(),
+                    arkiv_db::Cell::field(DbValue::bytes(format!("row{n}").as_bytes())),
+                ),
+                (
+                    CellName::new("n").unwrap(),
+                    arkiv_db::Cell::attribute(DbValue::U64(n % 4)),
+                ),
+            ],
         })
         .collect::<Vec<_>>();
     let genesis = build_genesis(
@@ -269,7 +276,10 @@ fn create(genesis: &SignedGenesis, nonce: u64, value: u64) -> SignedTx {
                     expires_at: 0,
                     min_lifetime: 1_000,
                 },
-                attributes: vec![(CellName::new("n").unwrap(), DbValue::U64(value))],
+                attributes: vec![(
+                    CellName::new("n").unwrap(),
+                    arkiv_db::Cell::attribute(DbValue::U64(value)),
+                )],
             },
         }],
     };
@@ -479,7 +489,7 @@ async fn saturated_reads_are_refused_at_once_without_blocking_writes() {
         assert_eq!(code, 429);
         assert_eq!(
             busy,
-            json!({"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"ServerBusy"}})
+            json!({"jsonrpc":"2.0","id":1,"error":{"code":arkiv_node::signed::rpc::SERVER_BUSY_CODE,"message":"ServerBusy"}})
         );
         assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
     }

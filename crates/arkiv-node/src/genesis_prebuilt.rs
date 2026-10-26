@@ -379,7 +379,7 @@ mod tests {
         signed::protocol::{SignedLimits, default_native_genesis},
     };
     use alloy_primitives::U256;
-    use arkiv_db::{CellName, OwnerId, Value, decode_exact, durable::Options, encode};
+    use arkiv_db::{Cell, CellName, OwnerId, Value, decode_exact, durable::Options, encode};
     use std::os::unix::fs::MetadataExt;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -422,7 +422,7 @@ mod tests {
     }
     fn stream_expiring(rows: u64, expiry: impl Fn(u64) -> u64) -> Vec<u8> {
         let mut b = b"ARKPFL02".to_vec();
-        b.extend_from_slice(&2u32.to_be_bytes());
+        b.extend_from_slice(&crate::genesis_bundle::ROW_CODEC.to_be_bytes());
         b.extend_from_slice(&rows.to_be_bytes());
         for n in 0..rows {
             let f = encode(&PrefillEntity {
@@ -431,9 +431,16 @@ mod tests {
                 salt: n as u128,
                 expires_at_height: expiry(n),
                 flags: 0,
-                content_type: "text/plain".into(),
-                payload: format!("payload {n}").into_bytes(),
-                attributes: vec![(CellName::new("label").unwrap(), Value::str("hello"))],
+                attributes: vec![
+                    (
+                        CellName::new("body").unwrap(),
+                        Cell::field(Value::bytes(format!("payload {n}").as_bytes())),
+                    ),
+                    (
+                        CellName::new("label").unwrap(),
+                        Cell::attribute(Value::str("hello")),
+                    ),
+                ],
             });
             b.extend_from_slice(&(f.len() as u32).to_be_bytes());
             b.extend(f);

@@ -150,7 +150,8 @@ fn params_bytes() -> Vec<u8> {
 fn genesis_bytes() -> Vec<u8> {
     cat(&[
         &be32(1),
-        &be32(1),
+        // Protocol 2: the user-defined-columns entity rules.
+        &be32(2),
         &be64(CHAIN),
         &be64(1_000),
         &limits_bytes(),
@@ -208,7 +209,8 @@ fn genesis_versions_are_checked() {
         );
     }
     let mut bytes = genesis_bytes();
-    for version in [0u32, 2, u32::MAX] {
+    // Protocol 1 is the retired payload entity model.
+    for version in [0u32, 1, 3, u32::MAX] {
         bytes[4..8].copy_from_slice(&version.to_be_bytes());
         rejects::<Genesis>(
             &bytes,
@@ -309,7 +311,7 @@ fn genesis_block_header() {
 
 /// The hash of `support::genesis()`, pinned so a change to any genesis or
 /// header byte is deliberate.
-const GENESIS_HASH: &str = "ed25478e4032be24ec845e467a622ec08ed9dcfcf1483c18cef4aa2e5d128d09";
+const GENESIS_HASH: &str = "dcae870e9fb324f007644ee4de69eb0306f04cc4a9e1078ebb5a0dad5e0d3ae9";
 
 #[test]
 fn admin_inputs() {

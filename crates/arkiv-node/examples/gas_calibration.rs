@@ -1,8 +1,12 @@
 //! Run: cargo run -p arkiv-node --example gas_calibration
+//!
+//! Each example entity is a user-defined-columns create: an unindexed
+//! `bytes` column `body` of the given size, an unindexed `str` column
+//! `format`, and the given number of indexed `u64` attributes.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use arkiv_db::{
-        Budget, CellName, Engine, Limits, NamespaceName, OwnerId, Projection, RecordKey, Value,
-        WriteOp, encode,
+        Budget, Cell, CellName, Engine, Limits, NamespaceName, OwnerId, Projection, RecordKey,
+        Value, WriteOp, encode,
     };
     use arkiv_node::{
         Expiry, OpOutcome,
@@ -13,12 +17,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         gas,
     };
     let mut results = Vec::new();
-    for (label, payload, days, attributes) in [
+    for (label, body, days, attributes) in [
         ("small", 256, 1, 2),
         ("standard-week", 1024, 7, 4),
         ("standard-month", 1024, 30, 4),
         ("document-week", 16 * 1024, 7, 4),
-        ("maximum-payload-month", 128 * 1024, 30, 4),
+        ("maximum-bytes-month", 128 * 1024, 30, 4),
     ] {
         let engine = Engine::with_limits(
             gas::schedule(),
@@ -47,14 +51,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             allow_permanent_create: false,
         };
         let mut attrs = vec![
-            (CellName::new("$payload")?, Value::bytes(&vec![0; payload])),
             (
-                CellName::new("$contentType")?,
-                Value::str("application/json"),
+                CellName::new("body")?,
+                Cell::field(Value::bytes(&vec![0; body])),
+            ),
+            (
+                CellName::new("format")?,
+                Cell::field(Value::str("application/json")),
             ),
         ];
         for index in 0..attributes {
-            attrs.push((CellName::new(&format!("attr{index}"))?, Value::U64(index)));
+            attrs.push((
+                CellName::new(&format!("attr{index}"))?,
+                Cell::attribute(Value::U64(index)),
+            ));
         }
         let operation = ArkivOperation::Create {
             salt: 7,
@@ -97,7 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?
         .gas;
         let total = gas::TX_INTRINSIC_GAS + receipt.spent.units();
-        results.push(serde_json::json!({"example":label,"payloadBytes":payload,"userAttributes":attributes,"lifetimeBlocks":days*gas::RENT_PERIOD_BLOCKS,"logicalStorageUnits":units.total,"canonicalKeyAndCellsBytes":encode(&(key,row.cells)).len(),"executionGas":total-rent,"rentGas":rent,"totalGas":total,"referenceGlm":gas::reference_fee_glm(total)}));
+        results.push(serde_json::json!({"example":label,"bodyBytes":body,"indexedAttributes":attributes,"lifetimeBlocks":days*gas::RENT_PERIOD_BLOCKS,"logicalStorageUnits":units.total,"canonicalKeyAndCellsBytes":encode(&(key,row.cells)).len(),"executionGas":total-rent,"rentGas":rent,"totalGas":total,"referenceGlm":gas::reference_fee_glm(total)}));
     }
     println!("{}", serde_json::to_string_pretty(&results)?);
     Ok(())

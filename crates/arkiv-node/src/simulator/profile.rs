@@ -7,7 +7,8 @@ use serde_json::{Value, json};
 pub const PROOF_PROFILE: &str = "eq-page-v1";
 
 /// The Arkiv SDK value types an entity attribute may carry, in SDK ABI
-/// type-id order (`bytes` only as `$payload`).
+/// type-id order. Every type may be indexed except `bytes`, which is only
+/// stored.
 const ENTITY_VALUE_TYPES: [&str; 10] = [
     "bool", "i32", "u64", "u256", "dec", "bytes32", "bytes", "str", "addr", "key",
 ];
@@ -20,7 +21,7 @@ pub fn capabilities(limits: &Limits) -> Value {
         .map(|tag| tag.name())
         .collect();
     json!({
-        "profile":"arkiv-entity-v2",
+        "profile":"arkiv-entity-v3",
         "layoutVersion":arkiv_db::LAYOUT_VERSION,
         "codecVersion":arkiv_db::CODEC_VERSION,
         "valueTypes":value_types,
@@ -35,10 +36,13 @@ pub fn capabilities(limits: &Limits) -> Value {
         "entityNamespace":{
             "namespace":crate::arkiv::entity_namespace().ordinal().to_string(),
             "valueTypes":ENTITY_VALUE_TYPES,
-            "payloadBytes":131072,
-            "systemEquality":["$key","$creator","$owner","$createdAt","$updatedAt","$expiresAt","$contentType"],
-            "systemProjection":["$key","$creator","$owner","$createdAt","$updatedAt","$expiresAt","$contentType","$payload","$creationFlags"],
-            "currentSdkQueryExceptions":["$createdAt","$updatedAt","$contentType"],
+            "unindexedValueTypes":["bytes"],
+            "indexedTypeIdFlag":crate::arkiv::INDEXED_FLAG,
+            "maxAttributes":crate::arkiv::MAX_ATTRIBUTES,
+            "entityBytes":crate::arkiv::MAX_ENTITY_BYTES,
+            "systemEquality":["$key","$creator","$owner","$createdAt","$updatedAt","$expiresAt"],
+            "systemProjection":["$key","$creator","$owner","$createdAt","$updatedAt","$expiresAt","$creationFlags"],
+            "currentSdkQueryExceptions":["$createdAt","$updatedAt"],
             "expiryPolicy":"purge-before-publication",
             "equalExpiryExtension":"updates-updatedAt",
         },

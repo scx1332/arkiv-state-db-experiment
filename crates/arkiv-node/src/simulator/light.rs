@@ -61,7 +61,6 @@ pub fn resolve(
             "$key" => value.tag() == TypeTag::Key,
             "$owner" | "$creator" => value.tag() == TypeTag::Addr,
             "$createdAt" | "$updatedAt" | "$expiresAt" => value.tag() == TypeTag::U64,
-            "$contentType" => value.tag() == TypeTag::Str,
             name if name.starts_with('$') => false,
             name => crate::arkiv::sdk_safe_name(name),
         };
@@ -415,7 +414,7 @@ impl Light {
                 Ok(serde_json::json!({"key":hex(&p.key),"creator":hex(&p.creator),"owner":hex(&p.owner),
                     "createdAt":p.created_at.to_string(),"updatedAt":p.updated_at.to_string(),"expiresAt":p.expires_at.to_string(),
                     "creationFlags":{"raw":p.creation_flags,"readonly":p.creation_flags & 1 != 0,"permissionlessExtension":p.creation_flags & 2 != 0},
-                    "contentType":p.content_type,"payload":hex(&p.payload)}))
+                    "attributes":crate::signed::rpc_reads::verified_attributes(&p)?}))
             }).collect::<Result<Vec<_>>>()?
         } else {
             vec![]
@@ -438,7 +437,7 @@ impl Light {
             cursor
         });
         let mut response = serde_json::json!({"verification":"proof verified against trusted simulator root; unsigned source","sourceId":self.identity.source_id,"runId":self.identity.run_id,"genesisHash":self.identity.genesis_hash,"chainId":self.identity.chain_id,"snapshot":{"height":h.height.to_string(),"hash":hex(h.hash().as_slice()),"stateRoot":hex(h.state_root.as_slice())},"query":{"namespace":r.namespace,"attribute":r.attribute,"valueType":r.value_type,"value":r.value,"limit":r.limit},"rows":rows,"continuation":cursor,"postingCount":page.posting_count});
-        response["profile"] = serde_json::json!("arkiv-entity-v2");
+        response["profile"] = serde_json::json!("arkiv-entity-v3");
         response["entities"] = serde_json::json!(entities);
         if let Some(inspection) = inspection {
             let object = response.as_object_mut().ok_or(Error("InvalidProof"))?;

@@ -113,7 +113,8 @@ fn lifecycle_history_full_replay_header_only_restart_and_typed_proofs() {
         (6, "$updatedAt", "u64", "6".into(), 1),
         (13, "$expiresAt", "u64", "14".into(), 1),
         (14, "$expiresAt", "u64", "14".into(), 0),
-        (3, "$contentType", "str", "application/json".into(), 5),
+        // Unindexed: stored and proven, but never posted.
+        (3, "format", "str", "application/json".into(), 0),
         (3, "counter", "i32", i32::MIN.to_string(), 5),
         (
             3,
@@ -144,6 +145,8 @@ fn lifecycle_history_full_replay_header_only_restart_and_typed_proofs() {
     for (name, ty, value) in [
         ("$owner", "key", hex(&[0xa1; 32])),
         ("$payload", "str", "".into()),
+        ("$payload", "bytes", "0x".into()),
+        ("$contentType", "str", "application/json".into()),
         ("$expiration", "u64", "14".into()),
         ("counter", "i64", "-1".into()),
     ] {
@@ -212,10 +215,18 @@ fn maximum_payload_is_provable_without_leaking_into_explorer_feed() {
         &mut light,
         &request(2, "group", "u64", "1".into(), 64),
     );
+    // The unindexed bytes column is proven in full and returned verified.
+    let data = page["entities"][0]["attributes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "data")
+        .unwrap();
     assert_eq!(
-        page["entities"][0]["payload"].as_str().unwrap().len(),
-        2 + 2 * 128 * 1024
+        (&data["type"], &data["indexed"]),
+        (&"bytes".into(), &false.into())
     );
+    assert_eq!(data["value"].as_str().unwrap().len(), 2 + 2 * 128 * 1024);
     assert!(json_bytes(&page, RESPONSE_CAP).is_ok());
     let (q, previous) = light
         .request(&request(2, "group", "u64", "1".into(), 64))
@@ -285,8 +296,8 @@ async fn http_light_inspection_is_typed_bounded_and_independently_verifiable() {
         .json()
         .await
         .unwrap();
-    assert_eq!(status["capabilities"]["profile"], "arkiv-entity-v2");
-    assert_eq!(status["protocolVersion"], 1);
+    assert_eq!(status["capabilities"]["profile"], "arkiv-entity-v3");
+    assert_eq!(status["protocolVersion"], 2);
     assert_eq!(
         status["capabilities"]["valueTypes"]
             .as_array()

@@ -1,6 +1,6 @@
 # Complete values; the compiler must not resolve a mutable named preset.
 schema = "arkiv-genesis-profile-v1"
-entity_rules = "arkiv-entity-v2"
+entity_rules = "arkiv-entity-v3"
 account_rules = "glm-v2"
 state_layout = 2
 codec_version = 1
@@ -14,7 +14,7 @@ rent_rule = "glm-rent-v1"
 
 [engine_limits]
 namespace_cap = 1024
-max_cells = 32
+max_cells = 39
 max_cell_name_len = 32
 max_str_len = 131072
 max_bytes_len = 131072

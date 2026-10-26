@@ -362,8 +362,8 @@ fn default_retained_byte_cap_rejects_without_eviction() {
                         min_lifetime: 1_000,
                     },
                     attributes: vec![(
-                        arkiv_db::CellName::new("$payload").unwrap(),
-                        arkiv_db::Value::bytes(&vec![7; 128 * 1024]),
+                        arkiv_db::CellName::new("body").unwrap(),
+                        arkiv_db::Cell::field(arkiv_db::Value::bytes(&vec![7; 128 * 1024])),
                     )],
                 },
             }];

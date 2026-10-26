@@ -7,7 +7,7 @@
 //! The source parser normalizes system block heights to U256; the selection
 //! adapter deliberately restores U64, as required by this engine's indexes.
 pub(crate) mod ast;
-mod error;
+pub(crate) mod error;
 pub(crate) mod lexer;
 mod limits;
 mod literal;
@@ -191,7 +191,6 @@ fn selection(key: &AnnotKey, value: &AttributeValue) -> Selection {
             BuiltIn::Key => "$key",
             BuiltIn::ExpiresAt => "$expiresAt",
             BuiltIn::CreatedAt => "$createdAt",
-            BuiltIn::ContentType => "$contentType",
         }
         .into(),
     };
@@ -312,7 +311,7 @@ mod tests {
             "flag = true",
             "name = str('it''s é')",
             "n = -2147483648",
-            "$contentType = 'application/json'",
+            "arkiv.schema = str('posts')",
         ] {
             let c = classify(query);
             let s = c.selection.unwrap();

@@ -1,4 +1,4 @@
-use arkiv_db::{Budget, CellName, Projection, RecordKey, Value, durable::Options};
+use arkiv_db::{Budget, Cell, CellName, Projection, RecordKey, Value, durable::Options};
 use arkiv_db_memory::MemoryVersionedStore;
 use arkiv_node::{
     Expiry, OpOutcome, TxEnvelope, TxOp, TxStatus,
@@ -33,7 +33,8 @@ fn host(producer: bool) -> Host {
     )
     .unwrap()
 }
-fn create(salt: u128, payload: usize, lifetime: u64) -> ArkivOperation {
+/// An entity with an indexed `group` and `body` bytes of unindexed data.
+fn create(salt: u128, body: usize, lifetime: u64) -> ArkivOperation {
     ArkivOperation::Create {
         salt,
         flags: 0,
@@ -42,10 +43,13 @@ fn create(salt: u128, payload: usize, lifetime: u64) -> ArkivOperation {
             min_lifetime: lifetime,
         },
         attributes: vec![
-            (CellName::new("group").unwrap(), Value::U64(1)),
             (
-                CellName::new("$payload").unwrap(),
-                Value::bytes(&vec![42; payload]),
+                CellName::new("body").unwrap(),
+                Cell::field(Value::bytes(&vec![42; body])),
+            ),
+            (
+                CellName::new("group").unwrap(),
+                Cell::attribute(Value::U64(1)),
             ),
         ],
     }
@@ -212,8 +216,8 @@ fn lifecycle_growth_extension_shrink_and_delete() {
         vec![ArkivOperation::Patch {
             key: entity.clone(),
             set: vec![(
-                CellName::new("$payload").unwrap(),
-                Value::bytes(&vec![42; 2048]),
+                CellName::new("body").unwrap(),
+                Cell::field(Value::bytes(&vec![42; 2048])),
             )],
             remove: vec![],
         }],
@@ -254,7 +258,10 @@ fn lifecycle_growth_extension_shrink_and_delete() {
         1_000_000,
         vec![ArkivOperation::Patch {
             key: entity.clone(),
-            set: vec![(CellName::new("$payload").unwrap(), Value::bytes(&[]))],
+            set: vec![(
+                CellName::new("body").unwrap(),
+                Cell::field(Value::bytes(&[])),
+            )],
             remove: vec![],
         }],
     ))

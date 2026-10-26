@@ -17,9 +17,11 @@ Source grammar limits: 8192 UTF-8 bytes, 64 predicates, depth 32, attribute
 names 32 bytes, indexed strings 128 UTF-8 bytes. Diagnostic offsets are UTF-8
 byte offsets; equal start/end marks the source parser's error caret.
 
-The six queryable system fields are `$key`, `$owner`, `$creator`, `$createdAt`,
-`$expiresAt` and `$contentType`. The source rejects `$updatedAt` and
-`$creationFlags` as projection-only and `$payload` as unindexed. The engine's
+The five queryable system fields are `$key`, `$owner`, `$creator`, `$createdAt`
+and `$expiresAt`. The source rejects `$updatedAt` and `$creationFlags` as
+projection-only. Entities have no payload or content type (user-defined
+columns replaced them), so `$payload` and `$contentType` are unknown system
+attributes. A predicate on a user name matches only indexed attributes. The engine's
 older explicit equality endpoint may expose additional committed fields;
 this source-language endpoint deliberately preserves source grammar semantics.
 

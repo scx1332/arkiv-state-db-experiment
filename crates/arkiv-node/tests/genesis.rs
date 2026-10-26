@@ -244,7 +244,8 @@ fn versions_are_checked() {
         ChainSpec::new(bad).err(),
         Some(GenesisError::UnsupportedFormat(2))
     );
-    for protocol in [0, 2, 4] {
+    // Protocol 1 is the retired payload entity model.
+    for protocol in [0, 1, 3] {
         let mut bad = genesis();
         bad.protocol_version = protocol;
         assert_eq!(
@@ -258,7 +259,7 @@ fn versions_are_checked() {
 fn the_spec_exposes_the_genesis() {
     let spec = spec(PARAMS, LIMITS).expect("valid");
     assert_eq!(spec.chain_id(), CHAIN);
-    assert_eq!(spec.protocol_version(), 1);
+    assert_eq!(spec.protocol_version(), 2);
     assert!(spec.is_admin(&ADMIN));
     assert!(!spec.is_admin(&ALICE));
     assert_eq!(spec.genesis_header(), &genesis().header());

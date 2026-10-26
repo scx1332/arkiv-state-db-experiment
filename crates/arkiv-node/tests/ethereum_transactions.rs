@@ -1,6 +1,7 @@
 //! Independent viem 2.x signed Ethereum fixtures; never resigned by the native host.
+//! `fixtures/ethereum-sdk-vectors.mjs` regenerates them.
 use alloy_primitives::{U256, keccak256};
-use arkiv_db::{CellName, Value, encode};
+use arkiv_db::{Cell, CellName, Value, encode};
 use arkiv_node::{
     TxOp,
     arkiv::ArkivOperation,
@@ -45,13 +46,10 @@ fn independent_sdk_legacy_and_1559_authentication_and_exact_native_mapping() {
         assert_eq!(*salt, 9);
         assert_eq!(expiry.min_lifetime, 20);
         assert_eq!(expiry.expires_at, 0);
-        assert_eq!(
-            attributes,
-            &vec![
-                (CellName::new("$payload").unwrap(), Value::bytes(&[1, 2, 3])),
-                (CellName::new("title").unwrap(), Value::str("hello"))
-            ]
-        );
+        // The SDK's create for a named schema "posts": the indexed tag
+        // (0x88), unindexed bytes (0x07), an indexed u64 (0x83) and an
+        // unindexed str (0x08), strictly ascending by name.
+        assert_eq!(attributes, &udc_attributes());
         let wire = encode(&tx);
         assert_eq!(&wire[..4], &2u32.to_be_bytes());
         let restored = SignedTx::from_bytes(&wire).unwrap();
@@ -82,6 +80,26 @@ fn independent_sdk_legacy_and_1559_authentication_and_exact_native_mapping() {
             assert_ne!(tx2.tx.actor, tx.tx.actor);
         }
     }
+}
+fn udc_attributes() -> Vec<(CellName, Cell)> {
+    vec![
+        (
+            CellName::new("arkiv.schema").unwrap(),
+            Cell::attribute(Value::str("posts")),
+        ),
+        (
+            CellName::new("body").unwrap(),
+            Cell::field(Value::bytes(&[1, 2, 3])),
+        ),
+        (
+            CellName::new("score").unwrap(),
+            Cell::attribute(Value::U64(42)),
+        ),
+        (
+            CellName::new("title").unwrap(),
+            Cell::field(Value::str("hello")),
+        ),
+    ]
 }
 #[test]
 fn calldata_rejects_trailing_aliases_and_unknown_selector() {
@@ -205,6 +223,60 @@ fn ethereum_original_auth_survives_mining_and_independent_full_replay() {
         producer.submit(tx.clone()).unwrap(),
         producer.request_status(actor, tx.tx.request_id).unwrap()
     );
+    // Query the UDC entity back the way the SDK does.
+    let key = arkiv_node::arkiv::derive_entity_key(9300, actor.as_bytes(), 0, 9);
+    let select = serde_json::json!({"key":true,"owner":true,"creator":true,"createdAt":true,"updatedAt":true,"expiresAt":true,"creationFlags":true,"attributeSchema":true,"attributes":true});
+    let query = |host: &Host, source: &str| {
+        arkiv_node::signed::rpc_reads::dispatch(
+            host,
+            "arkiv_query",
+            &serde_json::json!([source, {"select": select, "limit": "0x1"}]),
+        )
+        .unwrap()
+        .unwrap()
+    };
+    for host in [&producer, &follower] {
+        let page = query(host, "arkiv.schema = str('posts') AND EXISTS(body)");
+        assert_eq!(
+            page["data"],
+            serde_json::json!([]),
+            "bytes are never indexed"
+        );
+        let page = query(host, "arkiv.schema = str('posts') AND score >= u64(10)");
+        let entity = &page["data"][0];
+        assert_eq!(entity["key"], arkiv_node::simulator::wire::hex(&key));
+        assert_eq!(
+            entity["attributeSchema"],
+            serde_json::json!([
+                {"name":"arkiv.schema","type":"str","indexed":true},
+                {"name":"body","type":"bytes","indexed":false},
+                {"name":"score","type":"u64","indexed":true},
+                {"name":"title","type":"str","indexed":false},
+            ])
+        );
+        assert_eq!(
+            entity["attributes"],
+            serde_json::json!([
+                {"name":"arkiv.schema","type":"str","value":"posts"},
+                {"name":"body","type":"bytes","value":"0x010203"},
+                {"name":"score","type":"u64","value":"0x2a"},
+                {"name":"title","type":"str","value":"hello"},
+            ])
+        );
+        assert!(entity.get("payload").is_none() && entity.get("contentType").is_none());
+        // The unindexed str is returned but never matched.
+        assert_eq!(
+            query(host, "title = str('hello')")["data"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            query(
+                host,
+                &format!("$key = key({})", arkiv_node::simulator::wire::hex(&key))
+            )["data"][0]["attributes"],
+            entity["attributes"]
+        );
+    }
 }
 
 #[test]

@@ -1,6 +1,9 @@
-//! Reproducible Arkiv entity trace with a configurable payload size.
+//! Reproducible Arkiv entity trace with a configurable size of its unindexed
+//! `bytes` column (`payload_bytes`, kept as the workload's knob name).
 use super::{Error, Result};
-use arkiv_db::{CellName, Decode, DecodeError, Decoder, Encode, Encoder, RecordKey, Value, digest};
+use arkiv_db::{
+    Cell, CellName, Decode, DecodeError, Decoder, Encode, Encoder, RecordKey, Value, digest,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,7 +32,8 @@ impl Workload {
         use crate::{Expiry, TxOp, arkiv::ArkivOperation as A};
         self.validate()?;
         let ns = crate::arkiv::entity_namespace();
-        let cell = |name: &str, value| (CellName::new(name).unwrap(), value);
+        let cell = |name: &str, value| (CellName::new(name).unwrap(), Cell::attribute(value));
+        let field = |name: &str, value| (CellName::new(name).unwrap(), Cell::field(value));
         let key = |n| {
             RecordKey::new(&crate::arkiv::derive_entity_key(
                 chain,
@@ -71,9 +75,9 @@ impl Workload {
                             ),
                             cell("checksum", Value::Bytes32([0x42; 32])),
                             cell("reference", Value::Key([0x77; 32])),
-                            cell("$contentType", Value::str("application/json")),
-                            cell(
-                                "$payload",
+                            field("format", Value::str("application/json")),
+                            field(
+                                "data",
                                 Value::bytes(&vec![b'S'; self.payload_bytes as usize]),
                             ),
                         ],

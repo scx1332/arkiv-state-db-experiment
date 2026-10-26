@@ -147,6 +147,20 @@ plus named, typed user attributes; there is no payload or content type.
 - **Gas.** Storage occupancy counts every cell's name, value and two tag bytes,
   whatever its name; only indexed cells add the 128-unit posting reservation
   (see [GLM gas](glm-gas-v1.md)).
+- **Lifetimes and permanence.** An entity expiry has no upper bound: any
+  finite height, or `expiresAt = 2^64 − 1` (`u64::MAX`, the SDK's
+  `ExpirationTime.permanent()`), is accepted in a live create or extension
+  and never refused as too far. A `u64::MAX` entity is never scheduled for
+  expiry and never swept; reads report `expiresAt` as `0xffffffffffffffff`
+  and its `EntityCreated`/`ExpiryExtended` logs carry the same word. Rent is
+  capped: an operation charges at most `maxRentLifetimeBlocks` blocks ahead
+  (status `capabilities.gas`, the genesis `max_rent_lifetime`, by default a
+  year at the chain's block period), so a year, two years and permanence cost
+  the same ([rent cap](glm-gas-v1.md#the-rent-cap)). Extending a permanent
+  entity to permanent is a no-op success that stamps `$updatedAt`; any finite
+  expiry is `ExpiryShortened`. A finite entity may be extended to permanent,
+  paying the growth of its capped horizon. Patches, transfers and deletes of
+  permanent entities work as for any entity.
 
 ## Query errors
 

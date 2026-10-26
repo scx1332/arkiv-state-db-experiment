@@ -2,11 +2,12 @@
   {
     "bodyBytes": 256,
     "canonicalKeyAndCellsBytes": 585,
+    "chargedLifetimeBlocks": 17280,
     "example": "small",
     "executionGas": 58358,
     "indexedAttributes": 2,
-    "lifetimeBlocks": 17280,
     "logicalStorageUnits": 2032,
+    "permanent": false,
     "referenceGlm": "0.000074614",
     "rentGas": 16256,
     "totalGas": 74614
@@ -14,11 +15,12 @@
   {
     "bodyBytes": 1024,
     "canonicalKeyAndCellsBytes": 1391,
+    "chargedLifetimeBlocks": 120960,
     "example": "standard-week",
     "executionGas": 66422,
     "indexedAttributes": 4,
-    "lifetimeBlocks": 120960,
     "logicalStorageUnits": 3086,
+    "permanent": false,
     "referenceGlm": "0.000239238",
     "rentGas": 172816,
     "totalGas": 239238
@@ -26,23 +28,38 @@
   {
     "bodyBytes": 1024,
     "canonicalKeyAndCellsBytes": 1391,
+    "chargedLifetimeBlocks": 518400,
     "example": "standard-month",
     "executionGas": 66422,
     "indexedAttributes": 4,
-    "lifetimeBlocks": 518400,
     "logicalStorageUnits": 3086,
+    "permanent": false,
     "referenceGlm": "0.000807062",
     "rentGas": 740640,
     "totalGas": 807062
   },
   {
+    "bodyBytes": 1024,
+    "canonicalKeyAndCellsBytes": 1391,
+    "chargedLifetimeBlocks": 15768000,
+    "example": "standard-permanent",
+    "executionGas": 66422,
+    "indexedAttributes": 4,
+    "logicalStorageUnits": 3086,
+    "permanent": true,
+    "referenceGlm": "0.022594222",
+    "rentGas": 22527800,
+    "totalGas": 22594222
+  },
+  {
     "bodyBytes": 16384,
     "canonicalKeyAndCellsBytes": 16751,
+    "chargedLifetimeBlocks": 120960,
     "example": "document-week",
     "executionGas": 158582,
     "indexedAttributes": 4,
-    "lifetimeBlocks": 120960,
     "logicalStorageUnits": 18446,
+    "permanent": false,
     "referenceGlm": "0.001191558",
     "rentGas": 1032976,
     "totalGas": 1191558
@@ -50,11 +67,12 @@
   {
     "bodyBytes": 131072,
     "canonicalKeyAndCellsBytes": 131439,
+    "chargedLifetimeBlocks": 518400,
     "example": "maximum-bytes-month",
     "executionGas": 846710,
     "indexedAttributes": 4,
-    "lifetimeBlocks": 518400,
     "logicalStorageUnits": 133134,
+    "permanent": false,
     "referenceGlm": "0.03279887",
     "rentGas": 31952160,
     "totalGas": 32798870

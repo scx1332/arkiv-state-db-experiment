@@ -10,7 +10,7 @@ compares between runs. It has two parts:
    engine type the node will put into blocks, receipts and state, and the
    domain-separated digest. Golden vectors are in
    [`crates/arkiv-db/tests/codec.rs`](../crates/arkiv-db/tests/codec.rs).
-2. **Block format version 2 and block execution** (node step N0b-3,
+2. **Block format version 3 and block execution** (node step N0b-3,
    implemented in the `arkiv-node` library): genesis, headers, block
    inputs, transaction envelopes and outcomes built from the codec in
    part 1, their hashes, the genesis invariants, the successor rule, and
@@ -375,7 +375,7 @@ root since node step N3b; see `docs/architecture.md`):
 | `arkiv/outcomes/v1` | encoded block outcomes | in use |
 | `arkiv/tx/v2` | encoded transaction envelope (format 2) | in use; `v1` retired |
 | `arkiv/admin/v1` | encoded admin input | in use |
-| `arkiv/genesis/v1` | encoded genesis | in use |
+| `arkiv/genesis/v2` | encoded genesis (format 3: chain parameters carry the rent cap) | in use; `v1` retired |
 | `arkiv/state/v1` | encoded state header: the state root | in use |
 
 Only canonical codec bytes are hashed.
@@ -393,7 +393,7 @@ accepted short inputs matches the tag tables); and digests against
 `keccak256` over hand-assembled preimages. A unit test in `codec.rs` checks
 that a sequence decoder reserves no more bytes than its remaining input.
 
-## Part 2: block format version 2
+## Part 2: block format version 3
 
 ### Status
 
@@ -408,25 +408,30 @@ signed proposer add durable node storage.
 
 ### Versions
 
-- **Block format version** `FORMAT_VERSION = 2` covers every layout and
+- **Block format version** `FORMAT_VERSION = 3` covers every layout and
   tag table of this part. The genesis records it and every header starts
   with it; another format version is refused (`UnsupportedVersion { kind:
   "block format" }` or `{ kind: "header" }` when decoding,
-  `GenesisError::UnsupportedFormat` from `ChainSpec::new`). Format 2 changed
+  `GenesisError::UnsupportedFormat` from `ChainSpec::new`). Format 3 appends
+  `max_rent_lifetime` to `ChainParams`, so the genesis moved to the
+  `arkiv/genesis/v2` digest domain. Format 2 changed
   the `ArkivOperation` layout (`Create` attributes and `Patch` sets are
   `(CellName, Cell)` instead of `(CellName, Value)`), so the two hashed
   objects that contain it, the transaction envelope and the block inputs,
   moved to the `arkiv/tx/v2` and `arkiv/inputs/v2` digest domains. Header,
   genesis, outcome and admin layouts are unchanged and keep their domains;
   the new `ArkivFault` tag 16 is a new variant, not a layout change.
-- **Protocol version** `PROTOCOL_VERSION = 2` names the execution rules of
+- **Protocol version** `PROTOCOL_VERSION = 3` names the execution rules of
   this document. The genesis records it; another protocol is refused
   (`UnsupportedVersion { kind: "protocol" }`,
   `GenesisError::UnsupportedProtocol`). Version 2 is the user-defined-columns
   entity model: `ArkivOperation` attributes are cells carrying their indexed
   flag, user `bytes` exist, and there is no payload or content type. Version
-  1 (attributes as bare values, `$payload` and `$contentType`) is retired, so
-  its genesis files and stores are refused rather than reinterpreted.
+  3 admits live permanent entities and caps the rent of every lifetime at
+  `max_rent_lifetime` blocks (rent rule `glm-rent-v2`, see
+  [GLM gas](glm-gas-v1.md#the-rent-cap)); entity expiries have no upper bound.
+  Versions 1 and 2 are retired, so their genesis files and stores are refused
+  rather than reinterpreted.
 - Every header carries its block's terminal state root; there is one
   header layout.
 - Tags start at 1 (except the two request scopes, fixed at `00`/`01`), are
@@ -442,8 +447,8 @@ is 32 raw bytes, `OwnerId` 20, `RequestId` (a request id) 32.
 
 | Type | Layout | Bytes |
 | --- | --- | --- |
-| `ChainParams` | `block_budget u64 ‖ user_budget u64 ‖ expiry_per_block u32 ‖ max_admin_per_block u32 ‖ max_txs_per_block u32 ‖ max_ops_per_tx u32 ‖ max_ops_per_block u32 ‖ max_tx_bytes u32 ‖ max_block_input_bytes u32 ‖ max_lifetime u64` | 52 |
-| `Genesis` | `format_version u32 ‖ protocol_version u32 ‖ chain_id u64 ‖ timestamp_ms u64 ‖ limits: Limits ‖ pricing: PriceSchedule ‖ params: ChainParams ‖ admins: Vec<OwnerId>` | 408 + 20 per admin |
+| `ChainParams` | `block_budget u64 ‖ user_budget u64 ‖ expiry_per_block u32 ‖ max_admin_per_block u32 ‖ max_txs_per_block u32 ‖ max_ops_per_tx u32 ‖ max_ops_per_block u32 ‖ max_tx_bytes u32 ‖ max_block_input_bytes u32 ‖ max_lifetime u64 ‖ max_rent_lifetime u64` | 60 |
+| `Genesis` | `format_version u32 ‖ protocol_version u32 ‖ chain_id u64 ‖ timestamp_ms u64 ‖ limits: Limits ‖ pricing: PriceSchedule ‖ params: ChainParams ‖ admins: Vec<OwnerId>` | 416 + 20 per admin |
 | `Header` | `format_version u32 (1) ‖ chain_id u64 ‖ height u64 ‖ parent_hash ‖ timestamp_ms u64 ‖ inputs_digest ‖ outcomes_digest ‖ state_root` | 156 |
 | `BlockInputs` | `admin: Vec<AdminInput> ‖ txs: Vec<TxEnvelope>` | 8 when empty |
 | `AdminInput` | `actor ‖ request_id ‖ action: AdminAction` | 309 |
@@ -520,7 +525,9 @@ gas schedule cannot be entered or changed through admin repricing).
 `HostFault`: 1 `ExpiryCapacityFull`, 2 `ExpiryInvalid` followed by the
 `ExpiryFault`, 3 `ExpiryShortened`, 4 `Arkiv` followed by the `ArkivFault`
 (one byte, 1 `Name` … 15 `UnsupportedGasOperation`, 16 `EntityTooLarge`:
-the `bytes` cells of the resulting entity would exceed 128 KiB), 5 `Account` followed by
+the `bytes` cells of the resulting entity would exceed 128 KiB; tag 14
+`PermanentStorageUnsupported` is retired since protocol 3 and never
+produced), 5 `Account` followed by
 the `AccountFault` (1 `InsufficientBalance`, 2 `Overflow`, 3 `Unsupported`). `ExpiryFault`: 1 `Overflow`,
 2 `DeadOnArrival`, 3 `TooFar`. `Scope`: `00` transaction, `01` admin.
 
@@ -533,7 +540,7 @@ the `AccountFault` (1 `InsufficientBalance`, 2 `Overflow`, 3 `Unsupported`). `Ex
 | `outcomes_digest` | `digest("arkiv/outcomes/v1", encode(outcomes))` |
 | transaction digest | `digest("arkiv/tx/v2", encode(envelope))` |
 | admin input digest | `digest("arkiv/admin/v1", encode(admin_input))` |
-| genesis digest | `digest("arkiv/genesis/v1", encode(genesis))` |
+| genesis digest | `digest("arkiv/genesis/v2", encode(genesis))` |
 
 The genesis block is height 0 with parent hash `00…00`, the genesis
 timestamp, the genesis digest as its `inputs_digest`, the digest of empty
@@ -554,9 +561,10 @@ state.
 `ChainSpec::new` accepts a genesis only if (all arithmetic checked; an
 overflow fails the check):
 
-- format version 2 and protocol version 2;
+- format version 3 and protocol version 3;
 - `1 ≤ max_ops_per_tx ≤ max_ops_per_block`, `max_txs_per_block ≥ 1`,
-  `expiry_per_block ≥ 1`, `user_budget ≥ 1`;
+  `expiry_per_block ≥ 1`, `user_budget ≥ 1`, `max_rent_lifetime ≥ 1`
+  (`GenesisError::RentLifetime`);
 - `8 + max_admin_per_block × MAX_ADMIN_BYTES + max_tx_bytes ≤
   max_block_input_bytes`, with `MAX_ADMIN_BYTES = 20 (actor) + 32
   (request id) + 1 (tag) + 256 (schedule) = 309`, the encoded size of every
@@ -675,8 +683,11 @@ executor calls only the engine's fallible `try_` API
      `h + min_lifetime` is `HostRejected(ExpiryInvalid(Overflow))`;
      `E = u64::MAX` is permanent (in particular `expires_at = u64::MAX`),
      stored as `U64(u64::MAX)`, exempt from `max_lifetime` and capacity,
-     with no due entry; otherwise `E ≤ h` is `DeadOnArrival` and `E > h +
-     max_lifetime` is `TooFar`. A patch may only extend: `E` earlier than
+     with no due entry; otherwise `E ≤ h` is `DeadOnArrival` and, for a
+     generic record, `E > h + max_lifetime` is `TooFar`. Arkiv entities
+     resolve the same way without the `TooFar` bound: any finite `E` or
+     `u64::MAX` is a valid entity lifetime, and `max_rent_lifetime` caps
+     only its rent. A patch may only extend: `E` earlier than
      the current lifetime (permanent is latest) is `ExpiryShortened`.
      Finally the capacity of a finite `E`: `total(E) + 1 − [current ==
      E] > expiry_per_block` is `ExpiryCapacityFull`. Host faults are
@@ -715,8 +726,8 @@ A transaction envelope is valid when: its chain id is the genesis chain
 id; `1 ≤ tx_budget ≤ user_budget`; `1 ≤ |ops| ≤ max_ops_per_tx`; its
 encoding is at most `max_tx_bytes`; and every operation, in order, names
 no cell starting with `$` (in cells, a patch's set or its remove list),
-carries a statically valid expiry (not `(0, 0)`, and `min_lifetime ≤
-max_lifetime`), and passes the engine's argument validation
+carries a statically valid expiry (not `(0, 0)`, and, for a generic record,
+`min_lifetime ≤ max_lifetime`), and passes the engine's argument validation
 (`WriteOp::validate`: raw keys and prefixes of at most 20 bytes, cell and
 patch counts, duplicates, set/remove overlap, value and indexed-value
 sizes, `Bytes` attributes) **as it will execute**: with a

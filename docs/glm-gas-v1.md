@@ -3,7 +3,8 @@
 Every signed native chain runs the `glm-v2` gas profile: this gas schedule plus
 [GLM accounts](glm-accounts-v1.md), which debit the fees from funded balances
 and burn them. This document describes the schedule: how transaction execution
-and finite entity occupancy are priced in gas.
+and entity occupancy are priced in gas, under the capped rent rule
+`glm-rent-v2`.
 
 Gas is priced at a fixed **1 gwei**, meaning 1,000,000,000 GLM base units per
 gas, with 18 decimal places per GLM. There is no fee market, EIP-1559 base fee
@@ -27,8 +28,9 @@ rent rules are part of this named schedule, in addition to engine metering model
 commit the charged units through the outcome commitment.
 
 The status response advertises `capabilities.gas` (profile `glm-v2`, exact
-limits, gas price, rent rule, finite-lifetime restriction and
-`feesDebited: true`).
+limits, gas price, `rentRule: "glm-rent-v2"`, `maxRentLifetimeBlocks` and its
+nominal `maxRentLifetimeSeconds`, `permanentEntitiesSupported: true`, the
+`permanentEntities` rules and `feesDebited: true`).
 
 ## Storage units and rent
 
@@ -39,7 +41,8 @@ units = 512
       + sum(cell name UTF-8 bytes + value encoded bytes + 2 tags)
       + 128 × indexed cell count
 
-create rent = ceil(units × lifetime blocks × 8 / 17280)
+horizon(E, h) = min(E, h + cap)          # cap = max_rent_lifetime blocks
+create rent   = ceil(units × (horizon(E, h) − h) × 8 / 17280)
 ```
 
 Every cell's data is storage, whatever its name or type: a 1 KiB `bytes`
@@ -63,19 +66,65 @@ zero additional price; its ordinary index/root work is still priced.
 formula uses block heights, not elapsed wall time. Changing the block cadence
 changes the real duration bought by the same charge.
 
-- Create prepays the entire finite lifetime.
-- Growing an entity prepays only its positive size increase over the remaining
-  lifetime. Same-sized changes pay execution but no additional occupancy rent.
-- Extending expiry prepays the entity's current size for the added blocks.
+### The rent cap
+
+Rent is never charged past `h + cap` blocks from the current height `h`. The
+cap is the consensus parameter `ChainParams::max_rent_lifetime` (blocks) in the
+genesis; authoring profiles give it as `max_rent_lifetime_seconds`, converted
+to whole blocks (rounded up) at the chain's block period. The default is one
+year: `31,536,000` seconds, which is **15,768,000 blocks at 2-second blocks**
+(6,307,200 at 5-second blocks). Every lifetime of at least `cap` blocks, a
+finite one far in the future or the permanent `u64::MAX`, costs the same;
+shorter lifetimes are priced exactly as before. Lifetimes have no upper bound:
+`max_lifetime` no longer applies to Arkiv entities (see
+[block format](block-format.md)), so no expiry is ever `TooFar`.
+
+With `E_old` the expiry before and `E_new` after an operation at height `h`:
+
+- **Create** prepays `units × (horizon(E_new, h) − h)`: at most the cap.
+- **Growth** (a patch that enlarges the entity) prepays the positive size
+  increase for the capped remaining lifetime, `growth × (horizon(E_old, h) − h)`;
+  for a permanent entity that is always a full cap. Same-sized changes pay
+  execution but no additional occupancy rent.
+- **Extension** prepays the current size for the growth of the capped horizon
+  only, `units × (horizon(E_new, h) − horizon(E_old, h))`. Extending an entity
+  whose expiry already reaches `h + cap` costs no rent.
+- **Ownership transfer** changes neither size nor expiry: execution gas only.
 - Shrinking or deleting gives no refund. Regrowing pays for the renewed increase.
-- Ownership transfer does not change occupancy, but pays execution gas.
-- Permanent entities (`u64::MAX` expiry) are rejected: a finite fee does not
-  purchase unbounded retention. This holds for every live transaction. Only a
-  permanent-prefill genesis (prefill launch version 3 or 4) creates permanent
-  entities, at height 0 and without rent. Updating one (patch, ownership
-  transfer, extension to permanent) needs unbounded rent and is rejected with
-  `PermanentStorageUnsupported`; a finite extension is `ExpiryShortened`; its
-  owner may delete it.
+
+**Time passing.** The horizon is recomputed from the current height on every
+operation; nothing like a "paid through" height is stored. An entity created
+permanent at `h0` pays `cap` blocks; once `h0 + cap` passes it simply stays,
+with no further payment (the user-chosen rule: permanent costs the same as one
+cap). Extending it again is a no-op success (`u64::MAX` is the only expiry
+that does not shorten it, and its horizon cannot grow), and a finite expiry is
+refused with `ExpiryShortened`. A finite entity may be extended to permanent:
+it pays the capped horizon increase.
+
+**No discount on permanence.** Whatever the sequence of creates and
+extensions, an entity whose expiry reaches `E` has paid at least
+`min(E − h0, cap)` blocks of its size: while every expiry stays below
+`h + cap` the payments telescope exactly to `E − h0`, and the step that first
+reaches `h + cap` brings the total to at least `cap`. Permanence therefore never
+costs less than one cap at creation, and splitting it into short extensions
+only costs more (`gas.rs` tests this exhaustively on small values). Growth is
+always paid for a full capped lifetime, so a small entity made permanent and
+then enlarged pays for the enlargement too.
+
+**Overflow.** `h + cap` saturates at `u64::MAX`; unit-block products use a
+128-bit intermediate; a quote that does not fit `u64` gas is rejected
+(`GasOverflow`). `u64::MAX` expiries are never scheduled for expiry, never
+counted against the per-height expiry capacity and never swept.
+
+**Budget.** A transaction is limited to the 90,000,000-gas user budget. At the
+default cap a permanent (or year-long) entity of `units` costs about
+`units × 7,300` gas of rent at 2-second blocks, so roughly 12,000 units (about
+10 KiB of data) is the largest entity that can be made permanent in one
+transaction; larger ones need a shorter lifetime or a smaller cap.
+
+Genesis prefill rows follow the same capped rent: a finite row at or beyond the
+cap pays the cap. A `u64::MAX` row is admitted only by a permanent-prefill
+launch (versions 3 and 4), which sponsors it without rent.
 
 All arithmetic is checked and integer-only, using a wide intermediate for
 unit-block multiplication and one upward division per operation. An operation
@@ -113,13 +162,15 @@ The executable calibration creates real user-defined-columns entities: the
 generated system attributes, an unindexed `bytes` attribute `body` of the
 indicated size, an unindexed `str` attribute `format` (`application/json`)
 and the indicated number of indexed `u64` attributes. It runs the actual
-engine/host meter and reports actual gas.
+engine/host meter with the default one-year cap (15,768,000 blocks) and
+reports actual gas.
 
-| `body` bytes | Indexed `u64` attributes | Lifetime at 5 s/block | Execution gas | Rent gas | Total gas | GLM at 1 gwei |
+| `body` bytes | Indexed `u64` attributes | Lifetime (17,280-block days) | Execution gas | Rent gas | Total gas | GLM at 1 gwei |
 | --- | ---: | --- | ---: | ---: | ---: | ---: |
 | 256 B | 2 | 1 day | 58,358 | 16,256 | 74,614 | 0.000074614 |
 | 1 KiB | 4 | 7 days | 66,422 | 172,816 | 239,238 | 0.000239238 |
 | 1 KiB | 4 | 30 days | 66,422 | 740,640 | 807,062 | 0.000807062 |
+| 1 KiB | 4 | permanent (charged as the cap) | 66,422 | 22,527,800 | 22,594,222 | 0.022594222 |
 | 16 KiB | 4 | 7 days | 158,582 | 1,032,976 | 1,191,558 | 0.001191558 |
 | 128 KiB | 4 | 30 days | 846,710 | 31,952,160 | 32,798,870 | 0.03279887 |
 
@@ -144,9 +195,14 @@ Reference fee calculations use exact integers and decimal strings:
 ## Validation
 
 `cargo test -p arkiv-node --test gas_execution` covers exact gas-limit success
-and failure, independent producer/full replay, finite lifetime enforcement, batch
-rollback and nonce behavior, growth/shrink/extension/delete accounting, restart
-of durable full and light stores, proof verification after restart, and expiry
-processing alongside the maximum declared user gas budget. Unit tests in
-`gas.rs` cover storage-unit arithmetic, rounding, overflow and exact GLM
-formatting.
+and failure, independent producer/full replay, a live permanent create paying
+exactly the cap, batch rollback and nonce behavior,
+growth/shrink/extension/delete accounting, restart of durable full and light
+stores, proof verification after restart, and expiry processing alongside the
+maximum declared user gas budget. Unit tests in `gas.rs` cover storage-unit
+arithmetic, the default cap at several block periods, equal rent at the cap,
+twice the cap and permanent, extension pricing below, at and beyond the cap,
+an exhaustive no-discount check for permanence, saturation near `u64::MAX`,
+rounding, overflow and exact GLM formatting; `arkiv` unit tests measure the
+rent charged by live creates, extensions (including after time has passed),
+growth and transfers of permanent entities.

@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Live permanent entities and capped rent
+
+**Breaking:** block format version 3 (the genesis gains `max_rent_lifetime`;
+digest domain `arkiv/genesis/v2`) and protocol version 3. Earlier genesis
+files and stores are refused.
+
+- Live creates and extensions accept `expiresAt = 2^64 − 1` (the SDK's
+  `ExpirationTime.permanent()`). Such entities are never scheduled or swept;
+  reads and `EntityCreated`/`ExpiryExtended` logs report `0xffffffffffffffff`.
+  Status reports `permanentEntitiesSupported: true`, the `permanentEntities`
+  rules, and no longer lists `permanent-entities` as unsupported.
+- Rent rule `glm-rent-v2`: rent is never charged past `height +
+  max_rent_lifetime`. Create, growth and extension charge through
+  `min(expiry, height + cap)`, recomputed from the current height, so every
+  lifetime of at least the cap, permanent included, costs the same, and
+  shorter ones cost as before. An extension pays only the growth of the
+  capped horizon. Permanence never costs less than one cap.
+- The cap is a genesis consensus value in blocks, advertised as
+  `capabilities.gas.maxRentLifetimeBlocks`. Profiles set
+  `max_rent_lifetime_seconds` (default 31,536,000: one year), converted at the
+  chain's block period; the preset is `arkiv-entity-v3/glm-v2@2`. A producer
+  without a bundle uses a year at its `--block-period-ms`.
+- Entity expiries are no longer bounded by `max_lifetime` (no `TooFar`);
+  `max_lifetime` now bounds generic records only. Finite prefill rows pay the
+  capped rent.
+- Extending a permanent entity to permanent is a no-op success; a finite
+  expiry is `ExpiryShortened`. `PermanentStorageUnsupported` (fault 14) is no
+  longer produced.
+
+### User-defined columns
+
 **Breaking:** user-defined columns (UDC), the entity model of the JS SDK's
 `udc/docs` branch. Block format version 2 and protocol version 2. Genesis
 files, prefill streams, stores and SDK clients from earlier builds are
@@ -55,7 +86,7 @@ refused; start a fresh chain.
 - Authored entities give each attribute exactly one typed value and an
   explicit `indexed`; `bytes`, `bytes_text` and `bytes_file` spell bytes
   values. Dataset formats are `arkiv-entities-toml-v2` and
-  `arkiv-entities-jsonl-v2`; the preset is `arkiv-entity-v3/glm-v2@1`.
+  `arkiv-entities-jsonl-v2`; the preset is `arkiv-entity-v3/glm-v2@2`.
 - `arkiv-proposer create` takes `--data-file` (an unindexed `bytes`
   attribute `data`) instead of `--payload-file`.
 

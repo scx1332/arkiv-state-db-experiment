@@ -819,9 +819,16 @@ mod tests {
             let row_units = crate::gas::storage_units(&record.cells).unwrap().total;
             units += row_units;
             if r.expires_at_height != crate::genesis_bundle::PERMANENT_EXPIRY {
-                let gas = crate::gas::rent(0, row_units, None, Some(r.expires_at_height), 0)
-                    .unwrap()
-                    .gas;
+                let gas = crate::gas::rent(
+                    0,
+                    row_units,
+                    None,
+                    Some(r.expires_at_height),
+                    0,
+                    g.genesis.params.max_rent_lifetime,
+                )
+                .unwrap()
+                .gas;
                 burn += accounts::fee(gas);
                 for key in [
                     crate::exec::total_key(r.expires_at_height),
@@ -927,8 +934,8 @@ mod tests {
             build_bundle(&finite_base, &finite_path, &tmp.0.join("v2"), [2; 20], 4096).unwrap();
         assert_eq!(report["version"], 2);
         assert!(report.get("permanentPrefill").is_none());
-        // Pinned at the user-defined-columns row codec (block format 2,
-        // protocol 2) on these same base and stream bytes, so any later
+        // Pinned at the user-defined-columns row codec (block format 3,
+        // protocol 3) on these same base and stream bytes, so any later
         // change to how a version-2 launch is built shows up here.
         assert_eq!(
             (
@@ -938,7 +945,7 @@ mod tests {
                 report["storageUnits"].as_str()
             ),
             (
-                Some("0x7510cd7eb21ca5c8e98a55f02705a8a02b1b5573a0a99f0c1d284ab82eabc935"),
+                Some("0x6467f081557598d0e8e73ae0bddbc4101c3a77f97bc6ef903cf3574b80a3e197"),
                 Some("0x592448eaf0dbb8695a272c7ece687a4025cf92027d546e9886ac0023fee34dd4"),
                 Some("600000000000"),
                 Some("12888")
@@ -1492,16 +1499,14 @@ mod tests {
         g.genesis.limits.max_cells = 8;
         cases.push((g, vec![row(0)]));
         let mut g = base();
-        g.genesis.params.max_lifetime = 99;
-        cases.push((g, vec![row(0)]));
-        let mut g = base();
         g.genesis.params.expiry_per_block = 1;
         cases.push((g, vec![row(0), row(1)]));
         let mut g = base();
         g.accounts = accounts::AccountConfig::new(Vec::new()).unwrap();
         cases.push((g, vec![row(0)]));
+        // Rent overflows only without a cap: an uncapped near-sentinel row.
         let mut g = base();
-        g.genesis.params.max_lifetime = u64::MAX;
+        g.genesis.params.max_rent_lifetime = u64::MAX;
         let mut r = row(0);
         r.expires_at_height = u64::MAX - 1;
         r.attributes = vec![(

@@ -228,7 +228,7 @@ pub(crate) fn build_file(
             caller: row.creator,
             block_height: 0,
             chain_id: base.genesis.chain_id,
-            max_lifetime: base.genesis.params.max_lifetime,
+            max_rent_lifetime: base.genesis.params.max_rent_lifetime,
             expiry_per_block: base.genesis.params.expiry_per_block,
             // Only used for expiry resolution; no operation executes here.
             allow_permanent_create: false,
@@ -260,14 +260,14 @@ pub(crate) fn build_file(
         if units > limits.max_storage_units {
             return Err("prefill storage limit".into());
         }
-        let rent = if is_permanent {
-            // Permanent rows prepay no time-based rent (see prefill_rent_gas).
-            crate::genesis_bundle::prefill_rent_gas(row_units, expires, permanent).map_err(err)?
-        } else {
-            crate::gas::rent(0, row_units, None, Some(expires), 0)
-                .map_err(debug_err)?
-                .gas
-        };
+        // Capped finite rent; permanent rows prepay none (see prefill_rent_gas).
+        let rent = crate::genesis_bundle::prefill_rent_gas(
+            row_units,
+            expires,
+            permanent,
+            base.genesis.params.max_rent_lifetime,
+        )
+        .map_err(err)?;
         burn = burn
             .checked_add(accounts::fee(rent))
             .ok_or("prefill rent overflow")?;

@@ -99,6 +99,7 @@ const PARAMS: ChainParams = ChainParams {
     max_tx_bytes: 2_048,
     max_block_input_bytes: 16_384,
     max_lifetime: 12,
+    max_rent_lifetime: arkiv_node::gas::DEFAULT_RENT_CAP_BLOCKS,
 };
 
 /// Budget of transactions that should not run out.

@@ -172,8 +172,8 @@ fn host_owned(name: &CellName) -> bool {
     name.as_str().starts_with('$')
 }
 
-/// The static expiry checks: not `(0, 0)`, and `min_lifetime ≤
-/// max_lifetime`.
+/// The static expiry checks of a generic record: not `(0, 0)`, and
+/// `min_lifetime ≤ max_lifetime`. Arkiv entities only refuse `(0, 0)`.
 pub fn check_expiry(spec: &ChainSpec, expiry: &Expiry) -> Result<(), ExpiryArgumentFault> {
     if expiry.expires_at == 0 && expiry.min_lifetime == 0 {
         return Err(ExpiryArgumentFault::Zero);
@@ -200,8 +200,13 @@ pub fn check_op(spec: &ChainSpec, op: &TxOp) -> Result<(), OpFault> {
         {
             return Err(OpFault::HostOwnedCell);
         }
-        if let Some(expiry) = operation.expiry() {
-            check_expiry(spec, expiry).map_err(OpFault::Expiry)?;
+        // An entity lifetime has no upper bound (the rent cap bounds its
+        // cost), so only the `(0, 0)` pair is refused statically.
+        if operation
+            .expiry()
+            .is_some_and(|e| e.expires_at == 0 && e.min_lifetime == 0)
+        {
+            return Err(OpFault::Expiry(ExpiryArgumentFault::Zero));
         }
         return Ok(());
     }

@@ -74,6 +74,8 @@ pub enum GenesisError {
     ExpiryPerBlock,
     /// `user_budget` is zero.
     UserBudget,
+    /// `max_rent_lifetime` is zero: no lifetime could be charged.
+    RentLifetime,
     /// `8 + max_admin_per_block × MAX_ADMIN_BYTES + max_tx_bytes ≤
     /// max_block_input_bytes` does not hold (or overflows).
     InputBytes,
@@ -112,6 +114,7 @@ impl fmt::Display for GenesisError {
             Self::TxsPerBlock => write!(formatter, "transactions per block must be at least 1"),
             Self::ExpiryPerBlock => write!(formatter, "expiry capacity must be at least 1"),
             Self::UserBudget => write!(formatter, "user budget must be at least 1"),
+            Self::RentLifetime => write!(formatter, "the rent lifetime cap must be at least 1"),
             Self::InputBytes => write!(
                 formatter,
                 "block input bytes cannot hold a full admin section and a largest transaction"
@@ -240,6 +243,9 @@ pub fn check_params(
     }
     if params.user_budget == 0 {
         return Err(GenesisError::UserBudget);
+    }
+    if params.max_rent_lifetime == 0 {
+        return Err(GenesisError::RentLifetime);
     }
     let inputs = u64::from(params.max_admin_per_block)
         .checked_mul(MAX_ADMIN_BYTES)

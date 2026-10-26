@@ -17,13 +17,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         gas,
     };
     let mut results = Vec::new();
+    // Lifetimes in days at the nominal 17,280-block rent day; `None` is
+    // permanent, which pays the default one-year cap.
     for (label, body, days, attributes) in [
-        ("small", 256, 1, 2),
-        ("standard-week", 1024, 7, 4),
-        ("standard-month", 1024, 30, 4),
-        ("document-week", 16 * 1024, 7, 4),
-        ("maximum-bytes-month", 128 * 1024, 30, 4),
+        ("small", 256, Some(1), 2),
+        ("standard-week", 1024, Some(7), 4),
+        ("standard-month", 1024, Some(30), 4),
+        ("standard-permanent", 1024, None, 4),
+        ("document-week", 16 * 1024, Some(7), 4),
+        ("maximum-bytes-month", 128 * 1024, Some(30), 4),
     ] {
+        let expires_at = days.map_or(u64::MAX, |d: u64| 1 + d * gas::RENT_PERIOD_BLOCKS);
         let engine = Engine::with_limits(
             gas::schedule(),
             Limits {
@@ -46,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             caller: [1; 20],
             block_height: 1,
             chain_id: 1337,
-            max_lifetime: 6_307_200,
+            max_rent_lifetime: gas::DEFAULT_RENT_CAP_BLOCKS,
             expiry_per_block: 16,
             allow_permanent_create: false,
         };
@@ -70,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             salt: 7,
             flags: 0,
             expiry: Expiry {
-                expires_at: 1 + days * gas::RENT_PERIOD_BLOCKS,
+                expires_at,
                 min_lifetime: 0,
             },
             attributes: attrs,
@@ -102,12 +106,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             0,
             units.total,
             None,
-            Some(1 + days * gas::RENT_PERIOD_BLOCKS),
+            Some(expires_at),
             1,
+            gas::DEFAULT_RENT_CAP_BLOCKS,
         )?
         .gas;
+        let charged = gas::rent_horizon(expires_at, 1, gas::DEFAULT_RENT_CAP_BLOCKS) - 1;
         let total = gas::TX_INTRINSIC_GAS + receipt.spent.units();
-        results.push(serde_json::json!({"example":label,"bodyBytes":body,"indexedAttributes":attributes,"lifetimeBlocks":days*gas::RENT_PERIOD_BLOCKS,"logicalStorageUnits":units.total,"canonicalKeyAndCellsBytes":encode(&(key,row.cells)).len(),"executionGas":total-rent,"rentGas":rent,"totalGas":total,"referenceGlm":gas::reference_fee_glm(total)}));
+        results.push(serde_json::json!({"example":label,"bodyBytes":body,"indexedAttributes":attributes,"permanent":days.is_none(),"chargedLifetimeBlocks":charged,"logicalStorageUnits":units.total,"canonicalKeyAndCellsBytes":encode(&(key,row.cells)).len(),"executionGas":total-rent,"rentGas":rent,"totalGas":total,"referenceGlm":gas::reference_fee_glm(total)}));
     }
     println!("{}", serde_json::to_string_pretty(&results)?);
     Ok(())

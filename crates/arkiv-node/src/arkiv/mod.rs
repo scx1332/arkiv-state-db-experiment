@@ -23,6 +23,8 @@ pub enum ArkivFault {
     Namespace = 11,
     Duplicate = 12,
     GasOverflow = 13,
+    /// Retired: live permanent entities are supported since protocol 3. The
+    /// tag stays reserved and is never produced.
     PermanentStorageUnsupported = 14,
     UnsupportedGasOperation = 15,
     /// The `bytes` cells of the resulting entity would hold more than
@@ -254,14 +256,15 @@ pub struct ArkivExecutionContext {
     pub caller: [u8; 20],
     pub block_height: u64,
     pub chain_id: u64,
-    pub max_lifetime: u64,
+    /// The chain's rent cap ([`crate::ChainParams::max_rent_lifetime`]):
+    /// rent is never charged past `block_height + max_rent_lifetime`.
+    pub max_rent_lifetime: u64,
     pub expiry_per_block: u32,
-    /// Lets a `Create` with the permanent expiry (`u64::MAX`) be admitted
-    /// without GLM rent. Only height-zero construction of a permanent-prefill
-    /// launch sets it; live blocks always pass `false`, so live permanent
-    /// creation, extension to permanent and every mutation of a permanent
-    /// entity other than deletion keep failing with
-    /// [`ArkivFault::PermanentStorageUnsupported`] under GLM pricing.
+    /// Waives the rent of a `Create` with the permanent expiry (`u64::MAX`).
+    /// Only height-zero construction of a permanent-prefill launch sets it
+    /// (its permanent rows are explicitly sponsored); live blocks pass
+    /// `false`, so a live permanent create pays the capped rent like any
+    /// lifetime at or beyond the cap.
     pub allow_permanent_create: bool,
 }
 fn name(s: &str) -> CellName {
@@ -305,9 +308,8 @@ pub(crate) fn expiry(exp: &Expiry, c: &ArkivExecutionContext) -> Result<u64, Hos
     if target <= c.block_height {
         return Err(HostFault::ExpiryInvalid(crate::ExpiryFault::DeadOnArrival));
     }
-    if target != u64::MAX && target - c.block_height > c.max_lifetime {
-        return Err(HostFault::ExpiryInvalid(crate::ExpiryFault::TooFar));
-    }
+    // No upper bound: any finite expiry, or the permanent `u64::MAX`, is a
+    // valid lifetime; the rent cap bounds what it costs.
     Ok(target)
 }
 /// Canonical creation cells shared by live execution and bulk genesis: the
@@ -515,19 +517,19 @@ pub fn execute_operation(
                 old,
                 if deleted { None } else { new },
                 c.block_height,
+                c.max_rent_lifetime,
             )
         })();
         match quoted {
-            Ok(quote) => quote.gas,
             // Genesis permanent prefill: no time-based rent for a creation.
-            Err(crate::gas::GasError::PermanentUnsupported)
-                if c.allow_permanent_create && matches!(op, ArkivOperation::Create { .. }) =>
+            Ok(_)
+                if c.allow_permanent_create
+                    && new == Some(u64::MAX)
+                    && matches!(op, ArkivOperation::Create { .. }) =>
             {
                 0
             }
-            Err(crate::gas::GasError::PermanentUnsupported) => {
-                return Ok(rejected(ArkivFault::PermanentStorageUnsupported));
-            }
+            Ok(quote) => quote.gas,
             Err(_) => return Ok(rejected(ArkivFault::GasOverflow)),
         }
     } else {

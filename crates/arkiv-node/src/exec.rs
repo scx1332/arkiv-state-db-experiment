@@ -861,9 +861,9 @@ impl Executor<'_> {
                 caller: *actor.as_bytes(),
                 block_height: self.height,
                 chain_id: self.spec.chain_id(),
-                max_lifetime: self.spec.params().max_lifetime,
+                max_rent_lifetime: self.spec.params().max_rent_lifetime,
                 expiry_per_block: self.spec.params().expiry_per_block,
-                // Live blocks never create permanent entities under GLM rent.
+                // Live permanent creates pay the capped rent.
                 allow_permanent_create: false,
             };
             let outcome = crate::arkiv::execute_operation(

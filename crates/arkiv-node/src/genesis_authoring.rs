@@ -31,7 +31,9 @@ const DOCUMENT_CAP: usize = 1024 * 1024;
 const INPUT_CAP: usize = 8 * DOCUMENT_CAP;
 const ROW_CAP: usize = 256;
 const LOCK_FILE: &str = "genesis.lock.toml";
-const PRESET_ID: &str = "arkiv-entity-v3/glm-v2@1";
+const PRESET_ID: &str = "arkiv-entity-v3/glm-v2@2";
+/// The rent rule of the profile: capped GLM rent ([`crate::gas::rent`]).
+const RENT_RULE: &str = "glm-rent-v2";
 /// The entity rules of the profile: user-defined columns.
 const ENTITY_RULES: &str = "arkiv-entity-v3";
 /// Entity dataset formats; v1 (payload and content type) is refused.
@@ -222,6 +224,9 @@ struct Params {
     max_tx_bytes: u32,
     max_block_input_bytes: u32,
     max_lifetime: String,
+    /// The rent cap in seconds, converted to whole blocks (rounded up) at the
+    /// chain's `block_period_ms`.
+    max_rent_lifetime_seconds: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -718,7 +723,7 @@ fn profile_native(profile: &Profile, chain: &Chain) -> Result<Genesis> {
     )?;
     expect(&profile.entity_rules, ENTITY_RULES, "entity rules")?;
     expect(&profile.account_rules, "glm-v2", "account rules")?;
-    expect(&profile.pricing.rent_rule, "glm-rent-v1", "rent rule")?;
+    expect(&profile.pricing.rent_rule, RENT_RULE, "rent rule")?;
     if profile.state_layout != arkiv_db::LAYOUT_VERSION
         || profile.codec_version != arkiv_db::CODEC_VERSION
         || !profile.admins.is_empty()
@@ -760,9 +765,19 @@ fn profile_native(profile: &Profile, chain: &Chain) -> Result<Genesis> {
             max_tx_bytes: p.max_tx_bytes,
             max_block_input_bytes: p.max_block_input_bytes,
             max_lifetime: number(&p.max_lifetime)?,
+            max_rent_lifetime: rent_cap(p, chain)?,
         },
         admins: Vec::new(),
     })
+}
+/// The profile's rent cap in blocks at the chain's block period.
+fn rent_cap(p: &Params, chain: &Chain) -> Result<u64> {
+    let seconds = number::<u64>(&p.max_rent_lifetime_seconds)?;
+    let period = number::<u64>(&chain.block_period_ms)?;
+    match crate::gas::rent_cap_blocks(seconds, period) {
+        Some(blocks) if blocks > 0 => Ok(blocks),
+        _ => Err("max_rent_lifetime_seconds must be positive and fit the block period".into()),
+    }
 }
 fn normalize_entity(
     e: Entity,
@@ -1185,7 +1200,8 @@ pub fn verify(bundle_dir: &Path) -> Result<AuthoringReport> {
         id: genesis.genesis.chain_id.to_string(),
         run_id: String::new(),
         start_time: "1970-01-01T00:00:00Z".into(),
-        block_period_ms: String::new(),
+        // The rent cap is derived from the profile's seconds at this period.
+        block_period_ms: genesis.block_period_ms.to_string(),
         proposer: String::new(),
     };
     let mut native = profile_native(profile, &placeholder)?;
@@ -1279,7 +1295,7 @@ mod tests {
     fn compiled_preset_expansion_is_frozen() {
         assert_eq!(
             sha256(PRESET.as_bytes()),
-            "963562f37cfb9bf9646a7ed9bf89640dd032328c3117940d3b8855a7836e1d21"
+            "f7f7646044d050d0c1603f6c1eef37ad93fc0b6d9c1133fc5f3d4e91321f4d1b"
         );
     }
 
@@ -1418,6 +1434,56 @@ mod tests {
         assert_eq!(original.stream, alternative.stream);
         assert_eq!(encode(&original.genesis), encode(&alternative.genesis));
         assert_ne!(original.lock.source, alternative.lock.source);
+    }
+
+    #[test]
+    fn the_rent_cap_is_a_year_by_default_and_set_in_seconds() {
+        let fixture = Fixture::new();
+        // The preset's year at this example's 5-second blocks.
+        let compiled = compile(&fixture.inline()).unwrap();
+        assert_eq!(compiled.genesis.block_period_ms, 5_000);
+        assert_eq!(compiled.genesis.genesis.params.max_rent_lifetime, 6_307_200);
+        // The same preset at 2-second blocks is the SDK's 15,768,000.
+        fixture.change(
+            &fixture.inline(),
+            "block_period_ms = \"5000\"",
+            "block_period_ms = \"2000\"",
+        );
+        let two_second = compile(&fixture.inline()).unwrap();
+        assert_eq!(
+            two_second.genesis.genesis.params.max_rent_lifetime,
+            crate::gas::DEFAULT_RENT_CAP_BLOCKS
+        );
+        // A custom profile sets its own cap, rounded up to whole blocks.
+        let custom = PRESET.replace(
+            "max_rent_lifetime_seconds = \"31536000\"",
+            "max_rent_lifetime_seconds = \"86401\"",
+        );
+        stdfs::write(fixture.0.join("profiles/custom.toml"), custom).unwrap();
+        fixture.change(
+            &fixture.inline(),
+            "profile = { preset = \"arkiv-entity-v3/glm-v2@2\" }",
+            "profile = { path = \"profiles/custom.toml\" }",
+        );
+        let custom = compile(&fixture.inline()).unwrap();
+        assert_eq!(custom.genesis.genesis.params.max_rent_lifetime, 43_201);
+        assert_ne!(encode(&custom.genesis), encode(&two_second.genesis));
+        // The cap is a consensus value: a bundle rebuilds and verifies it.
+        build(&fixture.inline(), &fixture.bundle(), false).unwrap();
+        verify(&fixture.bundle()).unwrap();
+        // Zero, missing, or the retired rent rule are refused.
+        for (from, to) in [
+            (
+                "max_rent_lifetime_seconds = \"86401\"",
+                "max_rent_lifetime_seconds = \"0\"",
+            ),
+            ("max_rent_lifetime_seconds = \"86401\"", "# no rent cap"),
+            ("rent_rule = \"glm-rent-v2\"", "rent_rule = \"glm-rent-v1\""),
+        ] {
+            fixture.change(&fixture.0.join("profiles/custom.toml"), from, to);
+            assert!(compile(&fixture.inline()).is_err(), "accepted {to:?}");
+            fixture.change(&fixture.0.join("profiles/custom.toml"), to, from);
+        }
     }
 
     #[test]

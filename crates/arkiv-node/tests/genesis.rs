@@ -239,13 +239,13 @@ fn every_invariant_is_checked() {
 #[test]
 fn versions_are_checked() {
     let mut bad = genesis();
-    bad.format_version = 1;
+    bad.format_version = 2;
     assert_eq!(
         ChainSpec::new(bad).err(),
-        Some(GenesisError::UnsupportedFormat(1))
+        Some(GenesisError::UnsupportedFormat(2))
     );
-    // Protocol 1 is the retired payload entity model.
-    for protocol in [0, 1, 3] {
+    // Protocols 1 (payload entities) and 2 (uncapped rent) are retired.
+    for protocol in [0, 1, 2, 4] {
         let mut bad = genesis();
         bad.protocol_version = protocol;
         assert_eq!(
@@ -259,7 +259,7 @@ fn versions_are_checked() {
 fn the_spec_exposes_the_genesis() {
     let spec = spec(PARAMS, LIMITS).expect("valid");
     assert_eq!(spec.chain_id(), CHAIN);
-    assert_eq!(spec.protocol_version(), 2);
+    assert_eq!(spec.protocol_version(), 3);
     assert!(spec.is_admin(&ADMIN));
     assert!(!spec.is_admin(&ALICE));
     assert_eq!(spec.genesis_header(), &genesis().header());

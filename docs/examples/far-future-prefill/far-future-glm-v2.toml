@@ -10,7 +10,7 @@ admins = []
 schedule_id = 1196182785 # 0x474c4d01
 weights = [100, 20000, 10000, 10000, 10000, 4, 4, 100, 100, 10, 1, 20000, 12000, 10000, 250, 4, 100, 500, 0, 300, 100, 100, 10, 10, 10, 10, 10, 100, 2, 10, 1]
 gas_price_wei = "1000000000"
-rent_rule = "glm-rent-v1"
+rent_rule = "glm-rent-v2"
 
 [engine_limits]
 namespace_cap = 1024
@@ -34,6 +34,9 @@ max_ops_per_block = 128
 max_tx_bytes = 262035
 max_block_input_bytes = 786432
 max_lifetime = "1000000000000"
+# Rent cap: any lifetime at or beyond it, permanent included, costs the same.
+# Seconds, converted to whole blocks (rounded up) at the chain's block period.
+max_rent_lifetime_seconds = "31536000" # 365 days
 
 [signed_limits]
 max_tx_bytes = 262144

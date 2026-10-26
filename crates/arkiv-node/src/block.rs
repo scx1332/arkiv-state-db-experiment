@@ -20,7 +20,7 @@
 //! | `outcomes_digest` | `digest("arkiv/outcomes/v1", encode(outcomes))` |
 //! | transaction digest | `digest("arkiv/tx/v2", encode(envelope))` |
 //! | admin input digest | `digest("arkiv/admin/v1", encode(admin_input))` |
-//! | genesis `inputs_digest` | `digest("arkiv/genesis/v1", encode(genesis))` |
+//! | genesis `inputs_digest` | `digest("arkiv/genesis/v2", encode(genesis))` |
 //!
 //! The genesis block is height 0 with a zero parent hash, the genesis digest
 //! as its inputs digest, the digest of empty outcomes and the root of the
@@ -38,13 +38,16 @@ use arkiv_db::{
 /// Version of the block format: the layouts and tag tables of this module.
 /// Headers carry it, so a decoder never reinterprets another layout.
 /// Version 2 carries entity attributes as cells (`kind ‖ value`) in
-/// `ArkivOperation`; version 1 carried bare values.
-pub const FORMAT_VERSION: u32 = 2;
+/// `ArkivOperation`; version 1 carried bare values. Version 3 adds
+/// [`ChainParams::max_rent_lifetime`] to the genesis.
+pub const FORMAT_VERSION: u32 = 3;
 
 /// Version of the execution rules a genesis selects. Version 2 is the
 /// user-defined-columns entity model: per-attribute indexed flags, user
-/// `bytes` and no payload or content type ([`crate::arkiv`]).
-pub const PROTOCOL_VERSION: u32 = 2;
+/// `bytes` and no payload or content type ([`crate::arkiv`]). Version 3
+/// admits live permanent entities and caps the rent of any lifetime at
+/// [`ChainParams::max_rent_lifetime`] blocks.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Domain of the block hash.
 pub const HEADER_DOMAIN: &str = "arkiv/header/v1";
@@ -57,7 +60,7 @@ pub const TX_DOMAIN: &str = "arkiv/tx/v2";
 /// Domain of an admin input's digest.
 pub const ADMIN_DOMAIN: &str = "arkiv/admin/v1";
 /// Domain of the genesis digest (the genesis block's inputs digest).
-pub const GENESIS_DOMAIN: &str = "arkiv/genesis/v1";
+pub const GENESIS_DOMAIN: &str = "arkiv/genesis/v2";
 
 /// The host-owned attribute holding a record's expiry height. Users can
 /// neither write nor remove it (any cell name starting with `$` is refused
@@ -146,9 +149,16 @@ pub struct ChainParams {
     pub max_tx_bytes: u32,
     /// Longest encoded [`BlockInputs`], in bytes.
     pub max_block_input_bytes: u32,
-    /// Longest finite lifetime: an expiry height may be at most this many
-    /// blocks after the block that sets it.
+    /// Longest finite lifetime of a generic record: its expiry height may be
+    /// at most this many blocks after the block that sets it. Arkiv entities
+    /// are not bounded by it: any finite expiry, or the permanent `u64::MAX`,
+    /// is accepted, and only its rent is capped ([`Self::max_rent_lifetime`]).
     pub max_lifetime: u64,
+    /// The rent cap of an Arkiv entity, in blocks: an operation charges rent
+    /// through `min(expiry, height + max_rent_lifetime)` at most, so every
+    /// lifetime of at least this many blocks, permanent included, costs the
+    /// same. At least 1.
+    pub max_rent_lifetime: u64,
 }
 
 impl Encode for ChainParams {
@@ -163,11 +173,12 @@ impl Encode for ChainParams {
         encoder.u32(self.max_tx_bytes);
         encoder.u32(self.max_block_input_bytes);
         encoder.u64(self.max_lifetime);
+        encoder.u64(self.max_rent_lifetime);
     }
 }
 
 impl Decode for ChainParams {
-    const MIN_ENCODED_LEN: usize = 8 + 8 + 7 * 4 + 8;
+    const MIN_ENCODED_LEN: usize = 8 + 8 + 7 * 4 + 8 + 8;
 
     fn decode_from(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
@@ -181,6 +192,7 @@ impl Decode for ChainParams {
             max_tx_bytes: decoder.u32()?,
             max_block_input_bytes: decoder.u32()?,
             max_lifetime: decoder.u64()?,
+            max_rent_lifetime: decoder.u64()?,
         })
     }
 }
@@ -210,7 +222,7 @@ pub struct Genesis {
 }
 
 impl Genesis {
-    /// The genesis digest: `digest("arkiv/genesis/v1", encode(self))`.
+    /// The genesis digest: `digest("arkiv/genesis/v2", encode(self))`.
     pub fn digest(&self) -> B256 {
         digest(GENESIS_DOMAIN, &encode(self))
     }

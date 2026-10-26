@@ -144,15 +144,18 @@ fn params_bytes() -> Vec<u8> {
         &be32(4096),
         &be32(8 + 2 * 309 + 4096),
         &be64(100),
+        // The rent cap: a year at 2-second blocks.
+        &be64(15_768_000),
     ])
 }
 
 fn genesis_bytes() -> Vec<u8> {
     cat(&[
-        // Format 2: entity operations carry attributes as cells.
-        &be32(2),
-        // Protocol 2: the user-defined-columns entity rules.
-        &be32(2),
+        // Format 3: chain parameters carry the rent cap.
+        &be32(3),
+        // Protocol 3: user-defined columns with capped rent and live
+        // permanent entities.
+        &be32(3),
         &be64(CHAIN),
         &be64(1_000),
         &limits_bytes(),
@@ -187,20 +190,20 @@ fn hash(byte: u8) -> B256 {
 #[test]
 fn chain_params_and_genesis() {
     golden(&PARAMS, &params_bytes());
-    assert_eq!(params_bytes().len(), 52);
+    assert_eq!(params_bytes().len(), 60);
     let genesis = genesis();
     let bytes = genesis_bytes();
-    // 4 + 4 + 8 + 8 + 72 + 256 + 52 + 4 + 20.
-    assert_eq!(bytes.len(), 428);
+    // 4 + 4 + 8 + 8 + 72 + 256 + 60 + 4 + 20.
+    assert_eq!(bytes.len(), 436);
     golden(&genesis, &bytes);
-    assert_eq!(genesis.digest(), digest_of("arkiv/genesis/v1", &bytes));
+    assert_eq!(genesis.digest(), digest_of("arkiv/genesis/v2", &bytes));
 }
 
 #[test]
 fn genesis_versions_are_checked() {
     let mut bytes = genesis_bytes();
     // Format 1 is the retired bare-value entity operation layout.
-    for version in [0u32, 1, 3, u32::MAX] {
+    for version in [0u32, 1, 2, 4, u32::MAX] {
         bytes[..4].copy_from_slice(&version.to_be_bytes());
         rejects::<Genesis>(
             &bytes,
@@ -212,7 +215,7 @@ fn genesis_versions_are_checked() {
     }
     let mut bytes = genesis_bytes();
     // Protocol 1 is the retired payload entity model.
-    for version in [0u32, 1, 3, u32::MAX] {
+    for version in [0u32, 1, 2, 4, u32::MAX] {
         bytes[4..8].copy_from_slice(&version.to_be_bytes());
         rejects::<Genesis>(
             &bytes,
@@ -247,7 +250,7 @@ fn headers_and_block_hashes() {
         state_root: hash(0x44),
     };
     let bytes = cat(&[
-        &be32(2),
+        &be32(3),
         &be64(CHAIN),
         &be64(5),
         &[0x11; 32],
@@ -259,7 +262,7 @@ fn headers_and_block_hashes() {
     assert_eq!(bytes.len(), 156);
     golden(&header, &bytes);
     assert_eq!(header.hash(), digest_of("arkiv/header/v1", &bytes));
-    for version in [0u32, 1, 3, u32::MAX] {
+    for version in [0u32, 1, 2, 4, u32::MAX] {
         let mut other = bytes.clone();
         other[..4].copy_from_slice(&version.to_be_bytes());
         rejects::<Header>(
@@ -288,13 +291,13 @@ fn genesis_block_header() {
         height: 0,
         parent_hash: B256::ZERO,
         timestamp_ms: 1_000,
-        inputs_digest: digest_of("arkiv/genesis/v1", &genesis_bytes()),
+        inputs_digest: digest_of("arkiv/genesis/v2", &genesis_bytes()),
         outcomes_digest: digest_of("arkiv/outcomes/v1", &empty_outcomes),
         state_root: empty_root,
     };
     assert_eq!(header, expected);
     let header_bytes = cat(&[
-        &be32(2),
+        &be32(3),
         &be64(CHAIN),
         &be64(0),
         &[0; 32],
@@ -313,7 +316,7 @@ fn genesis_block_header() {
 
 /// The hash of `support::genesis()`, pinned so a change to any genesis or
 /// header byte is deliberate.
-const GENESIS_HASH: &str = "a09c4855b7d6b7fa87d47727d492ff1ea46b409ef3adc17657d30e90bd6520b8";
+const GENESIS_HASH: &str = "8d8486fb98776de117146a9968fa35157646ca153d4442509720632971e7686a";
 
 #[test]
 fn admin_inputs() {
@@ -674,7 +677,7 @@ fn blocks() {
         state_root: hash(0x44),
     };
     let header_bytes = cat(&[
-        &be32(2),
+        &be32(3),
         &be64(CHAIN),
         &be64(1),
         &[0x11; 32],

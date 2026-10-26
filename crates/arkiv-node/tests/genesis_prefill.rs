@@ -150,7 +150,7 @@ fn canonical_stream_and_launch_are_order_independent_and_strict() {
 fn invalid_nonces_system_cells_capacity_and_sponsor_fail() {
     assert!(encode_stream(&[row(1, 4)]).is_err());
     assert!(encode_stream(&[row(0, 4), row(0, 5)]).is_err());
-    for height in [0, u64::MAX, 6_307_201] {
+    for height in [0, u64::MAX] {
         assert!(
             build_genesis(
                 base(),
@@ -161,6 +161,14 @@ fn invalid_nonces_system_cells_capacity_and_sponsor_fail() {
             .is_err()
         );
     }
+    // Beyond max_lifetime is no longer too far, and every finite expiry at
+    // or beyond the rent cap burns the same capped rent.
+    let cap = base().genesis.params.max_rent_lifetime;
+    let burn = |height| build(&[row(0, height)]).prefill.unwrap().burned_wei;
+    assert!(burn(6_307_201) > U256::ZERO);
+    assert_eq!(burn(cap), burn(2 * cap));
+    assert_eq!(burn(cap), burn(1_000_000_000_000));
+    assert!(burn(cap / 2) < burn(cap));
     let mut system = row(0, 4);
     system.attributes.push((
         CellName::new("$owner").unwrap(),
@@ -267,7 +275,7 @@ fn empty_prefill_has_namespace_and_ordinary_block_one() {
     );
     assert_eq!(
         g.hash().to_string(),
-        "0x8c483d421deeef64bf110a0bcdefc5d93666cb375508e7768643280b3f12c20e"
+        "0x7fe4f2cf5c222157f18f974fe4664e51611d2e097ca31e6247a72a3c1d6beaaf"
     );
     assert_eq!(
         p.stream_hash.to_string(),
@@ -487,7 +495,8 @@ fn entity_tx(g: &SignedGenesis, nonce: u64, operation: ArkivOperation) -> Signed
             chain_id: g.genesis.chain_id,
             actor: signer(2).address(),
             request_id: [100 + nonce as u8; 32],
-            tx_budget: 1_000_000,
+            // Enough for a permanent create's one-year rent; six fit a block.
+            tx_budget: 12_000_000,
             ops: vec![TxOp::Arkiv {
                 namespace: arkiv::entity_namespace(),
                 operation,
@@ -554,7 +563,7 @@ fn has_no_permanent_fields(g: &SignedGenesis, stream: &[u8]) -> bool {
     value.get("permanentPrefill").is_none() && value.get("prefillVersion").is_none()
 }
 #[test]
-fn permanent_genesis_entities_survive_blocks_and_reject_live_updates() {
+fn permanent_genesis_entities_survive_blocks_and_take_capped_live_updates() {
     let rows = permanent_chain_rows();
     let stream = encode_stream_with(&rows, true).unwrap();
     let g = build_permanent(&rows);
@@ -698,7 +707,9 @@ fn exercise_permanent_chain(
             .value
             .map(|r| arkiv::project(&r).unwrap())
     };
-    // Live updates of a permanent entity are rejected; it stays permanent.
+    // Live updates of a permanent entity pay the capped rent and keep it
+    // permanent; only a shortening extension is refused. A live permanent
+    // create is admitted too. The owner transfers last, after its updates.
     let set = vec![(
         CellName::new("label").unwrap(),
         Cell::attribute(Value::str("changed")),
@@ -708,10 +719,6 @@ fn exercise_permanent_chain(
             key: keys[1].clone(),
             set,
             remove: vec![],
-        },
-        ArkivOperation::TransferOwnership {
-            key: keys[1].clone(),
-            owner: [9; 20],
         },
         ArkivOperation::ExtendExpiry {
             key: keys[1].clone(),
@@ -732,6 +739,10 @@ fn exercise_permanent_chain(
         },
         ArkivOperation::Delete {
             key: keys[2].clone(),
+        },
+        ArkivOperation::TransferOwnership {
+            key: keys[1].clone(),
+            owner: [9; 20],
         },
     ];
     for (nonce, operation) in attempts.into_iter().enumerate() {
@@ -760,34 +771,50 @@ fn exercise_permanent_chain(
                     other => panic!("{other:?}"),
                 })
                 .collect();
-            let permanent = Some(HostFault::Arkiv(
-                arkiv::ArkivFault::PermanentStorageUnsupported,
-            ));
             assert_eq!(
                 faults,
                 [
-                    permanent,
-                    permanent,
-                    permanent,
+                    None,
+                    None,
                     Some(HostFault::ExpiryShortened),
-                    permanent,
+                    None,
+                    None,
                     None
                 ]
             );
         }
     }
     let kept = live(&producer, &keys[1]).unwrap();
-    assert_eq!((kept.expires_at, kept.owner), (u64::MAX, rows[1].creator));
-    assert_eq!(kept.updated_at, 0);
+    assert_eq!((kept.expires_at, kept.owner), (u64::MAX, [9; 20]));
+    assert_eq!(kept.updated_at, 1);
     assert!(live(&producer, &keys[0]).is_none(), "finite row expired");
     assert!(live(&producer, &keys[2]).is_none(), "owner deleted it");
+    let created = RecordKey::new(&arkiv::derive_entity_key(
+        g.genesis.chain_id,
+        signer(2).address().as_bytes(),
+        rows.iter()
+            .filter(|r| r.creator == *signer(2).address().as_bytes())
+            .count() as u64,
+        77,
+    ))
+    .unwrap();
+    assert_eq!(live(&producer, &created).unwrap().expires_at, u64::MAX);
     assert_eq!(
         producer
             .engine
             .head_snapshot()
             .try_typed_record_count(arkiv::entity_namespace())
             .unwrap(),
-        Some(1)
+        Some(2)
+    );
+    // Nothing is due at the sentinel after these live writes either.
+    assert_eq!(
+        producer
+            .engine
+            .head_snapshot()
+            .try_host_get(&arkiv_node::exec::total_key(u64::MAX))
+            .unwrap(),
+        None
     );
     // Reads report the sentinel, as the SDK's U64_MAX bigint.
     let page = arkiv_node::signed::rpc_reads::dispatch(
@@ -811,16 +838,21 @@ fn exercise_permanent_chain(
             .count(),
         2
     );
-    // Status reports the genesis-only permanence truthfully.
+    // Status reports live permanence and the sponsored genesis rows.
     let status = arkiv_node::signed::runtime::status(&Node::Full(Box::new(producer)));
     let gas = &status["capabilities"]["gas"];
     assert_eq!(gas["permanentEntitiesSupported"], true);
-    assert_eq!(gas["permanentEntities"]["source"], "genesis-prefill");
-    assert_eq!(gas["permanentEntities"]["liveCreate"], false);
+    assert_eq!(gas["permanentEntities"]["liveCreate"], true);
     assert_eq!(
-        status["capabilities"]["sdkRpcProfile"]["unsupported"][0],
-        "permanent-entity-writes"
+        gas["permanentEntities"]["genesisRows"],
+        "sponsored-without-rent"
     );
+    assert_eq!(
+        gas["maxRentLifetimeBlocks"],
+        g.genesis.params.max_rent_lifetime.to_string()
+    );
+    let unsupported = status["capabilities"]["sdkRpcProfile"]["unsupported"].to_string();
+    assert!(!unsupported.contains("permanent"), "{unsupported}");
     let finite = build(&rows[..1]);
     let finite_host = host(
         &finite,
@@ -830,17 +862,7 @@ fn exercise_permanent_chain(
         Arc::new(MemoryVersionedStore::new()),
     );
     let status = arkiv_node::signed::runtime::status(&Node::Full(Box::new(finite_host)));
-    assert_eq!(
-        status["capabilities"]["gas"]["permanentEntitiesSupported"],
-        false
-    );
-    assert!(
-        status["capabilities"]["gas"]
-            .get("permanentEntities")
-            .is_none()
-    );
-    assert_eq!(
-        status["capabilities"]["sdkRpcProfile"]["unsupported"][0],
-        "permanent-entities"
-    );
+    let gas = &status["capabilities"]["gas"];
+    assert_eq!(gas["permanentEntitiesSupported"], true);
+    assert_eq!(gas["permanentEntities"]["genesisRows"], "none");
 }

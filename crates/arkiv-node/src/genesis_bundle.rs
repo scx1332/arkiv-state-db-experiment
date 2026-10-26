@@ -430,11 +430,17 @@ pub fn recipe_hash(g: &SignedGenesis, p: &PrefillLaunch) -> B256 {
     )
 }
 /// Genesis rent gas of one prefill row of `units` storage units expiring at
-/// `expires_at`, created at height 0. A finite row prepays its whole lifetime
-/// with [`crate::gas::rent`]. A [`PERMANENT_EXPIRY`] row is admitted only under
-/// a permanent-prefill launch and has no time-based rent: a finite prepayment
-/// cannot price unbounded retention, and the launch is explicitly sponsored.
-pub(crate) fn prefill_rent_gas(units: u64, expires_at: u64, permanent: bool) -> Result<u64> {
+/// `expires_at`, created at height 0 under the chain's rent cap `cap`. A
+/// finite row prepays its lifetime with [`crate::gas::rent`], capped like a
+/// live create, so a row at or beyond the cap pays the cap. A
+/// [`PERMANENT_EXPIRY`] row is admitted only under a permanent-prefill launch,
+/// which sponsors it without rent.
+pub(crate) fn prefill_rent_gas(
+    units: u64,
+    expires_at: u64,
+    permanent: bool,
+    cap: u64,
+) -> Result<u64> {
     if expires_at == PERMANENT_EXPIRY {
         return if permanent {
             Ok(0)
@@ -442,7 +448,7 @@ pub(crate) fn prefill_rent_gas(units: u64, expires_at: u64, permanent: bool) -> 
             Err("permanent prefill rows require a permanent-prefill launch".into())
         };
     }
-    crate::gas::rent(0, units, None, Some(expires_at), 0)
+    crate::gas::rent(0, units, None, Some(expires_at), 0, cap)
         .map(|quote| quote.gas)
         .map_err(err)
 }
@@ -501,7 +507,7 @@ fn construct(
             caller: row.creator,
             block_height: 0,
             chain_id: g.genesis.chain_id,
-            max_lifetime: g.genesis.params.max_lifetime,
+            max_rent_lifetime: g.genesis.params.max_rent_lifetime,
             expiry_per_block: g.genesis.params.expiry_per_block,
             allow_permanent_create: permanent,
         };
@@ -536,7 +542,12 @@ fn construct(
         if units > limits.max_storage_units {
             return Err("prefill storage units limit exceeded".into());
         }
-        let rent = prefill_rent_gas(row_units, row.expires_at_height, permanent)?;
+        let rent = prefill_rent_gas(
+            row_units,
+            row.expires_at_height,
+            permanent,
+            g.genesis.params.max_rent_lifetime,
+        )?;
         burn = burn
             .checked_add(accounts::fee(rent))
             .ok_or("prefill rent overflow")?;
@@ -656,19 +667,28 @@ mod tests {
     use super::*;
     #[test]
     fn permanent_rows_pay_no_time_rent_only_under_the_permanent_policy() {
+        let cap = crate::gas::DEFAULT_RENT_CAP_BLOCKS;
         for units in [1, 512, 9_000_000] {
-            assert_eq!(prefill_rent_gas(units, PERMANENT_EXPIRY, true).unwrap(), 0);
-            assert!(prefill_rent_gas(units, PERMANENT_EXPIRY, false).is_err());
+            assert_eq!(
+                prefill_rent_gas(units, PERMANENT_EXPIRY, true, cap).unwrap(),
+                0
+            );
+            assert!(prefill_rent_gas(units, PERMANENT_EXPIRY, false, cap).is_err());
             for expiry in [1, 6_307_200, 1_000_000_000_000] {
-                let finite = crate::gas::rent(0, units, None, Some(expiry), 0)
+                let finite = crate::gas::rent(0, units, None, Some(expiry), 0, cap)
                     .unwrap()
                     .gas;
                 // A finite row is charged identically under either policy.
-                assert_eq!(prefill_rent_gas(units, expiry, false).unwrap(), finite);
-                assert_eq!(prefill_rent_gas(units, expiry, true).unwrap(), finite);
+                assert_eq!(prefill_rent_gas(units, expiry, false, cap).unwrap(), finite);
+                assert_eq!(prefill_rent_gas(units, expiry, true, cap).unwrap(), finite);
             }
+            // Finite rows at or beyond the cap all pay the cap.
+            assert_eq!(
+                prefill_rent_gas(units, 1_000_000_000_000, false, cap).unwrap(),
+                prefill_rent_gas(units, cap, false, cap).unwrap()
+            );
         }
-        assert!(prefill_rent_gas(1, 0, true).is_err());
+        assert!(prefill_rent_gas(1, 0, true, cap).is_err());
     }
     /// The converter contract of `docs/genesis-bundle-v1.md`, byte for byte.
     #[test]

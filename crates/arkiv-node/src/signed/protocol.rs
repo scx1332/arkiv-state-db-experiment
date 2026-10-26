@@ -108,6 +108,10 @@ pub const MAX_CELLS: usize = 64;
 /// The native genesis of a signed chain created without a genesis bundle:
 /// the development workload limits under GLM pricing, without admins, with
 /// the signed wire caps. Its [`MIN_CELLS`] cells per record fit a full entity.
+/// Its rent cap is a year at 2-second blocks
+/// ([`crate::gas::DEFAULT_RENT_CAP_BLOCKS`]); a chain with another block period
+/// sets `params.max_rent_lifetime` from [`crate::gas::rent_cap_blocks`], as the
+/// producer does.
 pub fn default_native_genesis(chain_id: u64, timestamp_ms: u64) -> Genesis {
     let mut native = crate::demo::workload::genesis(chain_id, timestamp_ms);
     native.admins.clear();

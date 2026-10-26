@@ -946,17 +946,24 @@ async fn run() -> Result<()> {
             let proposed = if let Some((genesis, _)) = &bundle {
                 genesis.clone()
             } else {
-                let native = arkiv_node::signed::protocol::default_native_genesis(
+                let block_period_ms = number(&get("--block-period-ms", "1000"))?;
+                let mut native = arkiv_node::signed::protocol::default_native_genesis(
                     number(&get("--chain-id", "9001"))?,
                     1_700_000_000_000,
                 );
+                // The default rent cap: a year at this chain's block period.
+                native.params.max_rent_lifetime = arkiv_node::gas::rent_cap_blocks(
+                    arkiv_node::gas::DEFAULT_RENT_CAP_SECONDS,
+                    block_period_ms,
+                )
+                .ok_or(Error("InvalidRequest"))?;
                 let mut run_id = [0u8; 16];
                 getrandom::fill(&mut run_id).map_err(|_| Error("StorageUnavailable"))?;
                 SignedGenesis::new(
                     native,
                     run_id,
                     *s.address().as_bytes(),
-                    number(&get("--block-period-ms", "1000"))?,
+                    block_period_ms,
                     allocations(required("--allocations-file")?)?,
                 )?
             };

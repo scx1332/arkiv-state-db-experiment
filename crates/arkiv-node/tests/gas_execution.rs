@@ -149,34 +149,81 @@ fn costs_rent_replay_and_exact_budget() {
     );
 }
 #[test]
-fn permanent_rejected_batch_rollback_retains_gas_and_nonce() {
+fn permanent_create_pays_the_capped_rent_and_rollback_retains_gas_and_nonce() {
     let mut p = host(true);
     p.produce().unwrap();
     let mut permanent = create(1, 1024, 0);
     if let ArkivOperation::Create { expiry, .. } = &mut permanent {
         *expiry = Expiry::PERMANENT;
     }
-    p.submit(tx(&p, 1, 1_000_000, vec![permanent])).unwrap();
+    // Too small a budget for a year of rent: refused before the engine runs.
+    p.submit(tx(&p, 1, 1_000_000, vec![permanent.clone()]))
+        .unwrap();
     p.produce().unwrap();
     assert!(matches!(
-        p.block(2).unwrap().outcomes.txs[0].ops[0],
-        OpOutcome::HostRejected { .. }
+        p.block(2).unwrap().outcomes.txs[0].status,
+        TxStatus::Failed { .. }
     ));
-    assert_eq!(p.block(2).unwrap().outcomes.txs[0].spent, 21000);
+    // With the budget, a live permanent create commits and pays exactly the
+    // rent of the cap, the same as any lifetime of a cap or more.
+    let cap = p.genesis.genesis.params.max_rent_lifetime;
+    let mut at_cap = create(9, 1024, 0);
+    if let ArkivOperation::Create { expiry, .. } = &mut at_cap {
+        *expiry = Expiry {
+            expires_at: 0,
+            min_lifetime: cap,
+        };
+    }
+    p.submit(tx(&p, 2, 60_000_000, vec![permanent])).unwrap();
+    p.produce().unwrap();
+    p.submit(tx(&p, 3, 60_000_000, vec![at_cap])).unwrap();
+    p.produce().unwrap();
+    let permanent_gas = p.block(3).unwrap().outcomes.txs[0].spent;
+    let at_cap_gas = p.block(4).unwrap().outcomes.txs[0].spent;
+    assert_eq!(
+        p.block(3).unwrap().outcomes.txs[0].status,
+        TxStatus::Committed
+    );
+    assert_eq!(permanent_gas, at_cap_gas);
+    // The refused transaction consumed no creation nonce.
+    let entity = key(0, 1);
+    let row = cells(&p, &entity).unwrap();
+    let units = gas::storage_units(&row).unwrap().total;
+    let rent = gas::rent(0, units, None, Some(u64::MAX), 3, cap)
+        .unwrap()
+        .gas;
+    assert!(permanent_gas > gas::TX_INTRINSIC_GAS + rent);
+    assert_eq!(
+        rent,
+        gas::rent(0, units, None, Some(3 + cap), 3, cap)
+            .unwrap()
+            .gas
+    );
+    // Many blocks later it is still there and was never due.
+    for _ in 0..20 {
+        p.produce().unwrap();
+    }
+    assert!(cells(&p, &entity).is_some());
+    let next_nonce = 4;
     let missing = ArkivOperation::Delete {
         key: RecordKey::new(&[0; 32]).unwrap(),
     };
-    p.submit(tx(&p, 2, 1_000_000, vec![create(2, 1024, 17280), missing]))
-        .unwrap();
+    p.submit(tx(
+        &p,
+        next_nonce,
+        1_000_000,
+        vec![create(2, 1024, 17280), missing],
+    ))
+    .unwrap();
     p.produce().unwrap();
-    let b = p.block(3).unwrap();
+    let b = p.block(p.head.height).unwrap();
     assert!(matches!(
         b.outcomes.txs[0].ops[0],
         OpOutcome::RolledBack { .. }
     ));
     assert!(b.outcomes.spent > 50_000);
-    assert!(cells(&p, &key(0, 2)).is_none());
-    assert_eq!(p.committed_nonce(signer().address()).unwrap(), 3);
+    assert!(cells(&p, &key(2, 2)).is_none());
+    assert_eq!(p.committed_nonce(signer().address()).unwrap(), 5);
 }
 #[test]
 fn forged_schedule_and_low_intrinsic_are_rejected() {
@@ -229,7 +276,8 @@ fn lifecycle_growth_extension_shrink_and_delete() {
         .total;
     assert_eq!(grown - initial_units, 1024);
     let grow_gas = p.block(3).unwrap().outcomes.txs[0].spent;
-    let grow_rent = gas::rent(initial_units, grown, Some(17282), Some(17282), 3)
+    let cap = p.genesis.genesis.params.max_rent_lifetime;
+    let grow_rent = gas::rent(initial_units, grown, Some(17282), Some(17282), 3, cap)
         .unwrap()
         .gas;
     assert!(grow_gas > 21000 + grow_rent);
@@ -248,7 +296,7 @@ fn lifecycle_growth_extension_shrink_and_delete() {
     .unwrap();
     p.produce().unwrap();
     let extend_gas = p.block(4).unwrap().outcomes.txs[0].spent;
-    let extension_rent = gas::rent(grown, grown, Some(17282), Some(34562), 4)
+    let extension_rent = gas::rent(grown, grown, Some(17282), Some(34562), 4, cap)
         .unwrap()
         .gas;
     assert!(extend_gas > 21000 + extension_rent);
@@ -451,6 +499,7 @@ fn named_namespace_entities_preserve_rent_authority_proofs_and_expiry() {
         None,
         Some(11),
         3,
+        p.genesis.genesis.params.max_rent_lifetime,
     )
     .unwrap()
     .gas;

@@ -297,7 +297,7 @@ async fn http_light_inspection_is_typed_bounded_and_independently_verifiable() {
         .await
         .unwrap();
     assert_eq!(status["capabilities"]["profile"], "arkiv-entity-v3");
-    assert_eq!(status["protocolVersion"], 2);
+    assert_eq!(status["protocolVersion"], 3);
     assert_eq!(
         status["capabilities"]["valueTypes"]
             .as_array()

@@ -56,4 +56,18 @@ const out = {
   wrongDestination: await legacy({ to: account.address }),
   arkivValue: await legacy({ value: 1n }),
 };
+if (mode !== "old") {
+  // The SDK's `ExpirationTime.permanent()`: expiresAt = 2^64 - 1, no floor,
+  // for a Probe-like named schema with an empty body (network-health test).
+  const permanent = viem.encodeAbiParameters(createT, [{
+    salt: 10n, expiresAt: 2n ** 64n - 1n, minLifetime: 0n, creationFlags: 0,
+    attributes: [
+      { name: name("arkiv.schema"), typeId: 0x88, value: viem.toHex("probe") },
+      { name: name("body"), typeId: 0x07, value: "0x" },
+      { name: name("purpose"), typeId: 0x88, value: viem.toHex("permanent_test") },
+    ],
+  }]);
+  out.permanentData = viem.encodeFunctionData({ abi, functionName: "execute", args: [[{ operation: 1, operationData: permanent }]] });
+  out.permanent = await account.signTransaction({ type: "eip1559", chainId: 9300, nonce: 1, gas: 20000000n, maxFeePerGas: 2000000000n, maxPriorityFeePerGas: 0n, to: ARKIV, data: out.permanentData });
+}
 console.log(JSON.stringify(out, null, 2));

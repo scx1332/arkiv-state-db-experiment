@@ -289,3 +289,132 @@ fn hostile_dynamic_array_counts_and_aliases_fail_before_expansion() {
     aliased[100..132].copy_from_slice(&first);
     assert!(ethereum::operations(&aliased).is_err());
 }
+
+/// The SDK's `ExpirationTime.permanent()` create (v0.9.0-next.1
+/// network-health test): `expiresAt` = 2^64 − 1 reaches the receipt's
+/// `EntityCreated` log and `getEntity` exactly, pays the capped rent, and the
+/// entity outlives many blocks without ever being due.
+#[tokio::test]
+async fn sdk_permanent_create_is_stored_at_the_sentinel() {
+    use arkiv_db::durable::Options;
+    use arkiv_db_memory::MemoryVersionedStore;
+    use arkiv_node::signed::{
+        history::History,
+        host::Host,
+        rpc,
+        runtime::{Node, Runtime},
+    };
+    use serde_json::{Value as Json, json};
+    use std::sync::Arc;
+    // Proposer 1, so the SDK account 2 starts at nonce 0.
+    let g = signed_support::genesis(9300, 1000, [7; 16], 1, 1000, &[2]);
+    let make_host = |producer: bool| {
+        Host::create(
+            Arc::new(MemoryVersionedStore::new()),
+            History::create(Arc::new(MemoryVersionedStore::new()), g.hash()).unwrap(),
+            g.clone(),
+            [9; 16],
+            SignedHeader::sign(&g, g.header(), &Signer::from_bytes([1; 32]).unwrap()).unwrap(),
+            producer.then(|| Signer::from_bytes([1; 32]).unwrap()),
+            Options::default(),
+        )
+        .unwrap()
+    };
+    let (mut producer, mut follower) = (make_host(true), make_host(false));
+    producer.produce().unwrap();
+    follower.import(producer.block(1).unwrap()).unwrap();
+    let permanent = SignedTx::from_ethereum(&g, &fixture("permanent")).unwrap();
+    let TxOp::Arkiv {
+        operation: ArkivOperation::Create { expiry, .. },
+        ..
+    } = &permanent.tx.ops[0]
+    else {
+        panic!("create")
+    };
+    assert_eq!((expiry.expires_at, expiry.min_lifetime), (u64::MAX, 0));
+    producer
+        .submit(SignedTx::from_ethereum(&g, &fixture("eip1559")).unwrap())
+        .unwrap();
+    producer.submit(permanent.clone()).unwrap();
+    producer.produce().unwrap();
+    let block = producer.block(2).unwrap();
+    assert!(
+        block
+            .outcomes
+            .txs
+            .iter()
+            .all(|t| t.status == arkiv_node::TxStatus::Committed),
+        "{:?}",
+        block.outcomes.txs
+    );
+    follower.import(block).unwrap();
+    // Only the finite create of the same block (20 blocks) is ever swept.
+    let mut swept = 0;
+    for _ in 0..40 {
+        producer.produce().unwrap();
+        let block = producer.block(producer.head.height).unwrap();
+        swept += block.outcomes.expiry.len();
+        follower.import(block).unwrap();
+    }
+    assert_eq!(swept, 1);
+    assert_eq!(producer.head, follower.head);
+    let actor = Signer::from_bytes([2; 32]).unwrap().address();
+    let key = arkiv_node::arkiv::derive_entity_key(9300, actor.as_bytes(), 1, 10);
+    let key_hex = arkiv_node::simulator::wire::hex(&key);
+    let rt = Runtime::new(Node::Full(Box::new(producer)), None, None, None).unwrap();
+    let call = |method: &str, params: Json| {
+        rpc::handle_request(
+            &rt,
+            json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}),
+        )
+    };
+    // getEntity, as the SDK spells it.
+    let select = json!({"key":true,"owner":true,"creator":true,"createdAt":true,"updatedAt":true,"expiresAt":true,"creationFlags":true,"attributeSchema":true,"attributes":true});
+    let entity = call(
+        "arkiv_query",
+        json!([format!("$key = key({key_hex})"), {"select":select,"limit":"0x1"}]),
+    )
+    .await;
+    assert_eq!(
+        entity["result"]["data"][0]["expiresAt"], "0xffffffffffffffff",
+        "{entity}"
+    );
+    // The receipt's EntityCreated log carries the sentinel as its first word.
+    let tx_hash = arkiv_node::simulator::wire::hex(permanent.hash().as_slice());
+    let receipt = call("eth_getTransactionReceipt", json!([tx_hash])).await;
+    let logs = receipt["result"]["logs"].as_array().unwrap();
+    assert_eq!(logs.len(), 1, "{receipt}");
+    assert_eq!(logs[0]["topics"][1], key_hex);
+    assert_eq!(
+        &logs[0]["data"].as_str().unwrap()[2..66],
+        format!("{:064x}", u64::MAX)
+    );
+    // Estimation of the same call succeeds with a finite, capped cost.
+    let vectors: Json =
+        serde_json::from_str(include_str!("fixtures/ethereum-sdk-vectors.json")).unwrap();
+    let estimate = call(
+        "eth_estimateGas",
+        json!([{"from":arkiv_node::simulator::wire::hex(actor.as_bytes()),"to":"0x4400000000000000000000000000000000000044","data":vectors["permanentData"]}]),
+    )
+    .await;
+    let gas = u64::from_str_radix(
+        estimate["result"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("0x"),
+        16,
+    )
+    .unwrap();
+    assert!((1_000_000..=20_000_000).contains(&gas), "{estimate}");
+    let status = arkiv_node::signed::runtime::status(&rt.node.lock().unwrap());
+    let gas = &status["capabilities"]["gas"];
+    assert_eq!(gas["permanentEntitiesSupported"], true);
+    assert_eq!(gas["permanentEntities"]["liveCreate"], true);
+    assert_eq!(gas["permanentEntities"]["expirySweep"], false);
+    assert_eq!(gas["maxRentLifetimeBlocks"], "15768000");
+    assert_eq!(gas["rentRule"], "glm-rent-v2");
+    // 15,768,000 one-second blocks of this test chain.
+    assert_eq!(gas["maxRentLifetimeSeconds"], "15768000");
+    let unsupported = status["capabilities"]["sdkRpcProfile"]["unsupported"].to_string();
+    assert!(!unsupported.contains("permanent"), "{unsupported}");
+}

@@ -24,7 +24,7 @@ fn setup() -> (Engine, Branch, ArkivExecutionContext) {
         caller: [1; 20],
         block_height: 1,
         chain_id: 1337,
-        max_lifetime: 1000,
+        max_rent_lifetime: 1000,
         expiry_per_block: 100,
         allow_permanent_create: false,
     };
@@ -843,6 +843,8 @@ fn generic_namespaces_without_glm_cannot_receive_arkiv_entities() {
     );
 }
 
+/// The rent cap of the GLM fixtures, in blocks.
+const CAP: u64 = 1_000;
 /// A GLM-priced branch holding one permanent entity created the way a
 /// permanent-prefill genesis creates it (height 0, `allow_permanent_create`),
 /// plus the live context of block 5.
@@ -863,7 +865,7 @@ fn glm_permanent() -> (Engine, Branch, ArkivExecutionContext, RecordKey) {
         caller: [1; 20],
         block_height: 0,
         chain_id: 1337,
-        max_lifetime: 1000,
+        max_rent_lifetime: CAP,
         expiry_per_block: 1,
         allow_permanent_create: true,
     };
@@ -897,45 +899,143 @@ fn glm_permanent() -> (Engine, Branch, ArkivExecutionContext, RecordKey) {
     (engine, branch, genesis, key)
 }
 
-#[test]
-fn glm_rejects_live_permanence_and_updates_of_permanent_entities() {
-    let (_engine, mut b, mut live, k) = glm_permanent();
-    let mut permanent = create(0);
-    if let ArkivOperation::Create { expiry, .. } = &mut permanent {
-        *expiry = Expiry::PERMANENT;
+/// The gas an applied operation spent.
+fn spent(outcome: &OpOutcome) -> u64 {
+    match outcome {
+        OpOutcome::Applied { receipt, .. } => receipt.spent.units(),
+        other => panic!("{other:?}"),
     }
-    // A live creation is never permanent under GLM rent.
+}
+fn create_until(salt: u128, expiry: Expiry) -> ArkivOperation {
+    ArkivOperation::Create {
+        salt,
+        flags: 0,
+        expiry,
+        attributes: vec![(name("score"), Cell::attribute(Value::I32(-1)))],
+    }
+}
+fn at(expires_at: u64) -> Expiry {
+    Expiry {
+        expires_at,
+        min_lifetime: 0,
+    }
+}
+
+#[test]
+fn glm_prices_every_lifetime_at_or_beyond_the_cap_alike() {
+    let (_engine, mut b, live, _) = glm_permanent();
+    let h = live.block_height;
+    let cap_cost = spent(&run(&mut b, &live, &create_until(10, at(h + CAP))));
+    // Twice the cap, far beyond it, and permanent: the same gas, not TooFar.
+    for (salt, expiry) in [
+        (11, at(h + 2 * CAP)),
+        (12, at(u64::MAX - 1)),
+        (13, Expiry::PERMANENT),
+        (
+            14,
+            Expiry {
+                expires_at: 0,
+                min_lifetime: 3 * CAP,
+            },
+        ),
+    ] {
+        assert_eq!(
+            spent(&run(&mut b, &live, &create_until(salt, expiry))),
+            cap_cost,
+            "{expiry:?}"
+        );
+    }
+    // Shorter lifetimes cost less, by exactly their uncapped rent.
+    let short = spent(&run(&mut b, &live, &create_until(15, at(h + CAP / 2))));
+    assert!(short < cap_cost);
+    let units = crate::gas::storage_units(
+        &b.try_get_record(
+            entity_namespace(),
+            &key(&live, 1),
+            &Projection::ALL,
+            Budget::unlimited(),
+        )
+        .unwrap()
+        .unwrap()
+        .value
+        .unwrap()
+        .cells,
+    )
+    .unwrap()
+    .total;
+    let rent = |lifetime| {
+        crate::gas::rent(0, units, None, Some(h + lifetime), h, CAP)
+            .unwrap()
+            .gas
+    };
+    assert_eq!(cap_cost - short, rent(CAP) - rent(CAP / 2));
+    // Only finite expiries are scheduled; permanent ones never are.
+    for height in [h + CAP, h + 2 * CAP, u64::MAX - 1, h + 3 * CAP] {
+        assert_eq!(
+            count(&b, &crate::exec::total_key(height)).unwrap(),
+            1,
+            "{height}"
+        );
+    }
+    assert_eq!(count(&b, &crate::exec::total_key(u64::MAX)).unwrap(), 0);
     assert_eq!(
-        run(&mut b, &live, &permanent),
-        rejected(ArkivFault::PermanentStorageUnsupported)
+        count(&b, &crate::exec::due_key(u64::MAX, entity_namespace())).unwrap(),
+        0
     );
-    // Updates that would keep it permanent need unbounded rent: rejected.
-    for op in [
-        ArkivOperation::Patch {
+}
+
+#[test]
+fn glm_updates_permanent_entities_with_capped_rent() {
+    let (_engine, mut b, mut live, k) = glm_permanent();
+    // Extending a permanent entity to permanent is a successful no-op: no
+    // rent, updatedAt stamped.
+    let extend_permanent = ArkivOperation::ExtendExpiry {
+        key: k.clone(),
+        expiry: Expiry::PERMANENT,
+    };
+    let noop = run(&mut b, &live, &extend_permanent);
+    let p = read(&b, &k);
+    assert_eq!((p.expires_at, p.updated_at), (u64::MAX, 5));
+    // Same-size patch and transfer pay execution only; growth pays the cap.
+    let same = run(
+        &mut b,
+        &live,
+        &ArkivOperation::Patch {
             key: k.clone(),
             set: vec![(name("score"), Cell::attribute(Value::I32(7)))],
             remove: vec![],
         },
-        ArkivOperation::Patch {
+    );
+    let grow = run(
+        &mut b,
+        &live,
+        &ArkivOperation::Patch {
+            key: k.clone(),
+            set: vec![(name("note"), Cell::field(Value::str("grown")))],
+            remove: vec![],
+        },
+    );
+    // `note` adds 4 + 5 + 2 units, paid for the whole capped lifetime.
+    let growth_rent = crate::gas::rent(0, 11, Some(u64::MAX), Some(u64::MAX), 5, CAP)
+        .unwrap()
+        .gas;
+    assert!(growth_rent > 0 && spent(&grow) > growth_rent);
+    assert!(spent(&same) > 0 && spent(&noop) > 0);
+    applied(run(
+        &mut b,
+        &live,
+        &ArkivOperation::Patch {
             key: k.clone(),
             set: vec![],
-            remove: vec![name("score")],
+            remove: vec![name("note")],
         },
-        ArkivOperation::TransferOwnership {
-            key: k.clone(),
-            owner: [2; 20],
-        },
-        ArkivOperation::ExtendExpiry {
-            key: k.clone(),
-            expiry: Expiry::PERMANENT,
-        },
-    ] {
-        assert_eq!(
-            run(&mut b, &live, &op),
-            rejected(ArkivFault::PermanentStorageUnsupported),
-            "{op:?}"
-        );
-    }
+    ));
+    // Long after its paid horizon a permanent entity still lives, and
+    // extending it is still free of rent.
+    live.block_height = 10 * CAP;
+    let late = run(&mut b, &live, &extend_permanent);
+    assert_eq!(spent(&late), spent(&noop));
+    assert_eq!(read(&b, &k).expires_at, u64::MAX);
     // A permanent entity is never shortened to a finite lifetime, including
     // by a permissionless extender (creation flag 2).
     for caller in [[1; 20], [3; 20]] {
@@ -946,10 +1046,7 @@ fn glm_rejects_live_permanence_and_updates_of_permanent_entities() {
                 &live,
                 &ArkivOperation::ExtendExpiry {
                     key: k.clone(),
-                    expiry: Expiry {
-                        expires_at: 10,
-                        min_lifetime: 0,
-                    },
+                    expiry: at(u64::MAX - 1),
                 },
             ),
             OpOutcome::HostRejected {
@@ -958,41 +1055,154 @@ fn glm_rejects_live_permanence_and_updates_of_permanent_entities() {
         );
     }
     live.caller = [1; 20];
+    applied(run(
+        &mut b,
+        &live,
+        &ArkivOperation::TransferOwnership {
+            key: k.clone(),
+            owner: [2; 20],
+        },
+    ));
     let p = read(&b, &k);
-    assert_eq!(
-        (p.expires_at, p.owner, p.updated_at),
-        (u64::MAX, [1; 20], 0)
-    );
-    // The rejected updates left the schedule as genesis wrote it: only the
-    // finite row is due (at 10); nothing is ever due at u64::MAX.
+    assert_eq!((p.expires_at, p.owner), (u64::MAX, [2; 20]));
+    // Nothing is ever due at u64::MAX; the finite genesis row stays at 10.
     let schedule = |b: &Branch| {
         [
             crate::exec::total_key(10),
-            crate::exec::due_key(10, entity_namespace()),
             crate::exec::total_key(u64::MAX),
             crate::exec::due_key(u64::MAX, entity_namespace()),
         ]
         .map(|key| count(b, &key).unwrap())
     };
-    assert_eq!(schedule(&b), [1, 1, 0, 0]);
-    // The owner can still delete it; no expiry count is touched (a decrement
-    // of an absent count would fail as corrupt state).
+    assert_eq!(schedule(&b), [1, 0, 0]);
+    live.caller = [2; 20];
     applied(run(
         &mut b,
         &live,
         &ArkivOperation::Delete { key: k.clone() },
     ));
-    assert!(
-        b.try_get_record(
+    assert_eq!(schedule(&b), [1, 0, 0]);
+}
+
+/// The rent `op` is charged: its gas less the gas of the same operation on
+/// the same state with a one-block cap, under which no extension or growth
+/// pays rent. The operation is then applied for real.
+fn rent_charged(b: &mut Branch, c: &ArkivExecutionContext, op: &ArkivOperation) -> u64 {
+    let checkpoint = b.checkpoint();
+    let free = ArkivExecutionContext {
+        max_rent_lifetime: 1,
+        ..*c
+    };
+    let base = spent(&run(b, &free, op));
+    b.rollback_to(checkpoint).unwrap();
+    spent(&run(b, c, op)) - base
+}
+
+#[test]
+fn glm_extends_finite_entities_up_to_the_cap_and_no_further() {
+    let (_engine, mut b, mut live, _) = glm_permanent();
+    let h = live.block_height;
+    let (chain, caller) = (live.chain_id, live.caller);
+    // Nonce 0 is the genesis permanent row, 1 the finite one; these are 2..5.
+    let k = |nonce: u64, salt: u128| {
+        RecordKey::new(&derive_entity_key(chain, &caller, nonce, salt)).unwrap()
+    };
+    // One expiry per height in this fixture, so `near` is one block later.
+    for (salt, lifetime) in [(20, CAP / 2), (21, CAP), (22, 2 * CAP), (23, CAP / 2 + 1)] {
+        applied(run(&mut b, &live, &create_until(salt, at(h + lifetime))));
+    }
+    let (half, full, double, near) = (k(2, 20), k(3, 21), k(4, 22), k(5, 23));
+    let units = crate::gas::storage_units(
+        &b.try_get_record(
             entity_namespace(),
-            &k,
+            &half,
             &Projection::ALL,
-            Budget::unlimited()
+            Budget::unlimited(),
         )
         .unwrap()
         .unwrap()
         .value
-        .is_none()
+        .unwrap()
+        .cells,
+    )
+    .unwrap()
+    .total;
+    let extend = |key: &RecordKey, expiry| ArkivOperation::ExtendExpiry {
+        key: key.clone(),
+        expiry,
+    };
+    let quote = |old, new, height| {
+        crate::gas::rent(units, units, Some(old), Some(new), height, CAP)
+            .unwrap()
+            .gas
+    };
+    // Beyond the cap already: neither a further extension nor permanence
+    // costs rent.
+    assert_eq!(
+        rent_charged(&mut b, &live, &extend(&double, at(h + 3 * CAP))),
+        0
     );
-    assert_eq!(schedule(&b), [1, 1, 0, 0]);
+    assert_eq!(
+        rent_charged(&mut b, &live, &extend(&double, Expiry::PERMANENT)),
+        0
+    );
+    // Half a cap to permanent at once: the other half of the cap ...
+    let other_half = rent_charged(&mut b, &live, &extend(&half, Expiry::PERMANENT));
+    assert_eq!(other_half, quote(h + CAP / 2, u64::MAX, h));
+    // ... which is the cap's rent less the half already paid (each operation
+    // rounds up once, so they may differ by one gas).
+    let create = |lifetime| {
+        crate::gas::rent(0, units, None, Some(h + lifetime), h, CAP)
+            .unwrap()
+            .gas
+    };
+    assert!(other_half.abs_diff(create(CAP) - create(CAP / 2)) <= 1);
+    // Near the cap from below: only the part that becomes chargeable.
+    let crossing = rent_charged(&mut b, &live, &extend(&near, at(h + CAP + CAP / 2)));
+    assert_eq!(crossing, quote(h + CAP / 2 + 1, h + CAP + CAP / 2, h));
+    assert_eq!(crossing, quote(h + CAP / 2 + 1, h + CAP, h));
+    // Time passes: a full-cap entity extended a quarter cap later pays for
+    // the quarter that became chargeable, never the whole cap again.
+    live.block_height = h + CAP / 4;
+    let later = rent_charged(&mut b, &live, &extend(&full, Expiry::PERMANENT));
+    assert_eq!(later, quote(h + CAP, u64::MAX, h + CAP / 4));
+    assert!(later > 0 && later < other_half);
+    // Every extension to permanent unscheduled its finite expiry.
+    for lifetime in [CAP / 2, CAP, 2 * CAP, 3 * CAP] {
+        assert_eq!(count(&b, &crate::exec::total_key(h + lifetime)).unwrap(), 0);
+    }
+    assert_eq!(count(&b, &crate::exec::total_key(u64::MAX)).unwrap(), 0);
+    for key in [&half, &full, &double] {
+        assert_eq!(read(&b, key).expires_at, u64::MAX);
+    }
+    assert_eq!(read(&b, &near).expires_at, h + CAP + CAP / 2);
+}
+
+#[test]
+fn glm_growth_of_a_permanent_entity_pays_the_capped_lifetime() {
+    let (_engine, mut b, mut live, k) = glm_permanent();
+    let grow = |text: &str| ArkivOperation::Patch {
+        key: k.clone(),
+        set: vec![(name("note"), Cell::field(Value::str(text)))],
+        remove: vec![],
+    };
+    // Growth pays its units for the capped remaining lifetime, at any age;
+    // `rent_charged` measures it above the one-block baseline.
+    let growth = |units, height| {
+        let quote = |cap| {
+            crate::gas::rent(0, units, Some(u64::MAX), Some(u64::MAX), height, cap)
+                .unwrap()
+                .gas
+        };
+        quote(CAP) - quote(1)
+    };
+    // `note` adds 4 + 5 + 2 units.
+    assert_eq!(rent_charged(&mut b, &live, &grow("grown")), growth(11, 5));
+    live.block_height = 50 * CAP;
+    assert_eq!(rent_charged(&mut b, &live, &grow("again")), 0);
+    assert_eq!(
+        rent_charged(&mut b, &live, &grow("longer text")),
+        growth(6, 50 * CAP)
+    );
+    assert!(growth(6, 50 * CAP) > 0);
 }

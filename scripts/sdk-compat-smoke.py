@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Run the unchanged sibling SDK against disposable producer/full/light nodes.
 
+PRE-UDC: this smoke targets the payload-era SDK (0.8.x: payload/contentType
+writes and selections). Current nodes implement the user-defined-columns
+model and refuse those writes and selections, so it is expected to fail
+against them; a separate UDC smoke replaces it.
+
 Requires Bun, an installed arkiv-sdk-js checkout and arkiv-chain-indexer source. No deployed nodes or
 company-repository files are modified. Only public disposable fixture keys are
 used. Set ARKIV_SDK_DIR, ARKIV_INDEXER_DIR and ARKIV_PROPOSER_BIN to override locations.

@@ -2,6 +2,8 @@
 
 Status: implementation authorized by the user on 2026-09-24; delivered as the node's Arkiv entity protocol (originally behind an `arkiv-v2` cargo feature, now the only build). See [implementation contract and validation](arkiv-v2-compatibility.md). The original plan below is retained as design context. Later user authorization permits stopping the existing experiment and deploying fresh compatible stores; old stores must never be reinterpreted in place.
 
+**Superseded in part by user-defined columns (protocol 2, `arkiv-entity-v3`).** The SDK's UDC model removed `$payload` and `$contentType`: an entity is its seven host-maintained system cells plus up to 32 user attributes per create or patch, each indexed or not as its writer marks it (bit 7 of the ABI `typeId`), and `bytes` is a user type that is stored but never indexed. Where this plan gives `$payload`/`$contentType` rules or "system payload only" for `bytes`, the [node API reference](node-api-reference.md#entities-user-defined-columns) is authoritative.
+
 ## Recommendation
 
 Keep the generic Merkle database and add an explicit, versioned Arkiv entity execution profile above it. Extend the database with the missing *distinct* scalar types and larger names/strings. Implement Arkiv system fields as host-maintained committed cells, with per-entity lifecycle rules. Translate SDK type IDs at the API boundary; do not reinterpret existing engine IDs. Deliver correct system-field storage, projections and bounded equality proofs before adding a full query-language/RPC surface.
@@ -55,7 +57,7 @@ The simulator exposes only bool/i64/u64/str equality and metadata projections. `
 | u256 | 4 | 32-byte unsigned big-endian; equality/range |
 | dec | 5 | Signed 256-bit two's complement scaled by 10^18; equality/range |
 | bytes32 | 6 | Exactly 32 opaque bytes; equality |
-| bytes | 7 | Unindexed variable bytes, system payload only at Arkiv boundary |
+| bytes | 7 | Unindexed variable bytes (planned as system payload only; under UDC a user type, never indexed) |
 | str | 8 | UTF-8 up to 128 bytes, pinned allowed-character rules; equality/prefix |
 | addr | 9 | Exactly 20 address bytes; equality |
 | key | 10 | Exactly 32 entity-reference bytes; equality; dangling references allowed |
@@ -79,14 +81,14 @@ Use typed cells in the existing row trie for the initial implementation; a compa
 | `$updatedAt` | U64; indexed | Host-set block of successful mutation; advertised query extension where needed |
 | `$expiresAt` | U64; indexed | Resolved create/extend expiry; MAX is permanent |
 | `$creationFlags` | Unindexed U64 field constrained to valid u8 bits | Immutable create argument; project `{readonly, permissionlessExtension, raw}`; not queryable |
-| `$contentType` | Str; indexed | User-managed only through typed create/patch fields or allowed protocol triples |
-| `$payload` | Bytes; unindexed | User-managed opaque bytes; never queryable |
+| `$contentType` | Str; indexed | Planned as user-managed; removed under UDC (store a content type in a user `str` attribute) |
+| `$payload` | Bytes; unindexed | Planned as user-managed opaque bytes; removed under UDC (use user `bytes` attributes) |
 
 The raw flags field is an internal storage choice, not a new public scalar type. Reject reserved flag bits. Preserve distinction between zero-length payload/content type and absent user attribute; pin create omission and tombstone projection behavior to executor/SDK fixtures before coding that path.
 
 Materializing `$key` lets ordinary complete-Eq proofs work without a special query engine. It duplicates the structural key deliberately; host writes and verified row decoding must check equality, and golden tests must reject disagreement. A future virtual-key optimization needs a separately specified proof profile. Structural `#key` is not a user attribute and is never accepted as an alias.
 
-All unknown `$` names and all attempts to set/remove host-owned system fields fail. `$payload`/`$contentType` are user-managed exceptions, but type IDs and allowed operations remain fixed. Tombstone ID 0 is a patch operation with an empty wire value, never a stored `Value` or an Eq literal. Reject create tombstones, nonempty tombstones, duplicate/unsorted protocol triples, and type substitution on system fields.
+All unknown `$` names and all attempts to set/remove host-owned system fields fail. (The plan made `$payload`/`$contentType` user-managed exceptions; under UDC they are unknown names like any other `$` name.) Tombstone ID 0 is a patch operation with an empty wire value, never a stored `Value` or an Eq literal. Reject create tombstones, nonempty tombstones, duplicate/unsorted protocol triples, and type substitution on system fields.
 
 ## Arkiv entity execution profile
 

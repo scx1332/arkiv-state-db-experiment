@@ -1,4 +1,11 @@
-/** Runs unchanged sibling SDK source against an isolated native chain. */
+/**
+ * Runs unchanged sibling SDK source against an isolated native chain.
+ *
+ * PRE-UDC: written for the payload-era SDK (0.8.x: `stringToPayload`,
+ * payload/contentType writes and selections). Current nodes implement the
+ * user-defined-columns model and refuse those, so this smoke is expected to
+ * fail against them; a separate UDC smoke replaces it.
+ */
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import {

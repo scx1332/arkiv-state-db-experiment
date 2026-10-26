@@ -1,5 +1,13 @@
 # Native engine SDK compatibility
 
+> **Pre-UDC document.** This page and `scripts/sdk-compat-smoke.{py,ts}`
+> describe and test the payload-era SDK (0.8.x: an entity payload and content
+> type, `payload`/`contentType` selections). The node
+> now implements the SDK's user-defined-columns model instead; for current
+> write rules, read shapes and error codes see the
+> [node API reference](node-api-reference.md#entities-user-defined-columns).
+> The transport, gas and account behaviour below is unchanged.
+
 The signed node exposes Ethereum/Arkiv JSON-RPC at `/` on its existing public
 listener, over HTTP POST and WebSocket. Native status exposes the structured
 `sdkRpcProfile` capability; the blanket `sdkRpcCompatible` flag remains false

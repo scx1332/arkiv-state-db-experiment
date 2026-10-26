@@ -56,26 +56,38 @@ def blob(value):
     return struct.pack('>I', len(value)) + value
 
 
-def attribute(name, value):
+# Engine codec (crates/arkiv-db/src/codec.rs): a user attribute is
+# CellName || Cell, and a Cell is kind || Value. Kind 01 is an indexed
+# attribute, 02 an unindexed one; bytes are never indexed. Value tags are the
+# engine's (U64 0d, Str 02, Bytes 03), not SDK type IDs.
+INDEXED, UNINDEXED = b'\x01', b'\x02'
+
+
+def attribute(name, value, indexed):
     if isinstance(value, int):
-        encoded = b'\x03' + struct.pack('>Q', value)
+        encoded = b'\x0d' + struct.pack('>Q', value)
     elif isinstance(value, bytes):
-        encoded = b'\x05' + blob(value)
+        if indexed:
+            raise ValueError('bytes attributes are stored, never indexed')
+        encoded = b'\x03' + blob(value)
     else:
-        encoded = b'\x04' + blob(value.encode())
-    return blob(name.encode()) + encoded
+        encoded = b'\x02' + blob(value.encode())
+    return blob(name.encode()) + (INDEXED if indexed else UNINDEXED) + encoded
 
 
 def operation(namespace_id, index, brick, lifetime):
     sku, color, size, width, length, height, shape = brick
-    payload = json.dumps({'name': sku.replace('-', ' ').title(), 'description': f'{color.title()} {size} toy {shape}', 'units': {'width': 'studs', 'length': 'studs', 'height': 'plates'}}, separators=(',', ':')).encode()
-    attrs = {'sample': 'bricks-v1', 'sku': sku, 'color': color, 'size': size,
-             'width': width, 'length': length, 'height': height, 'shape': shape,
-             'material': 'ABS', '$contentType': 'application/json', '$payload': payload}
+    content = json.dumps({'name': sku.replace('-', ' ').title(), 'description': f'{color.title()} {size} toy {shape}', 'units': {'width': 'studs', 'length': 'studs', 'height': 'plates'}}, separators=(',', ':')).encode()
+    indexed = {'sample': 'bricks-v1', 'sku': sku, 'color': color, 'size': size,
+               'width': width, 'length': length, 'height': height, 'shape': shape,
+               'material': 'ABS'}
+    # The JSON description is stored and returned, never queried.
+    attrs = [(k, v, True) for k, v in indexed.items()] + [('content', content, False)]
+    attrs.sort(key=lambda a: a[0].encode())
     return (b'\x08' + struct.pack('>Q', namespace_id) + b'\x01'
             + (index + 1).to_bytes(16, 'big') + b'\x00'
             + struct.pack('>QQI', 0, lifetime, len(attrs))
-            + b''.join(attribute(k, v) for k, v in attrs.items()))
+            + b''.join(attribute(k, v, i) for k, v, i in attrs))
 
 
 def main():

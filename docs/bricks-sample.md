@@ -15,7 +15,8 @@ entity keys across namespaces.
 `scripts/seed-bricks.py` adds one atomic batch of 16 toy bricks to an existing
 `bricks` namespace. Indexed attributes include `sample`, `sku`, `color`, `size`,
 `width`, `length`, `height`, `shape` and `material`. Width/length are studs and
-height is plates; the JSON payload names these units. Duplicate colors and
+height is plates; an unindexed `bytes` attribute `content` holds a JSON
+description naming these units (stored and returned, never queried). Duplicate colors and
 sizes create posting lists with multiple records. Eight colors and three shapes
 make the term tree useful to inspect.
 

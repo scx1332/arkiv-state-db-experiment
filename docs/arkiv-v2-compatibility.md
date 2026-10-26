@@ -1,20 +1,24 @@
-# Arkiv entity v2 compatibility profile
+# Arkiv entity compatibility profile
 
-The node (`arkiv-node`) implements the Arkiv v2 SDK entity model as its host
-protocol (`arkiv-entity-v2` in status capabilities). There is one build and
-one protocol: every chain reserves namespace 1 for Arkiv entities, and the
-database engine (`arkiv-db`) has a single layout.
+The node (`arkiv-node`) implements the Arkiv SDK's user-defined-columns (UDC)
+entity model as its host protocol (`arkiv-entity-v3` in status capabilities,
+protocol version 2). There is one build and one protocol: every chain reserves
+namespace 1 for Arkiv entities, and the database engine (`arkiv-db`) has a
+single layout. The earlier payload model (`arkiv-entity-v2`, with `$payload`
+and `$contentType`) is retired; see the
+[node API reference](node-api-reference.md#entities-user-defined-columns).
 
 ## Contract
 
 | Area | Implemented behavior |
 | --- | --- |
 | Names | 32 ASCII bytes, protocol Ident32 grammar; SDK-safe authoring rejects reserved words and `--`; namespace names remain 20 bytes |
-| Scalars | Distinct bool, i32, u64, u256, dec, bytes32, str, addr, key; payload-only bytes; other engine types (i64, the golem-db grid types) rejected at the Arkiv boundary |
+| Scalars | Distinct bool, i32, u64, u256, dec, bytes32, bytes, str, addr, key; each attribute indexed or not by the writer (ABI `typeId` bit 7), `bytes` never indexed; other engine types (i64, the golem-db grid types) rejected at the Arkiv boundary |
 | Strings | 128 UTF-8 bytes, C0 and DEL rejected |
-| Payload | 128 KiB per entity, separate block/proof/response limits |
-| Encodings | Explicit SDK IDs 1–10; separate ABI, natural-width storage, canonical engine values and ordered index bytes |
-| System fields | Committed `$key`, `$creator`, `$owner`, `$createdAt`, `$updatedAt`, `$expiresAt`, `$creationFlags`, `$contentType`, `$payload` |
+| Bytes | 128 KiB per value and 128 KiB for all `bytes` values of one entity together, separate block/proof/response limits |
+| Attributes | At most 32 per create or patch; indexed ones are queryable, unindexed ones stored and returned only |
+| Encodings | Explicit SDK IDs 1–10 with the `0x80` indexed flag; separate ABI, natural-width storage, canonical engine values and ordered index bytes |
+| System fields | Committed `$key`, `$creator`, `$owner`, `$createdAt`, `$updatedAt`, `$expiresAt`, `$creationFlags`; no payload or content type |
 | Identity | SDK-compatible Keccak derivation using chain ID, contract address, creator, committed creation nonce, salt |
 | Lifecycle | Per-entity owner checks; immutable creator/key/createdAt/flags; readonly content; permissionless extension; transfer; delete; no revival; transaction rollback includes nonces and expiry schedules |
 | Expiry | Checked minimum-lifetime resolution, no shortening, purge before publication; permanent MAX; equal-expiry successful extension stamps updatedAt |
@@ -36,11 +40,11 @@ production SDK JSON-RPC representation. SDK ABI values and key/decimal fixtures
 are tested independently from the experimental JSON transport.
 
 `$updatedAt` equality is an advertised extension to the pinned production parser.
-Current SDK builder exceptions for `$createdAt`, `$updatedAt` and `$contentType`
-are reported in capabilities rather than claimed as supported SDK builder calls.
-Payload and raw witnesses occur only on proof endpoints. Explorer feed rows keep
-unindexed fields as length/digest descriptors; payloads and proofs are never feed
-or database metadata.
+Current SDK builder exceptions for `$createdAt` and `$updatedAt` are reported in
+capabilities rather than claimed as supported SDK builder calls. Unindexed
+attribute values and raw witnesses occur only on proof and query endpoints.
+Explorer feed rows keep unindexed fields as length/digest descriptors; their
+values and proofs are never feed or database metadata.
 
 ## Version inventory
 
@@ -93,9 +97,11 @@ Example POST to `http://127.0.0.1:19402/sim/v1/query/inspect`:
 Other fixtures: group U64 1 at block 3 has five rows; createdAt U64 2 has five;
 price Dec `-12.34567890123456789`, quantity U256 MAX, counter I32 MIN,
 checksum Bytes32 `42` repeated 32 bytes and reference Key `77` repeated 32 bytes
-are populated. Content type is `application/json`. Expiry U64 14 has one row at
-13 and zero at 14. Each proof response includes verified system projection,
-canonical request/proof bytes and versioned actual witness paths.
+are populated, all indexed; the unindexed `format` str (`application/json`) and
+`data` bytes are stored and returned but have no postings. Expiry U64 14 has one
+row at 13 and zero at 14. Each proof response includes the verified system
+projection and every attribute with its `indexed` flag, canonical request/proof
+bytes and versioned actual witness paths.
 
 ## Verification
 
@@ -109,7 +115,8 @@ SDK-derived fixtures record the source revision in
 versus ABI words versus signed ordering, complete equality witnesses for every
 new scalar, profile/version rejection, owner/flags/key forgery against a real
 authenticated engine proof, rollback, nonce exhaustion, expiry, independent full
-replay, header-only restart, HTTP inspection, 128 KiB payload, no feed payload,
+replay, header-only restart, HTTP inspection, a 128 KiB unindexed bytes
+attribute that is proven but kept out of the feed,
 and bounded proof failure. Redb simulator crash tests cover every mutating boundary
 of a five-entity creation block, including creator counters and expiry schedules.
 

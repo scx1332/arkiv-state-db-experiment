@@ -95,15 +95,15 @@ fn literal_authentication_layout_vectors() {
     );
     assert_eq!(
         trust.genesis_hash.to_string(),
-        "0xc0b25d98501531f736fd849ad382fb1887d5c25c6885544c2f35b8f988331d46"
+        "0xb054edd5133f5bb0950183f81c6f736795a460f27fccdb50225e7ccf802b2218"
     );
     assert_eq!(
         signing_message(trust.genesis_hash, &header).to_string(),
-        "0x5974e26364a03fc7234a8a02913b154e2d361fcd6d74dc06fe40011567f81a07"
+        "0x8f5a9335f973ccf0f4247c3b8fac3984937a73374b2ad05f090d63f8a1945b56"
     );
     assert_eq!(
         wire::hex(&signed.signature),
-        "0x363397aef885cc94718415d4b69977533cafa2b159599b04114dcb0bd166c2c7f111c535287a58cdbbf33ea8cf3ed07f80f7243f2ecf48445c1c6b634c41cd00"
+        "0x9fde4861b345e2305ac92ae8b2cb97ed6075efde423448640b813157ea582219a67fba9997eec7ecae3d48e44f4c0e9565cc431a009896688ed3fb10ff4a420c"
     );
     assert_eq!(decode_exact::<SignedHeader>(&envelope).unwrap(), signed);
     let mut bad = envelope.clone();

@@ -107,11 +107,10 @@ pub const MAX_CELLS: usize = 64;
 
 /// The native genesis of a signed chain created without a genesis bundle:
 /// the development workload limits under GLM pricing, without admins, with
-/// the signed wire caps and room for a full entity ([`MIN_CELLS`]).
+/// the signed wire caps. Its [`MIN_CELLS`] cells per record fit a full entity.
 pub fn default_native_genesis(chain_id: u64, timestamp_ms: u64) -> Genesis {
     let mut native = crate::demo::workload::genesis(chain_id, timestamp_ms);
     native.admins.clear();
-    native.limits.max_cells = MIN_CELLS;
     native.pricing = crate::gas::schedule();
     native.params.max_admin_per_block = 0;
     native.params.max_tx_bytes = TX_CAP - SIGNED_TX_OVERHEAD;

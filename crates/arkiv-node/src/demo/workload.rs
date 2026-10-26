@@ -19,7 +19,8 @@ pub fn genesis(chain_id: u64, timestamp_ms: u64) -> Genesis {
         timestamp_ms,
         limits: Limits {
             namespace_cap: 1024,
-            max_cells: 32,
+            // Room for a full entity: 32 user attributes beside the system cells.
+            max_cells: crate::arkiv::MIN_ENTITY_CELLS,
             max_page: 64,
             max_groups: 8,
             max_literals: 8,

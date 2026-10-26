@@ -42,18 +42,22 @@ entity mutations, creation nonces and emitted events.
 The actual gas price remains fixed at **1 gwei**. Signed fee ceilings below
 that price are rejected. Higher ceilings do not increase the fixed charged
 price; priority fees are not paid. `eth_estimateGas` executes a disposable
-branch, including rent and failure checks, and adds a small gas allowance.
-Estimation ignores the caller's balance for both gas fees and transfer value,
-including when pending transactions reserve that balance. It uses the same gas
-and rent metering, operation permissions, expiry rules and supplied gas limit as
-execution. Fee reservation/settlement is skipped; transfers receive only a
+branch, including failure checks, and adds a small gas allowance. It returns
+execution gas only: entity rent is GLM debited beside the fee, never gas
+([charging rent](glm-gas-v1.md#charging-rent)), so a full 128 KiB permanent
+create estimates under a million gas. Estimation ignores the caller's balance
+for gas fees, transfer value and rent, including when pending transactions
+reserve that balance. It uses the same gas metering, operation permissions,
+expiry rules and supplied gas limit as execution. Fee reservation/settlement is skipped; transfers receive only a
 temporary caller balance override. The resulting candidate is discarded, with
 no account, entity, nonce, burn-counter, history or transaction-pool changes.
 The estimate is a gas quote, not an admission or affordability guarantee.
 
-Actual submission and block execution still enforce funds. JSON-RPC insufficient
-balance errors use code `-32000` and message
-`insufficient funds for gas * price + value`, including pending reservations.
+Actual submission and block execution still enforce funds, rent included.
+JSON-RPC insufficient balance errors use code `-32000` and message
+`insufficient funds for gas * price + value + rent`, including pending
+reservations and the quoted rent (viem reports it as `InsufficientFundsError`).
+Receipts add `rentFee`, the wei burned as rent (viem passes the field through).
 They are admission failures, not contract reverts, and have no ABI revert data.
 Native REST keeps its existing `InsufficientBalance` identifier.
 `eth_call` supports the entity creation nonce and `execute` simulation, including
@@ -62,9 +66,10 @@ commit state. Entity validation failures in estimation still return their
 ABI-encoded revert data.
 
 Contract creation, arbitrary EVM calls, unprotected legacy transactions,
-nonempty access lists, other typed transaction formats, and permanent entity
-lifetimes are unsupported. Finite expiry arguments retain the SDK's exact
-block-height/minimum-lifetime semantics. Existing native limits still apply,
+nonempty access lists and other typed transaction formats are unsupported.
+Expiry arguments retain the SDK's exact block-height/minimum-lifetime
+semantics; `ExpirationTime.permanent()` (`u64::MAX`) is a live, owner-only
+permanent lifetime that pays a year of rent. Existing native limits still apply,
 including operation, attribute, namespace, lifetime and expiry bucket limits.
 
 ## Reads and subscriptions

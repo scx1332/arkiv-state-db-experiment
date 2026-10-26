@@ -305,6 +305,11 @@ Recommended explicit policy ID: `sponsored-rent-v1`. Let `U_i` be the existing
 `gas::storage_units` of the complete generated entity, and `E_i` its finite
 expiry. Calculate each row's rent with the existing function at height 0:
 
+(The implemented rule is now `glm-rent-v3`: rent in wei per second at the
+genesis block period, capped at the genesis rent cap; see
+[the contract](genesis-bundle-v1.md#state-rent-and-first-live-block). The
+original design formula follows.)
+
 ```text
 rent_gas_i       = ceil(U_i * E_i * 8 / 17280)
 genesis_burn_wei = sum_i(rent_gas_i * 1_000_000_000)

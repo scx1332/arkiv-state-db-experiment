@@ -50,10 +50,16 @@ Other allocations remain at nonce 0 until their first included transaction.
    exactly 21,000 gas, covered by transaction intrinsic gas. Each transfer in a
    multi-operation transaction adds 9,000 gas to the transaction intrinsic gas.
    Amounts are fixed 32-byte big-endian u256 values in signed canonical bytes. Transfer amounts are not fees.
-4. On operation failure, restore all entity/account operation changes. Keep
-   metered work, refund unused gas reservation and consume the transaction nonce.
+   An entity operation's rent ([GLM gas](glm-gas-v1.md#charging-rent)) is
+   debited from the remaining balance and added to the burned counter; an
+   operation whose rent the sender cannot pay fails with
+   `InsufficientRentBalance` before writing anything.
+4. On operation failure, restore all entity/account operation changes, rent
+   debits and rent burns included. Keep metered work, refund unused gas
+   reservation and consume the transaction nonce.
 5. Add `gas_used * gas_price` to the authenticated cumulative burned counter.
-   Fees are destroyed; total supply is initial allocation sum minus burned fees.
+   Fees and rent are destroyed; total supply is initial allocation sum minus
+   everything burned.
 
 All additions/subtractions of balances and supply are checked. A self-transfer
 checks spendable balance and leaves the value unchanged. A zero transfer does not
@@ -72,12 +78,15 @@ are 1 insufficient balance, 2 overflow, and 3 unsupported. The status field
 `unusedGasRefunds` fields distinguish the two.
 
 The volatile pool reserves the sum of maximum fees **plus gross non-self outgoing
-transfer values** for every pending transaction from a sender, including nonce
-gaps. It does not count uncommitted incoming transfers or prospective fee refunds
+transfer values plus quoted rent** for every pending transaction from a sender,
+including nonce gaps. The rent quote prices each entity operation alone on the
+head state; execution checks the real rent, and the producer evicts a
+transaction whose gas reservation an earlier transaction's rent consumed rather
+than build an invalid block. It does not count uncommitted incoming transfers or prospective fee refunds
 as funds. This conservative rule can reject a sequence that would eventually be
 affordable, but prevents accepted transactions from overcommitting a balance.
 Duplicate submissions do not reserve twice. Entries are removed only after an
-acknowledged commit. Full nodes independently perform the same execution and fee
+acknowledged commit or such an eviction. Full nodes independently perform the same execution and fee
 settlement; transaction admission or a producer signature cannot authorize an
 invalid debit. State, burn counters, nonces and receipts share the existing atomic
 publication/recovery boundary, including lost-ack recovery.

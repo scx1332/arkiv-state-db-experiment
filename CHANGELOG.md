@@ -2,34 +2,57 @@
 
 ## Unreleased
 
-### Live permanent entities and capped rent
+### Live permanent entities and rent outside gas
 
-**Breaking:** block format version 3 (the genesis gains `max_rent_lifetime`;
-digest domain `arkiv/genesis/v2`) and protocol version 3. Earlier genesis
-files and stores are refused.
+**Breaking:** block format version 4 (the genesis gains the rent clock,
+`block_period_ms` and `max_rent_lifetime_seconds`, under digest domain
+`arkiv/genesis/v3`; each transaction outcome gains `rent_wei`, under
+`arkiv/outcomes/v2`) and protocol version 4. Earlier genesis files and stores
+are refused; format and protocol 3 were never released.
 
 - Live creates and extensions accept `expiresAt = 2^64 − 1` (the SDK's
   `ExpirationTime.permanent()`). Such entities are never scheduled or swept;
   reads and `EntityCreated`/`ExpiryExtended` logs report `0xffffffffffffffff`.
   Status reports `permanentEntitiesSupported: true`, the `permanentEntities`
   rules, and no longer lists `permanent-entities` as unsupported.
-- Rent rule `glm-rent-v2`: rent is never charged past `height +
-  max_rent_lifetime`. Create, growth and extension charge through
-  `min(expiry, height + cap)`, recomputed from the current height, so every
-  lifetime of at least the cap, permanent included, costs the same, and
-  shorter ones cost as before. An extension pays only the growth of the
-  capped horizon. Permanence never costs less than one cap.
-- The cap is a genesis consensus value in blocks, advertised as
-  `capabilities.gas.maxRentLifetimeBlocks`. Profiles set
-  `max_rent_lifetime_seconds` (default 31,536,000: one year), converted at the
-  chain's block period; the preset is `arkiv-entity-v3/glm-v2@2`. A producer
-  without a bundle uses a year at its `--block-period-ms`.
+- Rent rule `glm-rent-v3`: rent is GLM, not gas. It is 20 gwei per storage unit
+  per day (the former rate at 2-second blocks), priced per second at the
+  genesis block period, so a year costs the same at every period. It is a
+  separate debit from the sender, burned like the fee, that counts against
+  neither the transaction nor the block gas limit: a full 128 KiB entity made
+  permanent executes in about 850,000 gas and pays about 0.97 GLM of rent in
+  one transaction.
+- Rent is never charged past `height + cap`. Create, growth and extension
+  charge through `min(expiry, height + cap)`, recomputed from the current
+  height, so every lifetime of at least the cap, permanent included, costs the
+  same, and shorter ones are priced exactly. An extension pays only the growth
+  of the capped horizon. Permanence never costs less than one cap per unit.
+- The cap is a genesis consensus value in seconds (default 31,536,000, one year;
+  at most 100 years), applied in blocks rounded up at the genesis block period
+  (which a signed genesis requires to equal its timestamp period). Status
+  advertises `rentRule`, `rentCharging`, `rentWeiPerStorageUnitDay`,
+  `rentBlockPeriodMs`, `maxRentLifetimeSeconds` and `maxRentLifetimeBlocks`.
+  Profiles set `max_rent_lifetime_seconds`; the preset is
+  `arkiv-entity-v3/glm-v2@3`. A producer without a bundle uses a year.
+- An operation whose rent the sender cannot pay after its gas reservation
+  fails with `ArkivFault::InsufficientRentBalance` (tag 17); its transaction
+  rolls back, gas charged, no rent. Admission adds each transaction's quoted
+  rent to its reservation and refuses a sender who cannot cover it with
+  `insufficient funds for gas * price + value + rent`. The producer evicts a
+  transaction whose gas reservation an earlier rent consumed instead of
+  building an invalid block. `eth_estimateGas` returns execution gas only.
+- Receipts add `rentFee` (wei); native request status adds `rentChargedWei`.
+- Only the owner makes an entity permanent: a permissionless-extension entity
+  takes anyone's finite extension, but another account's `u64::MAX` is
+  `NotOwner`. Extending a permanent entity to permanent is a no-op success; a
+  finite expiry is `ExpiryShortened`. `PermanentStorageUnsupported` (fault 14)
+  is no longer produced.
 - Entity expiries are no longer bounded by `max_lifetime` (no `TooFar`);
-  `max_lifetime` now bounds generic records only. Finite prefill rows pay the
-  capped rent.
-- Extending a permanent entity to permanent is a no-op success; a finite
-  expiry is `ExpiryShortened`. `PermanentStorageUnsupported` (fault 14) is no
-  longer produced.
+  `max_lifetime` now bounds generic records only. Finite prefill rows burn the
+  capped rent in wei; sponsored permanent rows are waived before any quote.
+- The signed transaction cap is 384 KiB (the native envelope stays at
+  256 KiB), so an Ethereum transaction, which carries its original bytes
+  beside the envelope, fits a full 128 KiB entity.
 
 ### User-defined columns
 

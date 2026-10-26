@@ -209,10 +209,14 @@ every entity that needs it. With N rows the first occupied height is
 dataset lifetime; an import exceeding the available slots fails. Heights are
 not seconds: the eventual genesis block cadence determines wall-clock lifetime.
 
-Rent is computed per complete stored row with the current logical occupancy
+Rent is estimated per complete stored row with the current logical occupancy
 formula and `ceil(units * expiry * 8 / 17280) * 1000000000` wei, rounded per row.
-The report states the sponsor allocation required for genesis rent. It does not
-debit a wallet. The node builder independently verifies this amount.
+The report states that estimate of the sponsor allocation required for genesis
+rent. It does not debit a wallet. The estimate is the retired per-block,
+uncapped `glm-rent-v1` formula: the node builder computes the authoritative burn
+under `glm-rent-v3` (per second at the chain's block period, capped at the
+genesis rent cap; see [genesis bundle](genesis-bundle-v1.md#state-rent-and-first-live-block)),
+which is lower whenever the cap binds or blocks are shorter than 2 s.
 
 ### Far-future expiry (`--expiry-policy far-future`)
 

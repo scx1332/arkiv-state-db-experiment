@@ -169,9 +169,11 @@ Replacement is disabled. Exact signed bytes are idempotent; changed content at
 an existing request ID or account nonce conflicts. These limits bound retained
 work, not total process RSS or Sybil-resistant admission.
 
-Complete signed transactions are at most 256 KiB, signed input lists 768 KiB,
-and retained signed bodies 1 MiB. Blocks have at most 16 transactions and 128
-operations. Payload fields retain the native 128 KiB limit. There are four
+Complete signed transactions are at most 384 KiB (their native envelopes
+256 KiB; an Ethereum transaction also carries its original bytes, so a full
+128 KiB entity fits), signed input lists 768 KiB, and retained signed bodies
+1 MiB. Blocks have at most 16 transactions and 128 operations. `bytes` values
+retain the native 128 KiB per-entity limit. There are four
 concurrent bounded request/verification slots, including blocking jobs after
 HTTP cancellation, and five-second request-body/fetch deadlines. Feed and
 response caps remain 4 MiB and 8 MiB. Resource-limit proof failures remain

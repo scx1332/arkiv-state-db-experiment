@@ -7,19 +7,21 @@ the machine fields and runtime behavior of the bounded implementation.
 ## Versions and identity
 
 `arkiv-launch-prefill-v1` is a signed genesis (version 1) whose optional
-`PrefillLaunch` is present. It uses the one native block format (version 3),
-protocol version 3 (user-defined columns with live permanent entities and
-capped rent), state layout 2 and codec 1, and the `glm-v2` gas profile with
-rent rule `glm-rent-v2`. A chain without a prefill uses the same signed genesis
-layout with the prefill absent and creates its entity namespace in block 1
-instead. Prefills require a new chain/run directory. The builtin
-`arkiv-entity-v3/glm-v2@2` expands immutable constants (entity rules
-`arkiv-entity-v3`, 39 cells per record, a one-year rent cap); no dynamic base
-fees are enabled.
+`PrefillLaunch` is present. It uses the one native block format (version 4),
+protocol version 4 (user-defined columns with live permanent entities and
+capped rent per second, charged outside gas), state layout 2 and codec 1, and
+the `glm-v2` gas profile with rent rule `glm-rent-v3`. A chain without a
+prefill uses the same signed genesis layout with the prefill absent and creates
+its entity namespace in block 1 instead. Prefills require a new chain/run
+directory. The builtin `arkiv-entity-v3/glm-v2@3` expands immutable constants
+(entity rules `arkiv-entity-v3`, 39 cells per record, a one-year rent cap, a
+384 KiB signed transaction cap); no dynamic base fees are enabled.
 
 The rent cap is set in the profile's `[chain_params]` in seconds and stored in
-the genesis in blocks (`ChainParams::max_rent_lifetime`), rounded up at the
-chain's `block_period_ms`:
+the genesis in seconds (`ChainParams::max_rent_lifetime_seconds`), beside the
+chain's `block_period_ms` (`ChainParams::block_period_ms`, which must equal the
+signed genesis block period). Every node derives the cap in blocks, rounded up,
+from the two:
 
 ```toml
 [chain_params]
@@ -27,9 +29,9 @@ max_rent_lifetime_seconds = "31536000" # 365 days: 15,768,000 blocks at 2 s
 ```
 
 The preset uses this year. A custom profile (`profile = { path = ... }`) may
-set any positive number of seconds; zero, a missing value, or the retired
-`rent_rule = "glm-rent-v1"` is refused. `genesis verify` recomputes the blocks
-from the recorded block period. A producer started without a bundle
+set 1 to 3,153,600,000 seconds (100 years); zero, more, a missing value, or the
+retired `rent_rule = "glm-rent-v1"` or `"glm-rent-v2"` is refused. `genesis
+verify` rebuilds both values. A producer started without a bundle
 (`--allocations-file`) uses a year at its `--block-period-ms`.
 
 Integers are checked fixed-width big-endian. Strings and bytes have u32 byte
@@ -136,16 +138,18 @@ and the next record is `row_count + 1`.
 
 A finite expiry is any height from 1 (`max_lifetime` no longer bounds
 entities), with at most 16 deletions reserved at one height. For each complete
-generated row, with `cap` the genesis rent cap:
+generated row, with `cap_blocks` the genesis rent cap in blocks and
+`block_period_ms` the genesis block period:
 
 ```text
-rent_gas = ceil(storage_units * min(expiry_height, cap) * 8 / 17280)
-burn_wei = sum(each row's rent_gas * 1000000000)
+rent_wei = ceil(storage_units * min(expiry_height, cap_blocks)
+                * block_period_ms * 20000000000 / 86400000)
+burn_wei = sum(each row's rent_wei)
 ```
 
 A row at or beyond the cap pays the cap, as a live create does. A permanent
 `u64::MAX` row is admitted only by a permanent-prefill launch (versions 3 and
-4) and is sponsored without rent.
+4) and is sponsored without rent; the waiver is decided before any quote.
 
 Rounding is per row. The explicit sponsor pays from its immutable allocation;
 no genesis intrinsic/write fees, transfers, credits or signed transactions are

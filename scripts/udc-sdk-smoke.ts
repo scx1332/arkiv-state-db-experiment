@@ -31,6 +31,13 @@ const Posts = defineSchema("posts", {
   mimeType: str().default("text/markdown"),
 })
 
+// The SDK network-health probe: a named schema with an optional empty body.
+const Probe = defineSchema("probe", {
+  purpose: str().indexed(),
+  body: bytes().optional(),
+})
+const PERMANENT = 2n ** 64n - 1n
+
 const rpc = (q: string, opts: Record<string, unknown>) =>
   read.request({ method: "arkiv_query", params: [q, opts] } as any) as Promise<any>
 const step = (name: string) => console.log("ok:", name)
@@ -39,7 +46,10 @@ const stage = process.argv[2] ?? "exercise"
 
 if (stage !== "exercise") {
   // After a three-role restart (reopen) and through the replicated full node (follower).
-  const { entityKey, bigKey } = JSON.parse(readFileSync(report, "utf8"))
+  const { entityKey, bigKey, permanentKey, extendedKey } = JSON.parse(readFileSync(report, "utf8"))
+  for (const key of [permanentKey, extendedKey]) {
+    assert.equal((await read.getEntity(key)).$expiresAt, PERMANENT)
+  }
   const row = await read.getEntity(entityKey, Posts)
   assert.equal(row.title.value, "Patched")
   assert.equal(row.score.value, "4.9")
@@ -162,5 +172,48 @@ const untyped = await read.getEntity(entityKey)
 assert.equal((untyped.$attributes as any)["arkiv.schema"]?.value, "posts")
 step("untyped getEntity returns every attribute")
 
-writeFileSync(report, JSON.stringify({ entityKey, bigKey: big.entityKey }))
+// Permanence: ExpirationTime.permanent() is expiresAt = 2^64 - 1, as in the
+// SDK's network-health test. The node charges it the capped rent.
+const permanent = await write.createEntity(
+  Probe,
+  { purpose: "permanent_test", body: new Uint8Array() },
+  { expiration: ExpirationTime.permanent() },
+)
+assert.equal(permanent.expiresAt, PERMANENT)
+assert.equal((await read.getEntity(permanent.entityKey)).$expiresAt, PERMANENT)
+step("permanent create: receipt and getEntity report expiresAt 2^64 - 1")
+
+const again = await write.extendEntity({
+  entityKey: permanent.entityKey,
+  expiration: ExpirationTime.permanent(),
+})
+assert.equal(again.expiresAt, PERMANENT)
+await assert.rejects(
+  write.extendEntity({ entityKey: permanent.entityKey, expiration: ExpirationTime.fromBlocks(10) }),
+)
+step("extending a permanent entity to permanent succeeds; a finite expiry is refused")
+
+const finite = await write.createEntity(Probe, { purpose: "extend_to_permanent" }, { expiration })
+const extended = await write.extendEntity({
+  entityKey: finite.entityKey,
+  expiration: ExpirationTime.permanent(),
+})
+assert.equal(extended.expiresAt, PERMANENT)
+assert.equal((await read.getEntity(finite.entityKey)).$expiresAt, PERMANENT)
+step("a finite entity extends to permanent")
+
+const status = (await (await fetch(`${url}/signed/v1/status`)).json()) as any
+assert.equal(status.capabilities.gas.permanentEntitiesSupported, true)
+assert.ok(BigInt(status.capabilities.gas.maxRentLifetimeBlocks) > 0n)
+step(`status: permanent entities supported, rent capped at ${status.capabilities.gas.maxRentLifetimeBlocks} blocks`)
+
+writeFileSync(
+  report,
+  JSON.stringify({
+    entityKey,
+    bigKey: big.entityKey,
+    permanentKey: permanent.entityKey,
+    extendedKey: finite.entityKey,
+  }),
+)
 console.log("UDC SMOKE PASSED")

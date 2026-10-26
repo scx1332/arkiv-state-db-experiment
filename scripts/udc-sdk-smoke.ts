@@ -36,7 +36,11 @@ const Probe = defineSchema("probe", {
   purpose: str().indexed(),
   body: bytes().optional(),
 })
+// One bytes column at the 128 KiB per-entity cap.
+const Blob = defineSchema("blob", { body: bytes() })
+const maxBody = new Uint8Array(128 * 1024).map((_, i) => (i * 7) % 256)
 const PERMANENT = 2n ** 64n - 1n
+const GLM = 10n ** 18n
 
 const rpc = (q: string, opts: Record<string, unknown>) =>
   read.request({ method: "arkiv_query", params: [q, opts] } as any) as Promise<any>
@@ -46,10 +50,13 @@ const stage = process.argv[2] ?? "exercise"
 
 if (stage !== "exercise") {
   // After a three-role restart (reopen) and through the replicated full node (follower).
-  const { entityKey, bigKey, permanentKey, extendedKey } = JSON.parse(readFileSync(report, "utf8"))
-  for (const key of [permanentKey, extendedKey]) {
+  const { entityKey, bigKey, permanentKey, extendedKey, maxKey } = JSON.parse(
+    readFileSync(report, "utf8"),
+  )
+  for (const key of [permanentKey, extendedKey, maxKey]) {
     assert.equal((await read.getEntity(key)).$expiresAt, PERMANENT)
   }
+  assert.equal((await read.getEntity(maxKey, Blob)).body.value, bytesToHex(maxBody))
   const row = await read.getEntity(entityKey, Posts)
   assert.equal(row.title.value, "Patched")
   assert.equal(row.score.value, "4.9")
@@ -173,7 +180,7 @@ assert.equal((untyped.$attributes as any)["arkiv.schema"]?.value, "posts")
 step("untyped getEntity returns every attribute")
 
 // Permanence: ExpirationTime.permanent() is expiresAt = 2^64 - 1, as in the
-// SDK's network-health test. The node charges it the capped rent.
+// SDK's network-health test. The node charges it the capped rent, in GLM.
 const permanent = await write.createEntity(
   Probe,
   { purpose: "permanent_test", body: new Uint8Array() },
@@ -202,10 +209,100 @@ assert.equal(extended.expiresAt, PERMANENT)
 assert.equal((await read.getEntity(finite.entityKey)).$expiresAt, PERMANENT)
 step("a finite entity extends to permanent")
 
+// Rent is GLM outside the gas budget: a 128 KiB permanent create is one SDK
+// call whose gas is execution only; the receipt's rentFee is the year of rent.
+const call = (method: string, params: unknown[]) =>
+  read.request({ method, params } as any) as Promise<any>
+const balanceOf = async (who: string) => BigInt(await call("eth_getBalance", [who, "latest"]))
+const nonceOf = async (who: string) => BigInt(await call("eth_getTransactionCount", [who, "latest"]))
+const aliceBefore = await balanceOf(alice.address)
+const max = await write.createEntity(Blob, { body: maxBody }, { expiration: ExpirationTime.permanent() })
+assert.equal(max.expiresAt, PERMANENT)
+const maxReceipt = (await read.getTransactionReceipt({ hash: max.txHash })) as any
+const rentFee = BigInt(maxReceipt.rentFee)
+assert.ok(rentFee > (9n * GLM) / 10n && rentFee < GLM, `rent ${rentFee}`)
+// A year of whole storage units at 20 gwei a day.
+assert.equal(rentFee % 7_300_000_000_000n, 0n)
+assert.ok(maxReceipt.gasUsed < 1_000_000n, `gas ${maxReceipt.gasUsed}`)
+assert.equal(
+  aliceBefore - (await balanceOf(alice.address)),
+  maxReceipt.gasUsed * maxReceipt.effectiveGasPrice + rentFee,
+)
+assert.equal((await read.getEntity(max.entityKey, Blob)).body.value, bytesToHex(maxBody))
+step(
+  `128 KiB permanent create in one call: ${maxReceipt.gasUsed} gas, rentFee ${rentFee} wei, both debited`,
+)
+
+// A sender holding the gas but not the rent is refused at admission, cleanly:
+// no transaction, no nonce, no fee.
+const describe = (e: any): string =>
+  e ? [e.message, e.details, e.shortMessage, describe(e.cause)].filter(Boolean).join(" | ") : ""
+const carol = privateKeyToAccount(`0x${"0c".repeat(32)}`)
+const fund = async (value: bigint) =>
+  read.waitForTransactionReceipt({
+    hash: await (write as any).sendTransaction({ to: carol.address, value }),
+  })
+await fund(GLM / 100n)
+const carolWrite = createWalletClient({ chain, transport, account: carol, pollingInterval: 100 })
+let refusal = ""
+await assert.rejects(
+  carolWrite.createEntity(Blob, { body: maxBody }, { expiration: ExpirationTime.permanent() }),
+  (e: any) => {
+    refusal = describe(e)
+    return /insufficient funds for gas \* price \+ value \+ rent/.test(refusal) || assert.fail(refusal)
+  },
+)
+assert.equal(await nonceOf(carol.address), 0n)
+assert.equal(await balanceOf(carol.address), GLM / 100n)
+const [summary] = refusal.split(" | ")
+const cause = refusal.split(" | ").find((part) => part.includes("+ rent"))
+step(`a sender with gas but not rent is refused at admission, no nonce or fee: ${summary} (${cause})`)
+await fund(GLM)
+const carols = await carolWrite.createEntity(
+  Blob,
+  { body: maxBody },
+  { expiration: ExpirationTime.permanent() },
+)
+assert.equal(carols.expiresAt, PERMANENT)
+assert.equal(await nonceOf(carol.address), 1n)
+step("topped up with gas plus rent, the same call commits")
+
+// Only the owner makes an entity permanent: a permissionless-extension entity
+// takes anyone's finite extension, never another account's permanence.
+const open = await write.createEntity(
+  Probe,
+  { purpose: "permissionless" },
+  { expiration, flags: { permissionlessExtension: true } },
+)
+const farther = await carolWrite.extendEntity({
+  entityKey: open.entityKey,
+  expiration: ExpirationTime.fromBlocks(20_000),
+})
+assert.ok(farther.expiresAt > open.expiresAt)
+await assert.rejects(
+  carolWrite.extendEntity({ entityKey: open.entityKey, expiration: ExpirationTime.permanent() }),
+  (e: any) => /owned by|NotOwner/i.test(describe(e)) || assert.fail(describe(e)),
+)
+assert.equal((await read.getEntity(open.entityKey)).$expiresAt, farther.expiresAt)
+const owned = await write.extendEntity({
+  entityKey: open.entityKey,
+  expiration: ExpirationTime.permanent(),
+})
+assert.equal(owned.expiresAt, PERMANENT)
+step("anyone extends a permissionless entity finitely; only its owner makes it permanent")
+
 const status = (await (await fetch(`${url}/signed/v1/status`)).json()) as any
-assert.equal(status.capabilities.gas.permanentEntitiesSupported, true)
-assert.ok(BigInt(status.capabilities.gas.maxRentLifetimeBlocks) > 0n)
-step(`status: permanent entities supported, rent capped at ${status.capabilities.gas.maxRentLifetimeBlocks} blocks`)
+const gas = status.capabilities.gas
+assert.equal(gas.permanentEntitiesSupported, true)
+assert.equal(gas.rentRule, "glm-rent-v3")
+assert.equal(gas.rentCharging, "sender-balance-outside-gas")
+assert.equal(gas.rentReceiptField, "rentFee")
+// A year in seconds; 63,072,000 blocks at this chain's 500 ms.
+assert.equal(gas.maxRentLifetimeSeconds, "31536000")
+assert.equal(gas.maxRentLifetimeBlocks, "63072000")
+step(
+  `status: rent ${gas.rentWeiPerStorageUnitDay} wei/unit/day outside gas, capped at ${gas.maxRentLifetimeSeconds} s`,
+)
 
 writeFileSync(
   report,
@@ -214,6 +311,7 @@ writeFileSync(
     bigKey: big.entityKey,
     permanentKey: permanent.entityKey,
     extendedKey: finite.entityKey,
+    maxKey: max.entityKey,
   }),
 )
 console.log("UDC SMOKE PASSED")

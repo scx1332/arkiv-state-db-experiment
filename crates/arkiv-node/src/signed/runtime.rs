@@ -35,7 +35,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex, MutexGuard, TryLockError,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU8, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -76,15 +76,24 @@ impl Node {
 }
 pub struct Runtime {
     /// The node lock. Writers that keep the chain moving take it with
-    /// [`Self::write_node`] and reads that must not fail on a momentary
-    /// holder with [`Self::read_node`]; JSON-RPC requests queue for it behind
-    /// waiting writers, and transaction admission and control try it once
+    /// [`Self::write_node`], reads that must not fail on a momentary holder
+    /// with [`Self::read_node`] and JSON-RPC requests with
+    /// [`Self::rpc_node`]; transaction admission and control try it once
     /// and answer `ServerBusy`.
     pub node: Mutex<Node>,
     /// Writers waiting in [`Self::write_node`]; reads yield to them.
     writers: AtomicUsize,
-    /// Reads waiting in [`Self::read_node`].
+    /// Reads polling the node lock (at most one: see `read_turn`).
     waiting_reads: AtomicUsize,
+    /// JSON-RPC requests polling the node lock (at most one).
+    waiting_rpc: AtomicUsize,
+    /// Whose turn the node lock is when a read and a JSON-RPC request both
+    /// poll it: [`ANY`], [`READ`] or [`RPC`]. They alternate.
+    next: AtomicU8,
+    /// Queues reads for their turn to poll the node lock.
+    read_turn: Mutex<()>,
+    /// Queues JSON-RPC requests for their turn to poll the node lock.
+    rpc_turn: Mutex<()>,
     pub peer: Option<String>,
     pub replication_peer: Option<String>,
     token: Option<String>,
@@ -129,6 +138,10 @@ impl Runtime {
             node: Mutex::new(node),
             writers: AtomicUsize::new(0),
             waiting_reads: AtomicUsize::new(0),
+            waiting_rpc: AtomicUsize::new(0),
+            next: AtomicU8::new(ANY),
+            read_turn: Mutex::new(()),
+            rpc_turn: Mutex::new(()),
             peer,
             replication_peer,
             token,
@@ -146,9 +159,13 @@ impl Runtime {
     pub fn reads_in_flight(&self) -> usize {
         self.reads.in_flight()
     }
-    /// Reads waiting out a held node lock in [`Self::read_node`].
+    /// Reads polling the node lock in [`Self::read_node`].
     pub fn reads_waiting(&self) -> usize {
         self.waiting_reads.load(Ordering::SeqCst)
+    }
+    /// JSON-RPC requests polling the node lock in [`Self::rpc_node`].
+    pub fn requests_waiting(&self) -> usize {
+        self.waiting_rpc.load(Ordering::SeqCst)
     }
     /// Writers waiting for the node lock in [`Self::write_node`].
     pub fn writers_waiting(&self) -> usize {
@@ -156,52 +173,100 @@ impl Runtime {
     }
     /// Takes the node lock for a writer that keeps the chain moving (block
     /// production, follower sync), waiting for the current holder; call it
-    /// from a blocking thread only. Reads in [`Self::read_node`] and
-    /// JSON-RPC requests yield while a writer waits, so a read load delays
-    /// a writer by at most the requests already holding or queued for the
-    /// lock.
+    /// from a blocking thread only. Writers are the only callers that queue
+    /// on the mutex: reads and JSON-RPC requests poll it and yield while a
+    /// writer waits, so a read load delays a writer by at most the request
+    /// holding the lock.
     pub fn write_node(&self) -> Result<MutexGuard<'_, Node>> {
         let _writer = Count::new(&self.writers);
         self.node.lock().map_err(|_| Error("StorageUnavailable"))
     }
     /// Takes the node lock for a read that must not fail just because the
-    /// lock is held at that moment (a detached read's capture, a REST read,
-    /// a light node's verified read); call it from a blocking thread only.
-    /// It waits out a holder for at most [`READ_LOCK_WAIT`], then answers
-    /// `ServerBusy`. It polls instead of queueing on the mutex and does not
-    /// try while a writer waits, so reads never queue ahead of writers or of
-    /// requests that try the lock once.
+    /// lock is held at that moment (a detached read's capture, a REST
+    /// request, a light node's verified read); call it from a blocking
+    /// thread only. It waits out a holder for about [`READ_LOCK_WAIT`], then
+    /// answers `ServerBusy`. Reads take turns: one at a time polls the lock
+    /// ([`Self::poll_node`]) while the others wait for theirs.
     pub(super) fn read_node(&self) -> Result<MutexGuard<'_, Node>> {
         let deadline = Instant::now() + READ_LOCK_WAIT;
+        let _turn = self
+            .read_turn
+            .lock()
+            .map_err(|_| Error("StorageUnavailable"))?;
+        self.poll_node(Some(deadline), READ)
+    }
+    /// Takes the node lock for a JSON-RPC request, which waits for it
+    /// without a deadline; from a blocking thread only. Requests take turns
+    /// like reads, apart from them, so a flood of requests competes with
+    /// reads like one read; when both wait they alternate.
+    pub(super) fn rpc_node(&self) -> Result<MutexGuard<'_, Node>> {
+        let _turn = self
+            .rpc_turn
+            .lock()
+            .map_err(|_| Error("StorageUnavailable"))?;
+        self.poll_node(None, RPC)
+    }
+    /// Polls the node lock for the read or JSON-RPC request (`kind`) whose
+    /// turn it is, answering `ServerBusy` at `deadline` if any. It never
+    /// queues on the mutex and does not try while a writer waits, nor while
+    /// it is the other kind's turn and that one polls too. Between tries it
+    /// yields for [`YIELD_FOR`], then sleeps from [`FIRST_PAUSE`] up to
+    /// [`LONGEST_PAUSE`].
+    fn poll_node(&self, deadline: Option<Instant>, kind: u8) -> Result<MutexGuard<'_, Node>> {
+        let (mine, other) = if kind == READ {
+            (&self.waiting_reads, &self.waiting_rpc)
+        } else {
+            (&self.waiting_rpc, &self.waiting_reads)
+        };
         let mut waiting = None;
+        let (started, mut pause) = (Instant::now(), FIRST_PAUSE);
         loop {
-            if self.writers.load(Ordering::SeqCst) == 0 {
+            let next = self.next.load(Ordering::SeqCst);
+            let yields = next != ANY && next != kind && other.load(Ordering::SeqCst) > 0;
+            if self.writers.load(Ordering::SeqCst) == 0 && !yields {
                 match self.node.try_lock() {
-                    Ok(node) => return Ok(node),
+                    Ok(node) => {
+                        // Going ahead of the other kind passes it the turn.
+                        let after = match (other.load(Ordering::SeqCst), kind) {
+                            (0, _) => ANY,
+                            (_, READ) => RPC,
+                            _ => READ,
+                        };
+                        self.next.store(after, Ordering::SeqCst);
+                        return Ok(node);
+                    }
                     Err(TryLockError::Poisoned(_)) => return Err(Error("StorageUnavailable")),
                     Err(TryLockError::WouldBlock) => {}
                 }
             }
-            if Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Err(Error("ServerBusy"));
             }
-            waiting.get_or_insert_with(|| Count::new(&self.waiting_reads));
-            std::thread::sleep(LOCK_POLL);
-        }
-    }
-    /// Lets writers waiting in [`Self::write_node`] go first, before a
-    /// request that queues for the node lock; from a blocking thread only.
-    pub(super) fn yield_to_writers(&self) {
-        while self.writers.load(Ordering::SeqCst) > 0 {
-            std::thread::sleep(LOCK_POLL);
+            waiting.get_or_insert_with(|| Count::new(mine));
+            if started.elapsed() < YIELD_FOR {
+                std::thread::yield_now();
+            } else {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(LONGEST_PAUSE);
+            }
         }
     }
 }
-/// The longest a read in [`Runtime::read_node`] waits out a held node lock:
+/// Whose turn the node lock is ([`Runtime::poll_node`]): either kind's, a
+/// read's or a JSON-RPC request's.
+const ANY: u8 = 0;
+const READ: u8 = 1;
+const RPC: u8 = 2;
+/// How long a read in [`Runtime::read_node`] waits out a held node lock:
 /// far longer than producing or importing a block holds it.
 const READ_LOCK_WAIT: Duration = Duration::from_secs(1);
-/// How often a read in [`Runtime::read_node`] tries the node lock again.
-const LOCK_POLL: Duration = Duration::from_millis(1);
+/// How long a poller of the node lock yields before it starts sleeping:
+/// most holders release it within microseconds.
+const YIELD_FOR: Duration = Duration::from_micros(50);
+/// A poller's first sleep, doubled after each failed try.
+const FIRST_PAUSE: Duration = Duration::from_micros(20);
+/// A poller's longest sleep between tries.
+const LONGEST_PAUSE: Duration = Duration::from_micros(200);
 /// Counts its holder in an [`AtomicUsize`] while it lives.
 struct Count<'a>(&'a AtomicUsize);
 impl<'a> Count<'a> {
@@ -557,7 +622,7 @@ async fn prefill_chunk(State(rt): State<Shared>, Query(q): Query<PrefillChunkQue
         use std::io::{Read, Seek, SeekFrom};
         let _permit = permit;
         let (path, bytes) = {
-            let node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
+            let node = rt.read_node()?;
             let Node::Full(host) = &*node else {
                 return Err(Error("FullNodeRequired"));
             };
@@ -708,8 +773,8 @@ async fn http_post(State(rt): State<Shared>, Path(path): Path<String>, body: Bod
             if path=="transactions" {
                 let r:Submission=serde_json::from_slice(&bytes).map_err(|_|Error("InvalidRequest"))?;
                 let tx:SignedTx=unpack(&r.transaction_bytes,super::protocol::TX_CAP as usize)?;
-                let genesis=rt.node.try_lock().map_err(|_|Error("ServerBusy"))?.genesis().clone();tx.validate(&genesis)?;
-                let mut node=rt.node.try_lock().map_err(|_|Error("ServerBusy"))?;
+                let genesis=rt.read_node()?.genesis().clone();tx.validate(&genesis)?;
+                let mut node=rt.read_node()?;
                 let Node::Full(h)=&mut*node else{return Err(Error("ProducerOnly"));};return h.submit(tx);
             }
             if path=="query/resolve" {let r:VerifiedRequest=serde_json::from_slice(&bytes).map_err(|_|Error("InvalidRequest"))?;if r.cursor.is_some(){return Err(Error("CursorMismatch"));}let node=rt.read_node()?;let header=node.certificate(number(&r.height)?)?.header;return Ok(json!({"request":pack(&resolve(node.identity(),&header,&r)?)}));}
@@ -890,13 +955,7 @@ async fn private(
         };
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            // A full follower's body fetch waits like other reads; control
-            // tries the lock once.
-            let mut node = if path == "control" {
-                rt.node.try_lock().map_err(|_| Error("ServerBusy"))?
-            } else {
-                rt.read_node()?
-            };
+            let mut node = rt.read_node()?;
             let Node::Full(h) = &mut *node else {
                 return Err(Error("UnsupportedNodeRole"));
             };

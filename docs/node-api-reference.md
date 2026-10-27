@@ -78,7 +78,8 @@ they run against a snapshot pinned under the node lock, outside it. At most
 `--read-concurrency` of them run at once; another answers `429` with
 `{"error":"ServerBusy"}` (JSON-RPC: HTTP 429 for a single request, code
 `-32010`, message `ServerBusy`), as does one that finds the node lock held for
-a second while pinning its snapshot. One running past `--read-deadline-secs` answers
+about a second while pinning its snapshot (JSON-RPC detached reads used to
+wait for the lock up to their deadline). One running past `--read-deadline-secs` answers
 `503` with `{"error":"ReadDeadlineExceeded"}` (JSON-RPC: code `-32000`, message
 `ReadDeadlineExceeded`). Both are safe to retry; a deadline usually means the
 read itself is too large for the node's limit.

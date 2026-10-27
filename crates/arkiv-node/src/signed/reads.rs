@@ -10,11 +10,11 @@
 //!
 //! Once admitted, a read waits out a momentary holder of the lock (a block
 //! being produced or imported, headers being appended, another request) to
-//! capture, for at most a second (`Runtime::read_node`), instead of
-//! answering `ServerBusy` at once. It polls rather than queueing on the
-//! lock and does not try while block production or a follower's sync waits
-//! for it (`Runtime::write_node`), so reads never hold up those writers by
-//! more than the holder they find.
+//! capture, for about a second (`Runtime::read_node`), instead of answering
+//! `ServerBusy` at once. It polls rather than queueing on the lock, in turn
+//! with other reads, and does not try while block production or a
+//! follower's sync waits for it (`Runtime::write_node`), so reads never hold
+//! up those writers by more than the holder they find.
 //!
 //! The captured snapshot is a consistent view while blocks are produced:
 //! it fixes the state header (every map root) of a published height, and

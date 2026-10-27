@@ -594,8 +594,8 @@ async fn verified_reads_wait_out_a_held_node_lock() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn waiting_reads_yield_to_a_waiting_writer() {
-    let (producer, _public, light, local) = light_chain().await;
+async fn waiting_reads_and_requests_yield_to_a_waiting_writer() {
+    let (producer, public, light, local) = light_chain().await;
     let client = reqwest::Client::new();
     for (holder, rt) in [("light", &light), ("producer", &producer)] {
         let held = hold_node(rt);
@@ -618,6 +618,37 @@ async fn waiting_reads_yield_to_a_waiting_writer() {
         );
         assert_verified("query/text", read.await.unwrap());
     }
+    // A JSON-RPC request polls the lock too, and yields to a writer.
+    let held = hold_node(&producer);
+    let request = tokio::spawn({
+        let (client, url) = (client.clone(), public.url.clone());
+        async move {
+            let body = json!({"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]});
+            let response = client
+                .post(format!("{url}/"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            response.json::<Value>().await.unwrap()
+        }
+    });
+    until("the request", || producer.requests_waiting() == 1).await;
+    let writer = tokio::task::spawn_blocking({
+        let rt = producer.clone();
+        move || {
+            let _node = rt.write_node().unwrap();
+            rt.requests_waiting()
+        }
+    });
+    until("the writer", || producer.writers_waiting() == 1).await;
+    drop(held);
+    assert_eq!(
+        writer.await.unwrap(),
+        1,
+        "the writer went ahead of the request"
+    );
+    assert_eq!(request.await.unwrap()["result"], "0x2");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

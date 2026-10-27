@@ -114,9 +114,10 @@ An Ethereum consensus client cannot validate these blocks as Ethereum blocks.
 HTTP requests are limited to 1 MiB with a five-second body timeout. JSON-RPC
 calls over HTTP and WebSocket do not use the native REST API's four admission
 slots, and HTTP has no fixed concurrent-request gate. Blocking engine work runs
-on Tokio's blocking pool and waits for the node mutex, behind block production
-or a follower's sync when either is waiting; concurrent requests do not imply
-parallel state execution. Excess demand can increase queueing latency
+on Tokio's blocking pool and waits for the node mutex without a limit: requests
+poll it one at a time, behind block production or a follower's sync when
+either is waiting, alternating with native reads; concurrent requests do not
+imply parallel state execution. Excess demand can increase queueing latency
 and memory use rather than receiving an immediate `ServerBusy` response.
 Native REST admission and WebSocket connection limits remain separate.
 
@@ -126,9 +127,10 @@ then evaluate on that snapshot after releasing it, so a long count or scan no
 longer delays other requests or block production. At most
 `--read-concurrency` (default 4) detached reads run at once; another is refused
 immediately with code `-32010`, message `ServerBusy`, and a single HTTP request
-also gets status 429 (a batch keeps per-entry errors). A detached read polls
-the node mutex to pin its snapshot rather than queueing for it, and answers
-the same way if the mutex stays held for a second. A detached read running
+also gets status 429 (a batch keeps per-entry errors). A detached read waits
+for the node mutex to pin its snapshot for about a second, like a native read,
+and then answers the same way; it used to wait up to `--read-deadline-secs`.
+A detached read running
 longer than `--read-deadline-secs` (default 30) answers code `-32000`, message
 `ReadDeadlineExceeded`; one whose HTTP client disconnects is abandoned. Either
 way its walk stops at the next metering charge. Results, budgets and cursors

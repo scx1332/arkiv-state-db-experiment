@@ -194,23 +194,26 @@ transaction admission and block production therefore no longer wait for a
 long count. Those other requests, and every write, remain serialized under the
 node lock as before.
 
-Block production and follower sync are the node lock's writers: they wait for
-it. Reads that should not fail just because the lock is held at that moment
-(a block being produced, imported or appended, another request) wait out the
-holder for at most a second, and answer `ServerBusy` only if it stays held:
-detached reads to pin their snapshot, REST `GET` reads (status, headers,
-feed, accounts) and a full follower's body fetch, and a light node's verified
-reads (`query/verified`, `query/inspect`, `query/text`, `query/range/*`,
-`query/account`, `query/resolve`). Those poll the lock instead of queueing on
-it and do not try while a writer waits, and JSON-RPC requests, which queue,
-let waiting writers go first, so no read load holds up production or sync by
-more than the requests already holding or queued for the lock. A light node
-verifies the proof outside its lock and only then confirms, under it, that
-it still accepts the header. Transaction admission and control still try the
-lock once and answer `ServerBusy` when it is held. A full node keeps the
-certificates it has authenticated for up to 256 of the highest heights read,
-so header reads and snapshot pins do not repeat signature recovery under the
-lock.
+Block production and follower sync are the node lock's writers, and the only
+callers that queue on it. Every other caller polls it, does not try while a
+writer waits, and takes turns: reads one at a time, JSON-RPC requests one at a
+time, and a read and a request that both wait alternate. A read that should
+not fail just because the lock is held at that moment (a block being
+produced, imported or appended, another request) waits out the holder for
+about a second and answers `ServerBusy` only if it stays held: every REST
+request (status, headers, feed, accounts, transaction admission, control, a
+full follower's body fetch, prefill chunks), detached reads pinning their
+snapshot, and a light node's verified reads (`query/verified`,
+`query/inspect`, `query/text`, `query/range/*`, `query/account`,
+`query/resolve`). A JSON-RPC request waits without a limit. No read load
+therefore holds up production or sync by more than the request holding the
+lock, as long as their tasks can start: both run on Tokio's blocking pool (at
+most 512 threads), where each waiting JSON-RPC request occupies a thread, so
+more than about 500 concurrent JSON-RPC requests delay them. A light node
+verifies the proof outside its lock and only then confirms, under it, that it
+still accepts the header. A full node keeps the certificates it has
+authenticated for up to 256 of the highest heights read, so header reads and
+snapshot pins do not repeat signature recovery under the lock.
 
 `arkiv_query` and `arkiv_getEntityCount` evaluate with planned read budgets
 (`arkiv_db::Budget::planned`, see the [query plan](snapshot-query-plan.md)):

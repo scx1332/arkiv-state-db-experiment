@@ -1233,10 +1233,12 @@ async fn single(rt: &Shared, request: Value) -> Value {
 /// A response computed under the node lock, or `None` to forward the request.
 async fn locked(rt: &Shared, method: String, params: Value, id: Value) -> Result<Option<Value>> {
     // RPC bursts wait for the node mutex in the blocking pool instead of
-    // competing for the native REST API's four admission permits.
+    // competing for the native REST API's four admission permits, behind
+    // waiting writers (block production, follower sync).
     let runtime = rt.clone();
     let response_id = id;
     let job = tokio::task::spawn_blocking(move || {
+        runtime.yield_to_writers();
         let mut node = runtime
             .node
             .lock()
@@ -1286,10 +1288,7 @@ async fn detached(rt: &Shared, method: String, params: Value, id: Value) -> Resu
     admitted
         .run(&label, move || {
             let planned = {
-                let node = runtime
-                    .node
-                    .lock()
-                    .map_err(|_| Error("StorageUnavailable"))?;
+                let node = runtime.read_node()?;
                 let Node::Full(h) = &*node else {
                     return Ok(None);
                 };

@@ -25,7 +25,7 @@ use arkiv_db::{
 };
 use arkiv_db_storage::versioned::VersionedStore;
 use serde_json::{Value as Json, json};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 
 /// Bounded metadata retained atomically alongside state. No operations or calldata.
 #[derive(Clone, Debug)]
@@ -143,7 +143,15 @@ pub struct Host {
     /// Blocks this host has executed for production or import (simulations
     /// excluded): production executes each candidate once.
     pub block_executions: u64,
+    /// Certificates [`Self::certificate`] authenticated, for up to
+    /// [`CERTIFICATE_CACHE`] of the highest heights read. Header reads and
+    /// proof captures run under the node lock, where re-authenticating a
+    /// stored record (signature recovery, genesis validation) would hold it
+    /// for milliseconds; a stored certificate never changes.
+    certificates: RefCell<BTreeMap<u64, SignedHeader>>,
 }
+/// Heights whose certificates a [`Host`] keeps authenticated.
+const CERTIFICATE_CACHE: usize = 256;
 impl Host {
     #[allow(clippy::too_many_arguments)]
     pub fn create(
@@ -257,6 +265,7 @@ impl Host {
             pending: None,
             refusal: Default::default(),
             block_executions: 0,
+            certificates: Default::default(),
         })
     }
     /// Install a verified, privately staged genesis without materializing its trie.
@@ -342,6 +351,7 @@ impl Host {
             pending: None,
             refusal: Default::default(),
             block_executions: 0,
+            certificates: Default::default(),
         })
     }
     /// Relabel a verified, privately staged genesis store in place as this
@@ -515,6 +525,7 @@ impl Host {
             pending: None,
             refusal: Default::default(),
             block_executions: 0,
+            certificates: Default::default(),
         };
         host.block(host.head.height)?;
         if host.signer.is_none() {
@@ -552,7 +563,18 @@ impl Host {
         Ok(record)
     }
     pub fn certificate(&self, height: u64) -> Result<SignedHeader> {
-        Ok(self.record(height)?.certificate)
+        if height <= self.head.height
+            && let Some(certificate) = self.certificates.borrow().get(&height)
+        {
+            return Ok(certificate.clone());
+        }
+        let certificate = self.record(height)?.certificate;
+        let mut cache = self.certificates.borrow_mut();
+        cache.insert(height, certificate.clone());
+        if cache.len() > CERTIFICATE_CACHE {
+            cache.pop_first();
+        }
+        Ok(certificate)
     }
     pub fn feed(&self, height: u64) -> Result<FeedBlock> {
         Ok(self.record(height)?.feed)

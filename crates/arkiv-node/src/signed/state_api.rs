@@ -71,7 +71,7 @@ pub(super) async fn handle(
     drop(admission);
     admitted.run("state/explore", move||{
         let (certificate,s,identity)={
-            let node=rt.node.try_lock().map_err(|_|Error("ServerBusy"))?;
+            let node=rt.read_node()?;
             let Node::Full(host)=&*node else{return Err(Error("UnsupportedNodeRole"))};
             (host.certificate(height)?,host.state(height)?,host.identity.clone())
         };

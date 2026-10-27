@@ -380,34 +380,7 @@ impl Light {
         bytes: &[u8],
     ) -> Result<VerifiedEq> {
         let h = self.header(request.snapshot.height)?.header;
-        if request.snapshot.genesis_hash != self.genesis.hash()
-            || request.snapshot.block_hash != h.hash()
-            || request.snapshot.state_root != h.state_root
-        {
-            return Err(Error("InvalidRequest"));
-        }
-        let verified = verify_eq(
-            request,
-            previous,
-            bytes,
-            crate::simulator::wire::proof_limits(),
-            self.genesis.genesis.limits,
-        )?;
-        if request.query.namespace.ordinal() == 1
-            && let VerifiedEq::Page(page) = &verified
-        {
-            for row in &page.rows {
-                crate::arkiv::validate_proven_row(row).map_err(|_| Error("InvalidProof"))?;
-                let entity = crate::arkiv::project(row).map_err(|_| Error("InvalidProof"))?;
-                if entity.created_at > h.height
-                    || entity.updated_at > h.height
-                    || (entity.expires_at != u64::MAX && entity.expires_at <= h.height)
-                {
-                    return Err(Error("InvalidProof"));
-                }
-            }
-        }
-        Ok(verified)
+        verify_eq_at(&self.genesis, &h, request, previous, bytes)
     }
 
     /// Complete range evidence anchored in an accepted producer certificate.
@@ -417,34 +390,84 @@ impl Light {
         bytes: &[u8],
     ) -> Result<arkiv_db::proof::VerifiedRange> {
         let h = self.header(request.snapshot.height)?.header;
-        if request.snapshot.genesis_hash != self.genesis.hash()
-            || request.snapshot.block_hash != h.hash()
-            || request.snapshot.state_root != h.state_root
-        {
-            return Err(Error("InvalidRequest"));
-        }
-        let verified = arkiv_db::proof::verify_range(
-            request,
-            bytes,
-            crate::simulator::wire::range_proof_limits()?,
-            self.genesis.genesis.limits,
-        )?;
-        if request.query.namespace.ordinal() == 1
-            && let arkiv_db::proof::VerifiedRange::Complete(result) = &verified
-        {
-            for row in &result.rows {
-                crate::arkiv::validate_proven_row(row).map_err(|_| Error("InvalidProof"))?;
-                let entity = crate::arkiv::project(row).map_err(|_| Error("InvalidProof"))?;
-                if entity.created_at > h.height
-                    || entity.updated_at > h.height
-                    || (entity.expires_at != u64::MAX && entity.expires_at <= h.height)
-                {
-                    return Err(Error("InvalidProof"));
-                }
+        verify_range_at(&self.genesis, &h, request, bytes)
+    }
+}
+
+/// [`Light::verify`] against `h`, the header of a certificate the catalog
+/// accepted, read before: the node verifies after releasing its lock and
+/// then confirms the catalog still holds `h`.
+pub fn verify_eq_at(
+    genesis: &SignedGenesis,
+    h: &crate::Header,
+    request: &EqRequest,
+    previous: Option<&VerifiedContinuation>,
+    bytes: &[u8],
+) -> Result<VerifiedEq> {
+    if request.snapshot.genesis_hash != genesis.hash()
+        || request.snapshot.block_hash != h.hash()
+        || request.snapshot.state_root != h.state_root
+    {
+        return Err(Error("InvalidRequest"));
+    }
+    let verified = verify_eq(
+        request,
+        previous,
+        bytes,
+        crate::simulator::wire::proof_limits(),
+        genesis.genesis.limits,
+    )?;
+    if request.query.namespace.ordinal() == 1
+        && let VerifiedEq::Page(page) = &verified
+    {
+        for row in &page.rows {
+            crate::arkiv::validate_proven_row(row).map_err(|_| Error("InvalidProof"))?;
+            let entity = crate::arkiv::project(row).map_err(|_| Error("InvalidProof"))?;
+            if entity.created_at > h.height
+                || entity.updated_at > h.height
+                || (entity.expires_at != u64::MAX && entity.expires_at <= h.height)
+            {
+                return Err(Error("InvalidProof"));
             }
         }
-        Ok(verified)
     }
+    Ok(verified)
+}
+
+/// [`Light::verify_range`] against `h`, as [`verify_eq_at`].
+pub fn verify_range_at(
+    genesis: &SignedGenesis,
+    h: &crate::Header,
+    request: &arkiv_db::proof::RangeRequest,
+    bytes: &[u8],
+) -> Result<arkiv_db::proof::VerifiedRange> {
+    if request.snapshot.genesis_hash != genesis.hash()
+        || request.snapshot.block_hash != h.hash()
+        || request.snapshot.state_root != h.state_root
+    {
+        return Err(Error("InvalidRequest"));
+    }
+    let verified = arkiv_db::proof::verify_range(
+        request,
+        bytes,
+        crate::simulator::wire::range_proof_limits()?,
+        genesis.genesis.limits,
+    )?;
+    if request.query.namespace.ordinal() == 1
+        && let arkiv_db::proof::VerifiedRange::Complete(result) = &verified
+    {
+        for row in &result.rows {
+            crate::arkiv::validate_proven_row(row).map_err(|_| Error("InvalidProof"))?;
+            let entity = crate::arkiv::project(row).map_err(|_| Error("InvalidProof"))?;
+            if entity.created_at > h.height
+                || entity.updated_at > h.height
+                || (entity.expires_at != u64::MAX && entity.expires_at <= h.height)
+            {
+                return Err(Error("InvalidProof"));
+            }
+        }
+    }
+    Ok(verified)
 }
 fn catalog_head(genesis: B256, sequence: u64, header: &crate::Header, observed: u64) -> Head {
     let mut bytes = genesis.to_vec();

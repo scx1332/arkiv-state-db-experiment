@@ -33,8 +33,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
-    time::Duration,
+    sync::{
+        Arc, Mutex, MutexGuard, TryLockError,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
 };
 use tokio::sync::Semaphore;
 
@@ -72,7 +75,16 @@ impl Node {
     }
 }
 pub struct Runtime {
+    /// The node lock. Writers that keep the chain moving take it with
+    /// [`Self::write_node`] and reads that must not fail on a momentary
+    /// holder with [`Self::read_node`]; JSON-RPC requests queue for it behind
+    /// waiting writers, and transaction admission and control try it once
+    /// and answer `ServerBusy`.
     pub node: Mutex<Node>,
+    /// Writers waiting in [`Self::write_node`]; reads yield to them.
+    writers: AtomicUsize,
+    /// Reads waiting in [`Self::read_node`].
+    waiting_reads: AtomicUsize,
     pub peer: Option<String>,
     pub replication_peer: Option<String>,
     token: Option<String>,
@@ -115,6 +127,8 @@ impl Runtime {
         let rpc = super::rpc::initial_state(&node)?;
         Ok(Arc::new(Self {
             node: Mutex::new(node),
+            writers: AtomicUsize::new(0),
+            waiting_reads: AtomicUsize::new(0),
             peer,
             replication_peer,
             token,
@@ -132,6 +146,99 @@ impl Runtime {
     pub fn reads_in_flight(&self) -> usize {
         self.reads.in_flight()
     }
+    /// Reads waiting out a held node lock in [`Self::read_node`].
+    pub fn reads_waiting(&self) -> usize {
+        self.waiting_reads.load(Ordering::SeqCst)
+    }
+    /// Writers waiting for the node lock in [`Self::write_node`].
+    pub fn writers_waiting(&self) -> usize {
+        self.writers.load(Ordering::SeqCst)
+    }
+    /// Takes the node lock for a writer that keeps the chain moving (block
+    /// production, follower sync), waiting for the current holder; call it
+    /// from a blocking thread only. Reads in [`Self::read_node`] and
+    /// JSON-RPC requests yield while a writer waits, so a read load delays
+    /// a writer by at most the requests already holding or queued for the
+    /// lock.
+    pub fn write_node(&self) -> Result<MutexGuard<'_, Node>> {
+        let _writer = Count::new(&self.writers);
+        self.node.lock().map_err(|_| Error("StorageUnavailable"))
+    }
+    /// Takes the node lock for a read that must not fail just because the
+    /// lock is held at that moment (a detached read's capture, a REST read,
+    /// a light node's verified read); call it from a blocking thread only.
+    /// It waits out a holder for at most [`READ_LOCK_WAIT`], then answers
+    /// `ServerBusy`. It polls instead of queueing on the mutex and does not
+    /// try while a writer waits, so reads never queue ahead of writers or of
+    /// requests that try the lock once.
+    pub(super) fn read_node(&self) -> Result<MutexGuard<'_, Node>> {
+        let deadline = Instant::now() + READ_LOCK_WAIT;
+        let mut waiting = None;
+        loop {
+            if self.writers.load(Ordering::SeqCst) == 0 {
+                match self.node.try_lock() {
+                    Ok(node) => return Ok(node),
+                    Err(TryLockError::Poisoned(_)) => return Err(Error("StorageUnavailable")),
+                    Err(TryLockError::WouldBlock) => {}
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(Error("ServerBusy"));
+            }
+            waiting.get_or_insert_with(|| Count::new(&self.waiting_reads));
+            std::thread::sleep(LOCK_POLL);
+        }
+    }
+    /// Lets writers waiting in [`Self::write_node`] go first, before a
+    /// request that queues for the node lock; from a blocking thread only.
+    pub(super) fn yield_to_writers(&self) {
+        while self.writers.load(Ordering::SeqCst) > 0 {
+            std::thread::sleep(LOCK_POLL);
+        }
+    }
+}
+/// The longest a read in [`Runtime::read_node`] waits out a held node lock:
+/// far longer than producing or importing a block holds it.
+const READ_LOCK_WAIT: Duration = Duration::from_secs(1);
+/// How often a read in [`Runtime::read_node`] tries the node lock again.
+const LOCK_POLL: Duration = Duration::from_millis(1);
+/// Counts its holder in an [`AtomicUsize`] while it lives.
+struct Count<'a>(&'a AtomicUsize);
+impl<'a> Count<'a> {
+    fn new(counter: &'a AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter)
+    }
+}
+impl Drop for Count<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+/// Runs `f` under [`Runtime::read_node`] on a blocking thread that keeps the
+/// request's admission `permit` until it returns, even after cancellation.
+async fn with_node<T: Send + 'static>(
+    rt: &Shared,
+    permit: &Arc<tokio::sync::OwnedSemaphorePermit>,
+    f: impl FnOnce(&Node) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let (rt, permit) = (rt.clone(), permit.clone());
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        f(&*rt.read_node()?)
+    })
+    .await
+    .map_err(|_| Error("StorageUnavailable"))?
+}
+/// Runs `f` under [`Runtime::write_node`] on a blocking thread.
+async fn writing<T: Send + 'static>(
+    rt: &Shared,
+    f: impl FnOnce(&mut Node) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let rt = rt.clone();
+    tokio::task::spawn_blocking(move || f(&mut *rt.write_node()?))
+        .await
+        .map_err(|_| Error("StorageUnavailable"))?
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -512,7 +619,9 @@ async fn http_read(
     let worker = rt.clone();
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let node = worker.node.try_lock().map_err(|_| Error("ServerBusy"))?;
+        // Followers poll headers and accounts here: wait out a momentary
+        // holder instead of refusing them.
+        let node = worker.read_node()?;
         read(&node, &path, &q)
     })
     .await
@@ -581,7 +690,7 @@ async fn http_post(State(rt): State<Shared>, Path(path): Path<String>, body: Bod
     let shared = rt.clone();
     let result:Result<Json>=async {
         if matches!(path.as_str(), "query/range/resolve" | "query/range/verified" | "query/range/inspect") { return range_api::handle(rt.clone(), &path, body, permit.clone()).await; }
-        if path=="query/account" { let request: AccountQuery = parse(body, REQUEST_CAP).await?; return verified_account(rt.clone(), request).await; }
+        if path=="query/account" { let request: AccountQuery = parse(body, REQUEST_CAP).await?; return verified_account(rt.clone(), request, permit.clone()).await; }
         if path=="query/classify" {let r:Classify=parse(body,REQUEST_CAP).await?;return Ok(json!(query_language::classify(&r.query)));}
         if path=="query/text" {
             let r:TextQuery=parse(body,REQUEST_CAP).await?;let classification=query_language::classify(&r.query);
@@ -603,8 +712,7 @@ async fn http_post(State(rt): State<Shared>, Path(path): Path<String>, body: Bod
                 let mut node=rt.node.try_lock().map_err(|_|Error("ServerBusy"))?;
                 let Node::Full(h)=&mut*node else{return Err(Error("ProducerOnly"));};return h.submit(tx);
             }
-            let node=rt.node.try_lock().map_err(|_|Error("ServerBusy"))?;
-            if path=="query/resolve" {let r:VerifiedRequest=serde_json::from_slice(&bytes).map_err(|_|Error("InvalidRequest"))?;if r.cursor.is_some(){return Err(Error("CursorMismatch"));}let header=node.certificate(number(&r.height)?)?.header;return Ok(json!({"request":pack(&resolve(node.identity(),&header,&r)?)}));}
+            if path=="query/resolve" {let r:VerifiedRequest=serde_json::from_slice(&bytes).map_err(|_|Error("InvalidRequest"))?;if r.cursor.is_some(){return Err(Error("CursorMismatch"));}let node=rt.read_node()?;let header=node.certificate(number(&r.height)?)?.header;return Ok(json!({"request":pack(&resolve(node.identity(),&header,&r)?)}));}
             Err(Error("InvalidRequest"))
         }).await.map_err(|_|Error("StorageUnavailable"))?
     }.await;
@@ -624,7 +732,7 @@ async fn eq_proof(
     admitted
         .run("query/eq", move || {
             let state = {
-                let node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
+                let node = rt.read_node()?;
                 let Node::Full(h) = &*node else {
                     return Err(Error("UnsupportedNodeRole"));
                 };
@@ -634,16 +742,20 @@ async fn eq_proof(
         })
         .await
 }
-async fn verified_account(rt: Shared, request: AccountQuery) -> Result<Json> {
+async fn verified_account(
+    rt: Shared,
+    request: AccountQuery,
+    permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+) -> Result<Json> {
     let actor = actor(&request.actor)?;
     let height = number(&request.height)?;
-    let (genesis, header) = {
-        let node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
-        let Node::Light { light, .. } = &*node else {
+    let (genesis, header) = with_node(&rt, &permit, move |node| {
+        let Node::Light { light, .. } = node else {
             return Err(Error("UnsupportedNodeRole"));
         };
-        (light.genesis.clone(), light.header(height)?.header)
-    };
+        Ok((light.genesis.clone(), light.header(height)?.header))
+    })
+    .await?;
     let reply: Json = fetch(
         &rt.client,
         rt.peer.as_deref().ok_or(Error("InvalidRequest"))?,
@@ -669,8 +781,10 @@ async fn verified_account(rt: Shared, request: AccountQuery) -> Result<Json> {
     let (account, burned, initial) =
         super::light::verify_account(&genesis, &header, actor, &account_proof, &supply_proof)?;
     // Confirm the accepted catalog is still usable after the network await.
-    let node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
-    if node.certificate(height)?.header != header {
+    let accepted = with_node(&rt, &permit, move |node| {
+        Ok(node.certificate(height)?.header)
+    });
+    if accepted.await? != header {
         return Err(Error("ChainConflict"));
     }
     Ok(
@@ -683,19 +797,21 @@ async fn verified(
     inspect: bool,
     permit: Arc<tokio::sync::OwnedSemaphorePermit>,
 ) -> Result<Json> {
-    let (mut request, identity, genesis, header) = {
-        let node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
-        if !matches!(&*node, Node::Light { .. }) {
+    let selection = r.clone();
+    let (mut request, identity, genesis, certificate) = with_node(&rt, &permit, move |node| {
+        if !matches!(node, Node::Light { .. }) {
             return Err(Error("UnsupportedNodeRole"));
         }
-        let header = node.certificate(number(&r.height)?)?.header;
-        (
-            resolve(node.identity(), &header, &r)?,
+        let certificate = node.certificate(number(&selection.height)?)?;
+        Ok((
+            resolve(node.identity(), &certificate.header, &selection)?,
             node.identity().clone(),
             node.genesis().clone(),
-            header,
-        )
-    };
+            certificate,
+        ))
+    })
+    .await?;
+    let header = certificate.header;
     let previous = if let Some(cursor) = &r.cursor {
         let cache = rt
             .continuations
@@ -734,13 +850,15 @@ async fn verified(
         },
     )?;
     tokio::task::spawn_blocking(move||{let _permit=permit;
-        let node=rt.node.try_lock().map_err(|_|Error("ServerBusy"))?;let Node::Light{light,..}=&*node else{return Err(Error("UnsupportedNodeRole"));};
-        let verified=light.verify(&request,previous.as_ref(),&bytes)?;
+        // Verified outside the node lock against the captured header, which
+        // the catalog must still hold afterwards.
+        let verified=super::light::verify_eq_at(&genesis,&header,&request,previous.as_ref(),&bytes)?;
+        if rt.read_node()?.certificate(header.height)?.header!=header{return Err(Error("ChainConflict"));}
         let VerifiedEq::Page(page)=verified else{return Err(Error("NamespaceNotFound"));};
         let rows=page.rows.iter().cloned().map(|r|crate::simulator::metadata::record_change(request.query.namespace,r)).collect::<Result<Vec<_>>>()?;
         let entities=if request.query.namespace.ordinal()==1 {page.rows.iter().map(|row|{let p=crate::arkiv::project(row).map_err(|_|Error("InvalidProof"))?;if p.created_at>header.height||p.updated_at>header.height||(p.expires_at!=u64::MAX&&p.expires_at<=header.height){return Err(Error("InvalidProof"));}Ok(json!({"key":hex(&p.key),"owner":hex(&p.owner),"creator":hex(&p.creator),"creationFlags":{"raw":p.creation_flags,"readonly":p.creation_flags & 1 != 0,"permissionlessExtension":p.creation_flags & 2 != 0},"createdAt":p.created_at.to_string(),"updatedAt":p.updated_at.to_string(),"expiresAt":p.expires_at.to_string(),"attributes":super::rpc_reads::verified_attributes(&p)?}))}).collect::<Result<Vec<_>>>()?}else{vec![]};
         let continuation=if let Some(token)=page.next {let mut input=encode(token.cursor());input.extend_from_slice(&request.limit.to_be_bytes());let id=hex(arkiv_db::digest("arkiv/signed-cursor/v1",&input).as_slice());let mut cache=rt.continuations.lock().map_err(|_|Error("StorageUnavailable"))?;if cache.len()>=64{cache.pop_front();}cache.push_back((id.clone(),request.clone(),token));Some(id)}else{None};
-        let mut result=json!({"verification":"proof verified against authenticated single-proposer header","identity":identity,"query":{"namespace":r.namespace,"attribute":r.attribute,"valueType":r.value_type,"value":r.value,"limit":r.limit},"snapshot":snapshot(&header),"certificateBytes":pack(&node.certificate(header.height)?),"rows":rows,"entities":entities,"continuation":continuation,"postingCount":page.posting_count,"profile":"arkiv-entity-v3"});
+        let mut result=json!({"verification":"proof verified against authenticated single-proposer header","identity":identity,"query":{"namespace":r.namespace,"attribute":r.attribute,"valueType":r.value_type,"value":r.value,"limit":r.limit},"snapshot":snapshot(&header),"certificateBytes":pack(&certificate),"rows":rows,"entities":entities,"continuation":continuation,"postingCount":page.posting_count,"profile":"arkiv-entity-v3"});
         if inspect {let mut caps=proof_limits();caps.max_proof_bytes=crate::simulator::inspection::INSPECT_PROOF_CAP;let (_,inspection)=arkiv_db::proof::verify_eq_inspected(&request,previous.as_ref(),&bytes,caps,genesis.genesis.limits)?;result["canonicalRequest"]=json!(pack(&request));result["canonicalProof"]=json!(hex(&bytes));result["inspection"]=crate::simulator::inspection::json(&request,&inspection);}
         Ok(result)
     }).await.map_err(|_|Error("StorageUnavailable"))?
@@ -772,7 +890,13 @@ async fn private(
         };
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let mut node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
+            // A full follower's body fetch waits like other reads; control
+            // tries the lock once.
+            let mut node = if path == "control" {
+                rt.node.try_lock().map_err(|_| Error("ServerBusy"))?
+            } else {
+                rt.read_node()?
+            };
             let Node::Full(h) = &mut *node else {
                 return Err(Error("UnsupportedNodeRole"));
             };
@@ -905,16 +1029,18 @@ async fn fetch_once<T: serde::de::DeserializeOwned>(
     }
     serde_json::from_slice(&bytes).map_err(|_| Error("InvalidRequest"))
 }
+/// One follower poll. Its lock sections are writes ([`Runtime::write_node`]):
+/// reads never starve a follower's sync.
 pub async fn sync_once(rt: Shared) -> Result<()> {
-    let (head, identity, genesis, is_light) = {
-        let node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
-        (
+    let (head, identity, genesis, is_light) = writing(&rt, |node| {
+        Ok((
             node.head(),
             node.identity().clone(),
             node.genesis().clone(),
-            matches!(&*node, Node::Light { .. }),
-        )
-    };
+            matches!(node, Node::Light { .. }),
+        ))
+    })
+    .await?;
     let peer = rt.peer.as_deref().ok_or(Error("InvalidRequest"))?;
     let response: Headers = fetch(
         &rt.client,
@@ -945,23 +1071,27 @@ pub async fn sync_once(rt: Shared) -> Result<()> {
         certificate.authenticate(&genesis)?;
     }
     if is_light {
-        let mut node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
-        let Node::Light { light, .. } = &mut *node else {
-            return Err(Error("InvalidRequest"));
-        };
-        return light.append(&headers, &sampled);
+        return writing(&rt, move |node| {
+            let Node::Light { light, .. } = node else {
+                return Err(Error("InvalidRequest"));
+            };
+            light.append(&headers, &sampled)
+        })
+        .await;
     }
-    {
-        let mut node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
-        if let Node::Full(host) = &mut *node {
+    let observed = headers.clone();
+    writing(&rt, move |node| {
+        if let Node::Full(host) = node {
             host.observe_certificate(&sampled)?;
-            for certificate in &headers {
+            for certificate in &observed {
                 // Retain every authenticated observation before fetching bodies:
                 // an unavailable body must not erase evidence of equivocation.
                 host.observe_certificate(certificate)?;
             }
         }
-    }
+        Ok(())
+    })
+    .await?;
     for certificate in headers {
         let reply: Json = fetch(
             &rt.client,
@@ -983,15 +1113,17 @@ pub async fn sync_once(rt: Shared) -> Result<()> {
                 .ok_or(Error("InvalidRequest"))?,
             super::protocol::BODY_CAP as usize,
         )?;
-        let mut node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
-        let Node::Full(host) = &mut *node else {
-            return Err(Error("InvalidRequest"));
-        };
-        host.observe_pair(&certificate, &block.header)?;
-        if block.header.header != certificate.header {
-            return Err(Error("ChainConflict"));
-        }
-        host.import(block)?;
+        writing(&rt, move |node| {
+            let Node::Full(host) = node else {
+                return Err(Error("InvalidRequest"));
+            };
+            host.observe_pair(&certificate, &block.header)?;
+            if block.header.header != certificate.header {
+                return Err(Error("ChainConflict"));
+            }
+            host.import(block)
+        })
+        .await?;
     }
     Ok(())
 }

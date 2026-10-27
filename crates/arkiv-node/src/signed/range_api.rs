@@ -1,5 +1,5 @@
 //! Small, unpaged range-proof transport. The text query language is unchanged.
-use super::{Node, Shared, fetch, parse, snapshot};
+use super::{Node, Shared, fetch, parse, snapshot, with_node};
 use crate::{
     signed::{Error, Result},
     simulator::{
@@ -96,7 +96,7 @@ pub(super) async fn proof(rt: Shared, body: Body, admission: OwnedSemaphorePermi
     admitted
         .run("query/range", move || {
             let state = {
-                let node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
+                let node = rt.read_node()?;
                 let Node::Full(host) = &*node else {
                     return Err(Error("UnsupportedNodeRole"));
                 };
@@ -116,18 +116,21 @@ pub(super) async fn handle(
 ) -> Result<Json> {
     let inspect = path == "query/range/inspect";
     let query: Query = parse(body, REQUEST_CAP).await?;
-    let (request, header, identity) = {
-        let node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
-        let header = node.certificate(number(&query.height)?)?.header;
-        if (path == "query/range/verified" || inspect) && !matches!(&*node, Node::Light { .. }) {
+    let (selection, verifying) = (query.clone(), path == "query/range/verified" || inspect);
+    let (request, certificate, identity, genesis) = with_node(&rt, &permit, move |node| {
+        let certificate = node.certificate(number(&selection.height)?)?;
+        if verifying && !matches!(node, Node::Light { .. }) {
             return Err(Error("UnsupportedNodeRole"));
         }
-        (
-            resolve(node.identity(), &header, &query)?,
-            header,
+        Ok((
+            resolve(node.identity(), &certificate.header, &selection)?,
+            certificate,
             node.identity().clone(),
-        )
-    };
+            node.genesis().clone(),
+        ))
+    })
+    .await?;
+    let header = certificate.header;
     if path == "query/range/resolve" {
         return Ok(json!({"request":pack(&request)}));
     }
@@ -150,18 +153,20 @@ pub(super) async fn handle(
     )?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let node = rt.node.try_lock().map_err(|_| Error("ServerBusy"))?;
-        let Node::Light { light, .. } = &*node else {
-            return Err(Error("UnsupportedNodeRole"));
-        };
-        let VerifiedRange::Complete(verified) = light.verify_range(&request, &bytes)? else {
+        // Verified outside the node lock against the captured header, which
+        // the catalog must still hold afterwards.
+        let verified = crate::signed::light::verify_range_at(&genesis, &header, &request, &bytes)?;
+        if rt.read_node()?.certificate(header.height)?.header != header {
+            return Err(Error("ChainConflict"));
+        }
+        let VerifiedRange::Complete(verified) = verified else {
             return Err(Error("NamespaceNotFound"));
         };
         let inspection = if inspect {
             let mut caps = crate::simulator::wire::range_proof_limits()?;
             caps.max_proof_bytes = crate::simulator::inspection::INSPECT_PROOF_CAP;
             let (_,trace) = arkiv_db::proof::verify_range_inspected(
-                &request, &bytes, caps, node.genesis().genesis.limits,
+                &request, &bytes, caps, genesis.genesis.limits,
             )?;
             Some(trace)
         } else { None };
@@ -173,7 +178,7 @@ pub(super) async fn handle(
         let mut result = json!({"verification":"proof verified against authenticated single-proposer header",
             "verificationStatus":{"status":"verified","profile":PROFILE},
             "identity":identity,"query":query,"snapshot":snapshot(&header),
-            "certificateBytes":pack(&node.certificate(header.height)?),
+            "certificateBytes":pack(&certificate),
             "rows":rows,"complete":true,"proofProfile":PROFILE,
             "termCount":verified.term_count,"postingCount":verified.posting_count});
         if let Some(inspection) = inspection {

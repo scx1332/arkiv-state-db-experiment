@@ -1232,7 +1232,8 @@ async fn run() -> Result<()> {
             let result = if producing {
                 let timer = timer.clone();
                 tokio::task::spawn_blocking(move || {
-                    let mut node = timer.node.try_lock().map_err(|_| Error("ServerBusy"))?;
+                    // Waits for the lock: reads yield to production.
+                    let mut node = timer.write_node()?;
                     if let Node::Full(h) = &mut *node
                         && !h.paused
                     {

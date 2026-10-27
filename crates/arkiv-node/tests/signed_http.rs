@@ -492,6 +492,197 @@ async fn external_admission_full_replay_and_light_paginated_proofs() {
     assert_eq!(head(&light).height, 3);
 }
 
+/// Holds `rt`'s node lock on another thread, as producing or importing a
+/// block, appending headers or serving a header read does, until the
+/// returned sender is dropped.
+fn hold_node(rt: &Shared) -> std::sync::mpsc::Sender<()> {
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let rt = rt.clone();
+    std::thread::spawn(move || {
+        let _locked = rt.node.lock().unwrap();
+        locked_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+    });
+    locked_rx.recv().unwrap();
+    release_tx
+}
+async fn until(what: &str, condition: impl Fn() -> bool) {
+    let started = std::time::Instant::now();
+    while !condition() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+type Answer = tokio::task::JoinHandle<(reqwest::StatusCode, Value)>;
+fn spawn_post(client: &reqwest::Client, url: &str, path: &'static str, body: Value) -> Answer {
+    let (client, url) = (client.clone(), url.to_owned());
+    tokio::spawn(async move {
+        let response = post(&client, &url, path, body).await;
+        (response.status(), response.json::<Value>().await.unwrap())
+    })
+}
+fn assert_verified(path: &str, (status, value): (reqwest::StatusCode, Value)) {
+    assert!(
+        status.is_success() && value.get("error").is_none(),
+        "{path}: {status} {value}"
+    );
+    if let Some(verification) = value.get("verificationStatus") {
+        assert_eq!(verification["status"], "verified", "{path}: {value}");
+    }
+}
+/// A producer at height 2 with one `group = 1` entity and a light node
+/// synced to it, both served.
+async fn light_chain() -> (Shared, Server, Shared, Server) {
+    let mut source = host(true);
+    source.produce().unwrap();
+    source.submit(create(2, 0, 9)).unwrap();
+    source.produce().unwrap();
+    let producer = Runtime::new(Node::Full(Box::new(source)), None, None, None).unwrap();
+    let public = serve(runtime::public_router(producer.clone())).await;
+    let light = light_rt(&public.url, &producer);
+    runtime::sync_once(light.clone()).await.unwrap();
+    let local = serve(runtime::public_router(light.clone())).await;
+    (producer, public, light, local)
+}
+fn text_query() -> Value {
+    json!({"query":"group = u64(1)","requireProof":true,"height":"2","namespace":"1","limit":2,"cursor":null})
+}
+fn range_query() -> Value {
+    json!({"height":"2","namespace":"1","attribute":"group","valueType":"u64",
+        "lower":{"value":"1","inclusive":true},"upper":null})
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn verified_reads_wait_out_a_held_node_lock() {
+    let (producer, public, light, local) = light_chain().await;
+    let client = reqwest::Client::new();
+    let account = json!({"actor":hex(signer(2).address().as_bytes()),"height":"2"});
+    for (path, body) in [
+        ("query/text", text_query()),
+        ("query/verified", query()),
+        ("query/inspect", query()),
+        ("query/range/verified", range_query()),
+        ("query/range/inspect", range_query()),
+        ("query/account", account),
+    ] {
+        // Each stage finds the lock it needs held and waits it out: the
+        // light's to capture the header, the peer's to pin the proof
+        // snapshot (or serve the account proof), the light's again to
+        // confirm the header after verifying outside the lock.
+        let held = hold_node(&light);
+        let read = spawn_post(&client, &local.url, path, body);
+        until("the light capture", || light.reads_waiting() == 1).await;
+        let peer = hold_node(&producer);
+        drop(held);
+        until("the peer read", || producer.reads_waiting() == 1).await;
+        let held = hold_node(&light);
+        drop(peer);
+        until("the light confirmation", || light.reads_waiting() == 1).await;
+        assert!(!read.is_finished(), "{path} answered while a lock was held");
+        drop(held);
+        assert_verified(path, read.await.unwrap());
+    }
+    let held = hold_node(&producer);
+    let explore = spawn_post(&client, &public.url, "state/explore", json!({"height":"2"}));
+    until("the explorer capture", || producer.reads_waiting() == 1).await;
+    drop(held);
+    assert_verified("state/explore", explore.await.unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn waiting_reads_yield_to_a_waiting_writer() {
+    let (producer, _public, light, local) = light_chain().await;
+    let client = reqwest::Client::new();
+    for (holder, rt) in [("light", &light), ("producer", &producer)] {
+        let held = hold_node(rt);
+        let read = spawn_post(&client, &local.url, "query/text", text_query());
+        until("the read", || rt.reads_waiting() == 1).await;
+        // As block production or a follower's sync does.
+        let writer = tokio::task::spawn_blocking({
+            let rt = rt.clone();
+            move || {
+                let _node = rt.write_node().unwrap();
+                rt.reads_waiting()
+            }
+        });
+        until("the writer", || rt.writers_waiting() == 1).await;
+        drop(held);
+        assert_eq!(
+            writer.await.unwrap(),
+            1,
+            "the {holder} writer took the lock while the read still waited"
+        );
+        assert_verified("query/text", read.await.unwrap());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sustained_reads_never_hold_up_production_or_light_sync() {
+    let (producer, public, light, local) = light_chain().await;
+    let client = reqwest::Client::new();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // As many readers as both nodes admit at once: two text queries and a
+    // range query on the light (each proved on the producer) and a
+    // JSON-RPC count on the producer.
+    let mut readers = Vec::new();
+    for (url, path) in [
+        (&local.url, "query/text"),
+        (&local.url, "query/text"),
+        (&local.url, "query/range/verified"),
+        (&public.url, "rpc"),
+    ] {
+        let (client, url, stop) = (client.clone(), url.clone(), stop.clone());
+        readers.push(tokio::spawn(async move {
+            let mut answered = 0;
+            loop {
+                let answer = if path == "rpc" {
+                    let response = client
+                        .post(format!("{url}/"))
+                        .json(&json!({"jsonrpc":"2.0","id":1,"method":"arkiv_getEntityCount","params":[]}))
+                        .send()
+                        .await
+                        .unwrap();
+                    (response.status(), response.json::<Value>().await.unwrap())
+                } else {
+                    let body = if path == "query/text" { text_query() } else { range_query() };
+                    let response = post(&client, &url, path, body).await;
+                    (response.status(), response.json::<Value>().await.unwrap())
+                };
+                assert_verified(path, answer);
+                answered += 1;
+                if stop.load(Ordering::SeqCst) {
+                    break answered;
+                }
+            }
+        }));
+    }
+    for _ in 0..20 {
+        // As arkiv-proposer's production tick, then the light's poll: each
+        // takes the lock as a writer and is never refused.
+        let rt = producer.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut node = rt.write_node().unwrap();
+            let Node::Full(host) = &mut *node else {
+                panic!("producer")
+            };
+            host.produce().unwrap();
+        })
+        .await
+        .unwrap();
+        runtime::sync_once(light.clone()).await.unwrap();
+        assert_eq!(head(&light), head(&producer));
+    }
+    stop.store(true, Ordering::SeqCst);
+    for reader in readers {
+        reader.await.unwrap();
+    }
+    assert_eq!(head(&producer).height, 22);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn streamed_submission_caps_private_auth_and_bounded_jobs() {
     let producer = Runtime::new(

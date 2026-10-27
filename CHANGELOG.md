@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Node lock: reads wait out holders, writers go first
+
+- A light node's verified reads no longer fail with `ServerBusy` because a
+  node lock is held at that moment. `query/text` had answered such a refusal
+  as a 200 with `"error":"ServerBusy"` and verification `failed`, whenever the
+  forwarded `query/eq` found the producer's lock taken by a follower's header
+  poll; `scripts/signed-proposer-smoke.py` failed about one run in four.
+- Block production and follower sync are the lock's writers and wait for it.
+  Detached reads pinning their snapshot (`query/eq`, `query/range`,
+  `state/explore`, `arkiv_query`, `arkiv_getEntityCount`), REST `GET` reads,
+  a full follower's body fetch and a light node's verified reads wait out a
+  holder for at most a second, then answer `ServerBusy`. They poll instead of
+  queueing and do not try while a writer waits; other JSON-RPC requests still
+  queue, behind waiting writers. In a release-build stress run with clients
+  hammering `query/eq`, light verified reads or `arkiv_getEntityCount`, the
+  producer made 115 to 118 of 118 blocks in 6 s (before: 1 to 21 under
+  `query/eq` or `arkiv_getEntityCount`) and the light stayed within one block
+  (before: 103 behind under `query/text`).
+- A light node verifies a proof outside its lock and then confirms, under
+  it, that it still accepts the header (`light::verify_eq_at`,
+  `light::verify_range_at`).
+- A full node keeps the certificates it authenticated for up to 256 of the
+  highest heights read, so header reads and snapshot pins no longer repeat
+  signature recovery under the lock.
+- Transaction admission and control still try the lock once and answer
+  `ServerBusy` when it is held.
+
 ### Live permanent entities and rent outside gas
 
 **Breaking:** block format version 5 (the genesis gains the rent clock,

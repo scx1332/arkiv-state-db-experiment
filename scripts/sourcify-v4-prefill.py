@@ -45,15 +45,25 @@ Before anything is published the converter checks, line by line:
   and coderefs, a contract's compilationhash, code hashes (also of literal
   on-chain bytecode) and abihash (when no reference points into the ABI).
 
---chain-id and --owner re-key the dataset for another chain or owner: every key
-is recomputed from (chain, owner, nonce, 0), in the key attributes, the
-sourcerefs and the chunk lists. Content hashes and digests do not change.
+- decoding: every bytes value decodes, each compilation group and the contract
+  data parse as JSON, source text is UTF-8, manifest references are as the
+  reader requires. Left to the processor's hydrate: abihash behind a reference
+  into the ABI (counted) and the contract attributes that project its record.
+
+convert needs --chain-id, the chain of the base genesis: rows do not say which
+chain derives the keys they name. A chain or --owner other than the bundle's
+re-keys the dataset: every key is recomputed from (chain, owner, nonce, 0), in
+the key attributes, the sourcerefs and the chunk lists. Content hashes and
+digests do not change.
 
 Output (a new directory, published with an atomic no-replace rename):
 prefill.bin, conversion-report.json and source-lock.json. The converter writes
-nothing else and starts no node. Its memory is a key index of the referenceable
-rows (sources, codes, compilations, chunks; about 200 bytes each) plus the chunk
-data (bounded by --max-chunk-mib) and --workers part files in flight.
+nothing else and starts no node. Its memory is a key index and content-hash set
+of the referenceable rows (sources, codes, compilations, chunks): about 430 bytes
+each, about 5.4 GB for the full Sourcify corpus, plus 2 x --workers part files in
+flight. Chunk data waits in a scratch file next to the output until it is joined.
+An interrupted run leaves a hidden .sourcify-v4-prefill-* directory in the
+output's parent, never a published output; delete it and run again.
 """
 
 import argparse
@@ -76,8 +86,9 @@ import time
 import zlib
 
 
+# Contract data may hold integers longer than Python's default 4,300-digit parse limit.
+sys.set_int_max_str_digits(0)
 GIB = 1 << 30
-MIB = 1 << 20
 LINE_CAP = 1 << 20
 MANIFEST_CAP = 64 << 20
 FRAME_CAP = 8 << 20
@@ -212,8 +223,33 @@ def no_constant(value):
     raise Invalid(f"invalid JSON number {value}")
 
 
+def strict_int(text):
+    require(text != "-0", "invalid JSON number -0")
+    return int(text)
+
+
+def json_text(raw):
+    """UTF-8 text of a JSON document, as serde_json reads it: no BOM, no other encoding."""
+    if isinstance(raw, str):
+        return raw
+    try:
+        return bytes(raw).decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise Invalid(f"JSON is not UTF-8: {error}") from error
+
+
 def parse_json(raw):
-    return json.loads(raw, object_pairs_hook=unique_object, parse_constant=no_constant)
+    """A bundle or manifest document: duplicate members, -0, NaN and Infinity refused."""
+    return json.loads(json_text(raw), object_pairs_hook=unique_object, parse_constant=no_constant,
+                      parse_int=strict_int)
+
+
+def parse_value(raw, label):
+    """A stored JSON value (contract data, compilation groups) that the reader parses."""
+    try:
+        return json.loads(json_text(raw))
+    except (ValueError, RecursionError) as error:
+        raise Invalid(f"{label} is not JSON: {error}") from error
 
 
 def utf16_key(text):
@@ -301,8 +337,8 @@ def parse_attribute(a):
     elif kind == "str":
         require(isinstance(raw, str), f"{name}: str value")
         data = raw.encode("utf-8")
-        require(len(data) <= MAX_STR_BYTES and not any(c <= "\x1f" or c == "\x7f" for c in raw),
-                f"{name}: str longer than 128 bytes or with control characters")
+        require(len(data) <= MAX_STR_BYTES, f"{name}: str longer than 128 bytes")
+        require(not any(c <= "\x1f" or c == "\x7f" for c in raw), f"{name}: str with control characters")
         payload = sized(data)
     else:  # bytes, base64 in the bundle
         require(isinstance(raw, str), f"{name}: bytes must be base64")
@@ -372,6 +408,60 @@ class Content:
         return self.cache[name]
 
 
+def within(path, parent):
+    """hydrate::within: `path` is `parent` or below it."""
+    return path == parent or (path.startswith(parent) and path[len(parent):].startswith("/"))
+
+
+def valid_pointer(text):
+    """hydrate::validate_pointer (no root): `/` first, `~` only as `~0` or `~1`."""
+    if not isinstance(text, str) or not text.startswith("/"):
+        return False
+    i = 0
+    while i < len(text):
+        if text[i] == "~":
+            if i + 1 >= len(text) or text[i + 1] not in "01":
+                return False
+            i += 1
+        i += 1
+    return True
+
+
+def check_refs(refs, source_count, code_slots):
+    """The manifest's references as udc.rs Compilation::load checks them; True if one is in /abi."""
+    require(isinstance(refs, list), "manifest refs")
+    paths = set()
+    abi_refs = False
+    for r in refs:
+        require(isinstance(r, dict) and isinstance(r.get("path"), str), "manifest reference path")
+        path = r["path"]
+        require(valid_pointer(path), f"invalid reference path {path!r}")
+        require(path not in paths, f"duplicate reference path {path!r}")
+        paths.add(path)
+        abi_refs = abi_refs or within(path, "/abi")
+        kind = r.get("kind")
+        if kind == "local":
+            target = r.get("pointer")
+            require(valid_pointer(target), "invalid local pointer")
+            std = lambda q: within(q, "/stdJsonInput") or within(q, "/stdJsonOutput")
+            require(std(path) and not std(target), "invalid or cyclic local reference")
+        elif kind == "source":
+            require(type(r.get("source")) is int and 0 <= r["source"] < source_count, "source index out of range")
+        elif kind == "code":
+            require(r.get("code") in code_slots, "unknown code slot")
+        else:
+            raise Invalid(f"unsupported reference kind {kind!r}")
+    for path in paths:
+        parent = path
+        while "/" in parent:
+            parent = parent.rsplit("/", 1)[0]
+            require(parent not in paths, "overlapping references")
+    return abi_refs
+
+
+HEX_TEXT = re.compile(r"(?:[0-9a-fA-F]{2})*")
+
+
 def trim_0x(text):
     while text.startswith("0x"):
         text = text[2:]
@@ -393,12 +483,18 @@ def content_info(kind, plain, values, join=None):
     compilation (source hashes, code hashes by slot, ABI digest or None), chunk data, or None.
     """
     content = Content(values, join)
-    for name in values:
-        # Every chunk list is joined and checked, whether or not a check reads it.
-        if values[name][0] == CHUNKED and kind != CHUNK_KIND:
-            content.get(name)
+    if kind != CHUNK_KIND:
+        # Every value is decoded (chunk lists joined and checked), whether or not a check reads it.
+        for name in values:
+            if name != "sourcerefs":
+                content.get(name)
     if kind == SOURCE:
-        require(hashlib.sha256(content.get("content")).digest() == plain["hash"], "source hash mismatch")
+        text = content.get("content")
+        require(hashlib.sha256(text).digest() == plain["hash"], "source hash mismatch")
+        try:
+            bytes(text).decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise Invalid("source content is not UTF-8") from error
         return None
     if kind == CODE:
         require(keccak(content.get("code")).digest() == plain["hash"], "code hash mismatch")
@@ -423,7 +519,9 @@ def content_info(kind, plain, values, join=None):
             present = group in values
             require(present == (group in digests), f"group {group} and its digest disagree")
             if present:
-                require(digests[group] == hx(hashlib.sha256(content.get(group)).digest()), f"group {group} digest mismatch")
+                raw = content.get(group)
+                require(digests[group] == hx(hashlib.sha256(raw).digest()), f"group {group} digest mismatch")
+                parse_value(raw, f"group {group}")
         require(isinstance(sources, list), "manifest sources")
         source_hashes = [hex_value(s, 32, "source hash") for s in sources]
         sourcerefs = values.get("sourcerefs")
@@ -436,36 +534,23 @@ def content_info(kind, plain, values, join=None):
             require((slot in codes) == (f"{slot}coderef" in plain), f"code slot {slot} and its coderef disagree")
             if slot in codes:
                 code_hashes[slot] = hex_value(codes[slot], 32, "code hash")
-        require(isinstance(refs, list), "manifest refs")
-        abi_refs = False
-        for r in refs:
-            require(isinstance(r, dict) and isinstance(r.get("path"), str), "manifest reference path")
-            abi_refs = abi_refs or r["path"] == "/abi" or r["path"].startswith("/abi/")
-            if r.get("kind") == "source":
-                require(type(r.get("source")) is int and 0 <= r["source"] < len(source_hashes), "source index out of range")
-            elif r.get("kind") == "code":
-                require(r.get("code") in code_hashes, "unknown code slot")
-            else:
-                require(r.get("kind") == "local", "unsupported reference kind")
+        abi_refs = check_refs(refs, len(source_hashes), code_hashes)
         # abihash is over the hydrated ABI; without references into it, that is the stored group.
+        # With one, only hydration can check it (the converter counts those contracts).
         return source_hashes, code_hashes, None if abi_refs else bytes.fromhex(digests["abi"][2:])
     # contract
+    data = parse_value(content.get("data"), "contract data")
+    require(isinstance(data, dict), "contract data must be an object")
     for lane, ref, hash_name in ONCHAIN:
         if ref in plain:
             require(hash_name in plain, f"code reference {ref} without {hash_name}")
         elif hash_name in plain:
             # Without a reference the code hash describes literal on-chain bytecode.
-            try:
-                data = json.loads(content.get("data"))
-            except (ValueError, UnicodeDecodeError) as error:
-                raise Invalid(f"invalid contract data: {error}") from error
             literal = pointer(data, f"/{lane}/onchainBytecode")
             require(isinstance(literal, str), f"{hash_name} without code reference or literal")
-            try:
-                code = bytes.fromhex(trim_0x(literal))
-            except ValueError as error:
-                raise Invalid("literal on-chain bytecode is not hex") from error
-            require(keccak(code).digest() == plain[hash_name], "literal code hash mismatch")
+            literal = trim_0x(literal)
+            require(HEX_TEXT.fullmatch(literal) is not None, "literal on-chain bytecode is not hex")
+            require(keccak(bytes.fromhex(literal)).digest() == plain[hash_name], "literal code hash mismatch")
     require(plain["chainid"] == 1, "contract of another source chain")
     return (plain["address"], plain["matchid"], plain["compilationhash"], plain["abihash"],
             plain.get("creationcodehash"), plain.get("runtimecodehash"))
@@ -612,8 +697,8 @@ def manifest(root, allow_eof_source):
         documents[name] = parse_json(raw)
         lock.append({"path": name, "bytes": len(raw), "sha256": digest})
     seed, report = documents["seed.json"], documents["report.json"]
-    require(isinstance(seed, dict) and set(seed) == SEED_KEYS and seed["version"] == SEED_VERSION
-            and seed["format"] == FORMAT, f"seed.json is not a version-2 {FORMAT} manifest")
+    require(isinstance(seed, dict) and set(seed) == SEED_KEYS and type(seed["version"]) is int
+            and seed["version"] == SEED_VERSION and seed["format"] == FORMAT, f"seed.json is not a version-2 {FORMAT} manifest")
     require(isinstance(report, dict) and report.get("schema") == REPORT_SCHEMA and report.get("status") == "completed"
             and report.get("format") == FORMAT, f"report.json is not a completed {REPORT_SCHEMA} report")
     chain_id = seed["chainId"]
@@ -622,11 +707,12 @@ def manifest(root, allow_eof_source):
     require(owner != bytes(20), "seed owner must be nonzero")
     prefix = seed["schemaPrefix"]
     require(isinstance(prefix, str) and PREFIX.fullmatch(prefix), "invalid schema prefix")
-    require(report.get("arkivChainId") == chain_id and isinstance(report.get("owner"), str)
+    require(type(report.get("arkivChainId")) is int and report["arkivChainId"] == chain_id and isinstance(report.get("owner"), str)
             and report["owner"].lower() == seed["owner"].lower() and report.get("schemaPrefix") == prefix,
             "report.json describes another chain, owner or prefix than seed.json")
-    require(report.get("sourceChainId") == 1, "the bundle's source chain must be Ethereum mainnet (1)")
-    require(seed["firstNonce"] == 0, "seed.json firstNonce must be 0")
+    require(type(report.get("sourceChainId")) is int and report["sourceChainId"] == 1,
+            "the bundle's source chain must be Ethereum mainnet (1)")
+    require(type(seed["firstNonce"]) is int and seed["firstNonce"] == 0, "seed.json firstNonce must be 0")
     require(report.get("expiry") == "permanent (expiresAt 2^64-1)", "the bundle's entities must be permanent")
     require(report.get("sourceCompleteRequired") is True or allow_eof_source,
             "the bundle was processed without a source-complete marker (--allow-eof-source accepts it)")
@@ -701,15 +787,18 @@ def publish(stage, destination):
 class Converter:
     """The ordered pass: references, cross-row content, totals, and the stream."""
 
-    def __init__(self, m, chain_id, owner, args):
+    def __init__(self, m, chain_id, owner, chunk_file):
         self.m = m
         self.chain_id, self.owner = chain_id, owner
         self.rekey = (chain_id, owner) != (m["chainId"], m["owner"])
-        self.args = args
         # key -> (kind, nonce, content hash, extra) of every referenceable row
         self.index = {}
+        # Chunk data lives in a scratch file (key -> offset, length), read back when joined.
+        self.chunk_file = chunk_file
         self.chunks = {}
+        self.chunks_joined = set()
         self.chunk_bytes = 0
+        self.abihash_unchecked = 0
         self.hashes = set()
         self.addresses = set()
         self.matchids = set()
@@ -732,10 +821,13 @@ class Converter:
         digest, length, keys = chunk_list(value)
         joined = bytearray()
         for key in keys:
-            data = self.chunks.get(key)
-            require(data is not None, f"chunk {hx(key)} is not a chunk row")
-            require(len(joined) + len(data) <= length, "chunk size mismatch")
+            at = self.chunks.get(key)
+            require(at is not None, f"chunk {hx(key)} is not a chunk row")
+            require(len(joined) + at[1] <= length, "chunk size mismatch")
+            data = os.pread(self.chunk_file.fileno(), at[1], at[0])
+            require(len(data) == at[1], "chunk scratch read short")
             joined += data
+            self.chunks_joined.add(key)
         require(len(joined) == length and hashlib.sha256(joined).digest() == digest, "chunk integrity mismatch")
         self.chunk_lists += 1
         return bytes(joined)
@@ -758,6 +850,9 @@ class Converter:
             require(compilation[2] == compilationhash, "contract's compilationref names an entity without its compilationhash")
             if compilation[3] is not None:
                 require(compilation[3] == abihash, "abihash does not match the compilation's abi digest")
+            else:
+                # A reference into the ABI: only hydration can check abihash.
+                self.abihash_unchecked += 1
             for ref, expected in (("creationcoderef", creation), ("runtimecoderef", runtime)):
                 if ref in targets:
                     require(targets[ref][0][2] == expected, f"contract's {ref} names an entity without its code hash")
@@ -773,9 +868,11 @@ class Converter:
                 require(targets[f"{slot}coderef"][0][2] == expected, f"the {slot} code does not have the manifest's hash")
             self.index[key] = (kind, nonce, content_hash, abi_digest)
         elif kind == CHUNK_KIND:
+            self.chunk_file.seek(0, os.SEEK_END)
+            self.chunks[key] = (self.chunk_file.tell(), len(info))
+            self.chunk_file.write(info)
+            self.chunk_file.flush()
             self.chunk_bytes += len(info)
-            require(self.chunk_bytes <= self.args.max_chunk_mib * MIB, "chunk data exceeds --max-chunk-mib")
-            self.chunks[key] = info
             self.index[key] = (kind, nonce, None, None)
         else:
             self.index[key] = (kind, nonce, content_hash, None)
@@ -817,7 +914,10 @@ def run(args):
     require(keccak().hexdigest() == "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
             "Keccak provider failed self-test")
     require(1 <= args.workers <= 256, "--workers must be 1 to 256")
-    require(1 <= args.max_chunk_mib <= 1 << 20 and 0 <= args.reserve_gib <= 1 << 20, "invalid bounds")
+    require(0 <= args.reserve_gib <= 1 << 20, "invalid --reserve-gib")
+    # Nothing in a row says which chain derives its keys: the base genesis chain must be named.
+    require(args.command != "convert" or args.chain_id is not None,
+            "convert needs --chain-id: the chain ID of the base genesis the stream is built on")
     root = args.bundle.absolute()
     require(root.is_dir() and not root.is_symlink(), "bundle must be a real directory")
     destination = args.out.absolute()
@@ -832,15 +932,30 @@ def run(args):
     require(owner != bytes(20), "owner must be nonzero")
     total = m["totals"]["entities"]
     convert = args.command == "convert"
-    c = Converter(m, chain_id, owner, args)
     with tempfile.TemporaryDirectory(prefix=".sourcify-v4-prefill-", dir=destination.parent) as temporary:
         staged = Path(temporary) / "published"
         staged.mkdir()
         stream_hash = keccak(bytes([len(STREAM_DOMAIN)]) + STREAM_DOMAIN)
         sha = hashlib.sha256()
         written = 0
-        out = (staged / "prefill.bin").open("xb") if convert else None
+        out = chunk_file = None
+        tasks = [(str(root), part, m["chainId"], m["owner"], m["prefix"], owner) for part in m["parts"]]
+        context = multiprocessing.get_context("fork")
+        window = max(2, 2 * args.workers)
+        last = time.monotonic()
+        pool = concurrent.futures.ProcessPoolExecutor(args.workers, mp_context=context)
         try:
+            # The first submissions fork every worker (fork context), before any output is open.
+            pending = []
+            queued = iter(enumerate(tasks))
+            for i, task in queued:
+                pending.append((i, pool.submit(scan_part, task)))
+                if len(pending) >= window:
+                    break
+            chunk_file = open(Path(temporary) / "chunks.bin", "x+b")
+            c = Converter(m, chain_id, owner, chunk_file)
+            out = (staged / "prefill.bin").open("xb") if convert else None
+
             def write(data):
                 nonlocal written
                 if out is not None:
@@ -849,45 +964,40 @@ def run(args):
                 sha.update(data)
                 written += len(data)
             write(b"ARKPFL02" + struct.pack(">IQ", ROW_CODEC, total))
-            tasks = [(str(root), part, m["chainId"], m["owner"], m["prefix"], owner) for part in m["parts"]]
-            context = multiprocessing.get_context("fork")
-            window = max(2, 2 * args.workers)
-            last = time.monotonic()
-            with concurrent.futures.ProcessPoolExecutor(args.workers, mp_context=context) as pool:
-                pending = []
-                queued = iter(enumerate(tasks))
-                for i, task in queued:
-                    pending.append((i, pool.submit(scan_part, task)))
-                    if len(pending) >= window:
-                        break
-                while pending:
-                    i, future = pending.pop(0)
-                    nxt = next(queued, None)
-                    if nxt is not None:
-                        pending.append((nxt[0], pool.submit(scan_part, nxt[1])))
-                    part = m["parts"][i]
-                    digest, size, count, longest, frames, rows = future.result()
-                    require(size == part["bytes"] and digest == part["sha256"], f"{part['path']}: checksum mismatch")
-                    require(count == part["entities"], f"{part['path']}: entity count differs")
-                    blob = bytearray(frames) if c.rekey else frames
-                    for line, summary in enumerate(rows):
-                        try:
-                            c.row(blob, summary)
-                        except (Invalid, ValueError, KeyError, TypeError, zlib.error) as error:
-                            raise Invalid(f"{part['path']} line {line + 1}: {error}") from None
-                    c.max_frame = max(c.max_frame, longest)
-                    write(bytes(blob) if c.rekey else blob)
-                    if time.monotonic() - last >= 10:
-                        check_disk(destination.parent, reserve)
-                        progress("rows", c.rows, total, started)
-                        last = time.monotonic()
+            while pending:
+                i, future = pending.pop(0)
+                nxt = next(queued, None)
+                if nxt is not None:
+                    pending.append((nxt[0], pool.submit(scan_part, nxt[1])))
+                part = m["parts"][i]
+                digest, size, count, longest, frames, rows = future.result()
+                require(size == part["bytes"] and digest == part["sha256"], f"{part['path']}: checksum mismatch")
+                require(count == part["entities"], f"{part['path']}: entity count differs")
+                blob = bytearray(frames) if c.rekey else frames
+                for line, summary in enumerate(rows):
+                    try:
+                        c.row(blob, summary)
+                    except (Invalid, ValueError, KeyError, TypeError, zlib.error) as error:
+                        raise Invalid(f"{part['path']} line {line + 1}: {error}") from None
+                c.max_frame = max(c.max_frame, longest)
+                write(bytes(blob) if c.rekey else blob)
+                if time.monotonic() - last >= 10:
+                    check_disk(destination.parent, reserve)
+                    progress("rows", c.rows, total, started)
+                    last = time.monotonic()
+            pool.shutdown()
             kinds = c.finish()
             if out is not None:
                 out.flush()
                 os.fsync(out.fileno())
+        except BaseException:
+            # Stop handing out parts; the ones in flight finish and are discarded.
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
         finally:
-            if out is not None:
-                out.close()
+            for file in (out, chunk_file):
+                if file is not None:
+                    file.close()
         progress("rows", c.rows, total, started)
         lock = {"schema": "arkiv-sourcify-v4-source-lock-v1", "bundle": str(root),
                 "files": m["lock"] + [{"path": p["path"], "bytes": p["bytes"], "sha256": p["sha256"]} for p in m["parts"]]}
@@ -906,6 +1016,8 @@ def run(args):
             "rows": c.rows, "contracts": c.kinds[CONTRACT], "entitiesByKind": kinds,
             "references": {KINDS[i]: n for i, n in enumerate(c.references) if n} | {"total": sum(c.references)},
             "chunkListsJoined": c.chunk_lists, "chunkBytes": c.chunk_bytes,
+            "chunkRowsNeverJoined": len(c.chunks) - len(c.chunks_joined),
+            "contractsWithAbihashLeftToHydrate": c.abihash_unchecked,
             "bytesValues": c.bytes_values, "storageUnits": str(c.units),
             "maxAttributes": c.max_attributes, "maxRowBytesValues": c.max_row_bytes, "maxFrameBytes": c.max_frame,
             "expiry": "permanent", "permanentExpiry": str(PERMANENT), "permanentPrefillRequired": True,
@@ -933,10 +1045,10 @@ def parser():
                         help="inventory: every check, publishing only the report; convert: also prefill.bin")
     result.add_argument("--bundle", type=Path, required=True, help="v4 bundle directory (process --format udc)")
     result.add_argument("--out", type=Path, required=True, help="new directory; never overwritten")
-    result.add_argument("--chain-id", type=int, default=None, help="destination chain (default: the bundle's); re-keys")
+    result.add_argument("--chain-id", type=int, default=None,
+                        help="chain ID of the base genesis (required for convert); another than the bundle's re-keys")
     result.add_argument("--owner", default=None, help="creator and owner of every row (default: the bundle's); re-keys")
     result.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1), help="part-scanning processes")
-    result.add_argument("--max-chunk-mib", type=int, default=1024, help="bound on chunk data held for chunk lists")
     result.add_argument("--reserve-gib", type=int, default=80, help="free disk to keep")
     result.add_argument("--allow-eof-source", action="store_true",
                         help="accept a bundle processed without --require-source-complete (fixtures)")

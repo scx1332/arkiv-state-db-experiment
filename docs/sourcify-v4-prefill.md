@@ -9,10 +9,16 @@ bundle has no payload, so there is nothing to reinterpret: each line becomes
 exactly one row, in the same order.
 
 ```sh
-python3 -I scripts/sourcify-v4-prefill.py convert --bundle /data/bundle-v4 --out /data/converted --workers 8
+python3 -I scripts/sourcify-v4-prefill.py convert --bundle /data/bundle-v4 --out /data/converted \
+  --chain-id 7706815 --workers 8
 arkiv-proposer genesis stream-build /data/base/genesis.bin --prefill /data/converted/prefill.bin \
   --out /data/bundle --sponsor 0xPROPOSER --state-out /data/genesis-state
 ```
+
+`--chain-id` is required for `convert` and must be the base genesis chain: a row
+does not say which chain derives the keys its references name, so `stream-build`
+would accept a stream converted for another chain, with every reference
+dangling. `conversion-report.json` records `chainId` and `creator`.
 
 The base genesis must be a permanent-prefill one (`[prefill] allow_permanent = true`,
 see [unlimited expiry](sourcify-prefill-converter.md#unlimited-expiry---expiry-policy-unlimited)):
@@ -66,13 +72,23 @@ Nothing is published unless every line passes:
 - **References.** Every key a row names (`compilationref`, `creationcoderef`,
   `runtimecoderef`, each `sourcerefs` key, each chunk-list key) is an earlier row
   of the kind it must be.
-- **Content.** Chunk lists (chunk count, joined length and SHA-256); a source's
-  SHA-256 and a code's Keccak-256 over the decoded value; a compilation's hash
-  (SHA-256 of the manifest), its canonical manifest, its group digests, the
-  hashes of the sources behind `sourcerefs` and of the codes behind its code
-  slots; a contract's `compilationhash`, code hashes (also of literal on-chain
-  bytecode) and `abihash` (against the compilation's ABI digest when no
-  reference points into the ABI).
+- **Content.** Every bytes value decodes (identity, or complete raw DEFLATE
+  with no trailing bytes; chunk lists joined, with chunk count, length and
+  SHA-256 checked); a source's SHA-256 over its text, which is UTF-8; a code's
+  Keccak-256; a compilation's hash (SHA-256 of the manifest), its canonical
+  manifest, its group digests, each group parsing as JSON, its references as
+  the reader checks them (pointer syntax, no duplicate or overlapping paths,
+  local references only from `stdJsonInput`/`stdJsonOutput` to elsewhere,
+  source indexes and code slots that exist), the hashes of the sources behind
+  `sourcerefs` (in order) and of the codes behind its code slots; a contract's
+  data as a JSON object, its `compilationhash`, code hashes (also of literal
+  on-chain bytecode) and `abihash` against the compilation's ABI digest.
+
+What only hydration can check stays with the processor's `hydrate` (byte for
+byte against the records): `abihash` of a compilation whose manifest has a
+reference into the ABI (counted as `contractsWithAbihashLeftToHydrate`; none in
+the 2026-10-23 corpus), and the contract attributes that project its record
+(`name`, `compilerversion`, `deployer`, ...).
 
 `--chain-id` and `--owner` re-key a bundle for another chain or owner: every
 key is recomputed from (chain, owner, nonce, 0) in the key attributes, the
@@ -80,10 +96,14 @@ key is recomputed from (chain, owner, nonce, 0) in the key attributes, the
 
 Part files are checked in `--workers` processes; one ordered pass checks
 references, cross-row content and totals and writes the stream. Its memory is a
-key index of the referenceable rows (sources, codes, compilations and chunks,
-about 200 bytes each), the chunk data (`--max-chunk-mib`) and the parts in
-flight. Output is `prefill.bin`, `conversion-report.json` and `source-lock.json`
-in a new directory published with an atomic no-replace rename.
+key index and content-hash set of the referenceable rows (sources, codes,
+compilations and chunks): about 430 bytes each, about 5.4 GB for the full
+corpus, plus 2 × `--workers` parts in flight. Chunk data waits in a scratch
+file until it is joined (`chunkRowsNeverJoined` counts chunks no row named).
+Output is `prefill.bin`, `conversion-report.json` and `source-lock.json` in a
+new directory published with an atomic no-replace rename; an interrupted run
+leaves only a hidden `.sourcify-v4-prefill-*` directory in the output's parent,
+to delete before running again.
 
 ## Validation
 
@@ -94,11 +114,14 @@ ARKIV_PROPOSER_BIN=target/release/arkiv-proposer SOURCIFY_V4_BUNDLE=/path/to/bun
 python3 -I scripts/sourcify-v4-node-check.py keys|counts|reads --rpc URL --bundle BUNDLE ...
 ```
 
-The tests write an independent synthetic v4 bundle (every kind, chunked and
-inline values, both code slots, a literal code hash, proxy attributes), convert
-it, decode every row and compare it with its line; re-key it; and refuse 45
-tampered copies, each with checksums and report totals rewritten so that the
-mutation reaches the check it targets. With `ARKIV_PROPOSER_BIN` they run
+The tests write an independent synthetic v4 bundle (every kind; chunked
+source text, compilation artifacts and contract data; both code slots; a
+literal code hash; proxy attributes), convert it, decode every row and compare
+it with its line; re-key it; join a chunk twice and leave one unused; leave an
+`abihash` behind an ABI reference to hydration; refuse a `convert` without
+`--chain-id`; and refuse 68 tampered copies, each with checksums, report totals
+and (for manifest changes) compilation hashes rewritten so that the mutation
+reaches the check it targets, matched by its exact message. With `ARKIV_PROPOSER_BIN` they run
 `genesis stream-build` and `stream-verify` on the stream; with
 `SOURCIFY_V4_BUNDLE` they convert a real bundle and compare every row.
 `sourcify-v4-node-check.py` reads a node started from the prefill: every key of

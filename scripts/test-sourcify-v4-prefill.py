@@ -105,9 +105,13 @@ class SyntheticBundle:
                                 ("hash", "bytes32", True, "0x" + keccak(bytecode).hex())])
         return key, keccak(bytecode)
 
-    def compilation(self, sources, codes, abi):
+    def compilation(self, sources, codes, abi, big_artifacts=False):
+        artifacts = {"metadata": "{}", "sources": {}}
+        if big_artifacts:
+            # Incompressible enough that the DEFLATE value exceeds the budget: a chunked group.
+            artifacts["stdJsonOutput"] = noise(200000)
         groups = {"abi": abi, "compilation": {"name": "C", "language": "Solidity", "compilerVersion": "0.8.0"},
-                  "artifacts": {"metadata": "{}", "sources": {}}}
+                  "artifacts": artifacts}
         group_bytes = {g: cjson(v) for g, v in groups.items()}
         refs = [{"kind": "source", "path": f"/sources/s{i}.sol/content", "source": i} for i in range(len(sources))]
         refs += [{"kind": "code", "path": f"/{slot}Bytecode/recompiledBytecode", "code": slot,
@@ -115,18 +119,23 @@ class SyntheticBundle:
         manifest = cjson({"codes": {s: "0x" + h.hex() for s, (k, h) in codes.items()},
                           "digests": {g: "0x" + hashlib.sha256(b).hexdigest() for g, b in group_bytes.items()},
                           "refs": refs, "sources": ["0x" + h.hex() for k, h in sources]})
+        values = {g: deflate(b) for g, b in group_bytes.items()}
+        if len(values["artifacts"]) > 100000:
+            values["artifacts"] = self.chunked(values["artifacts"])
         attrs = [("manifest", "bytes", False, self.b(deflate(manifest))),
                  ("hash", "bytes32", True, "0x" + hashlib.sha256(manifest).hexdigest())]
         if sources:
             attrs.append(("sourcerefs", "bytes", False, self.b(b"\x00" + b"".join(k for k, h in sources))))
-        attrs += [(g, "bytes", False, self.b(deflate(b))) for g, b in group_bytes.items()]
+        attrs += [(g, "bytes", False, self.b(v)) for g, v in values.items()]
         attrs += [(f"{slot}coderef", "key", False, "0x" + k.hex()) for slot, (k, h) in codes.items()]
         key = self.add("compilation", attrs)
         return key, hashlib.sha256(manifest).digest(), hashlib.sha256(group_bytes["abi"]).digest()
 
-    def contract(self, address, matchid, comp, codes=None, literal=None, proxy=False):
+    def contract(self, address, matchid, comp, codes=None, literal=None, proxy=False, big=False):
         ckey, chash, abihash = comp
         data = {"address": address, "chainId": "1", "matchId": str(matchid)}
+        if big:
+            data["userdoc"] = noise(200000)
         attrs = [("address", "addr", True, address.lower()), ("chainid", "u64", True, "0x1"),
                  ("matchid", "u64", True, hex(matchid)), ("verifiedat", "u64", True, "0x6543210f"),
                  ("match", "str", True, "exact_match"), ("name", "str", True, "C"),
@@ -143,7 +152,10 @@ class SyntheticBundle:
             attrs.append(("creationcodehash", "bytes32", True, "0x" + keccak(literal).hex()))
         if proxy:
             attrs += [("isproxy", "bool", True, True), ("proxytype", "str", True, "EIP1967Proxy")]
-        attrs.append(("data", "bytes", False, self.b(deflate(cjson(data)))))
+        value = deflate(cjson(data))
+        if len(value) > 100000:
+            value = self.chunked(value)
+        attrs.append(("data", "bytes", False, self.b(value)))
         return self.add("contract", attrs)
 
     def write(self, root, part_size=4, source_complete=True, mutate=None):
@@ -151,6 +163,55 @@ class SyntheticBundle:
         if mutate:
             mutate(lines)
         write_bundle(root, lines, self.chain, self.owner, self.prefix, part_size, source_complete)
+
+
+def noise(size):
+    """Deterministic base64 text that DEFLATE barely shrinks."""
+    out, i = bytearray(), 0
+    while len(out) * 4 // 3 < size:
+        out += hashlib.sha256(str(i).encode()).digest()
+        i += 1
+    return base64.b64encode(bytes(out)).decode()[:size]
+
+
+def decode(value):
+    if value[0] == 0:
+        return value[1:]
+    assert value[0] == 1
+    return zlib.decompress(value[1:], -15)
+
+
+def attr(line, name):
+    return next(a for a in line["attributes"] if a["name"] == name)
+
+
+def raw(line, name):
+    return base64.b64decode(attr(line, name)["value"])
+
+
+def set_raw(line, name, value):
+    attr(line, name)["value"] = base64.b64encode(value).decode()
+
+
+def find(lines, kind, n=0):
+    return [l for l in lines if kind_of(l) == kind][n]
+
+
+def recompile(lines, comp, change, groups=None):
+    """Rewrite a compilation's manifest (and groups) consistently: its hash and every contract's
+    compilationhash follow, so a mutation reaches the check behind the hashes."""
+    manifest = json.loads(decode(raw(comp, "manifest")))
+    for group, value in (groups or {}).items():
+        set_raw(comp, group, value)
+        manifest["digests"][group] = "0x" + hashlib.sha256(decode(value)).hexdigest()
+    change(manifest)
+    encoded = cjson(manifest)
+    set_raw(comp, "manifest", b"\x00" + encoded)
+    old = attr(comp, "hash")["value"]
+    attr(comp, "hash")["value"] = "0x" + hashlib.sha256(encoded).hexdigest()
+    for l in lines:
+        if kind_of(l) == "contract" and attr(l, "compilationhash")["value"] == old:
+            attr(l, "compilationhash")["value"] = attr(comp, "hash")["value"]
 
 
 def b64len(value):
@@ -274,8 +335,8 @@ def build(bundle=None):
     comp = s.compilation([s1, s2], {"creation": creation, "runtime": runtime}, [{"type": "function", "name": "f"}])
     s.contract("0x" + "ab" * 20, 7, comp, codes={"creation": creation, "runtime": runtime})
     s.contract("0x" + "cd" * 20, 9, comp, literal=bytes.fromhex("600160020300"), proxy=True)
-    lone = s.compilation([], {}, [])
-    s.contract("0x" + "ef" * 20, 11, lone)
+    lone = s.compilation([], {}, [], big_artifacts=True)
+    s.contract("0x" + "ef" * 20, 11, lone, big=True)
     return s
 
 
@@ -293,19 +354,23 @@ class V4PrefillTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def convert(self, bundle, out="out", extra=()):
-        done = run(["convert", "--bundle", bundle, "--out", self.tmp / out, "--workers", "2", "--reserve-gib", "0", *extra])
+    def convert(self, bundle, out="out", extra=(), chain=CHAIN):
+        done = run(["convert", "--bundle", bundle, "--out", self.tmp / out, "--workers", "2", "--reserve-gib", "0",
+                    "--chain-id", chain, *extra])
         return json.loads(done.stdout), (self.tmp / out / "prefill.bin").read_bytes()
 
-    def refused(self, mutate, message, extra=(), **write):
+    def refused(self, mutate, pattern, extra=(), **write):
+        """The mutated synthetic bundle is refused with an error matching `pattern`, and nothing is published."""
         s = build()
         root = self.tmp / f"bad-{len(list(self.tmp.iterdir()))}"
         s.write(root, mutate=mutate, **write)
-        done = run(["convert", "--bundle", root, "--out", self.tmp / (root.name + "-out"), "--workers", "2",
-                    "--reserve-gib", "0", *extra], check=False)
-        self.assertNotEqual(done.returncode, 0, f"accepted; expected: {message}")
-        self.assertIn(message, done.stderr)
-        self.assertFalse((self.tmp / (root.name + "-out")).exists())
+        out = self.tmp / (root.name + "-out")
+        done = run(["convert", "--bundle", root, "--out", out, "--workers", "2", "--reserve-gib", "0",
+                    "--chain-id", CHAIN, *extra], check=False)
+        self.assertNotEqual(done.returncode, 0, f"accepted; expected: {pattern}")
+        self.assertRegex(done.stderr, pattern)
+        self.assertFalse(out.exists())
+        self.assertEqual([p.name for p in self.tmp.iterdir() if p.name.startswith(".sourcify-v4-prefill-")], [])
 
     def test_keccak_and_safeproxy_key(self):
         self.assertEqual(conv.keccak().hexdigest(), "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")
@@ -319,13 +384,16 @@ class V4PrefillTest(unittest.TestCase):
             {"name": "arkiv.schema", "type": "str", "indexed": True, "value": "posts"})
         cell = conv.sized(name.encode()) + bytes([1, conv.TAGS[kind]]) + payload
         self.assertEqual(cell.hex(), "0000000c61726b69762e736368656d61" + "0102" + "00000005706f737473")
-        for attr, tag_payload in (({"type": "i32", "value": -1}, "107fffffff"), ({"type": "i32", "value": 0}, "1080000000"),
-                                  ({"type": "u64", "value": "0x100"}, "0d0000000000000100"),
-                                  ({"type": "bool", "value": True}, "0101"),
-                                  ({"type": "addr", "value": "0x" + "ab" * 20}, "04" + "ab" * 20),
-                                  ({"type": "bytes32", "value": "0x" + "01" * 32}, "0b" + "01" * 32),
-                                  ({"type": "key", "value": "0x" + "02" * 32}, "40" + "02" * 32)):
-            _, t, _, _, p = conv.parse_attribute({"name": "x", "indexed": True, **attr})
+        for a, tag_payload in (({"type": "i32", "value": -1}, "107fffffff"), ({"type": "i32", "value": 0}, "1080000000"),
+                               ({"type": "i32", "value": -(1 << 31)}, "1000000000"),
+                               ({"type": "u64", "value": "0x100"}, "0d0000000000000100"),
+                               ({"type": "u64", "value": "0xffffffffffffffff"}, "0dffffffffffffffff"),
+                               ({"type": "bool", "value": True}, "0101"), ({"type": "bool", "value": False}, "0100"),
+                               ({"type": "addr", "value": "0x" + "ab" * 20}, "04" + "ab" * 20),
+                               ({"type": "bytes32", "value": "0x" + "01" * 32}, "0b" + "01" * 32),
+                               ({"type": "key", "value": "0x" + "02" * 32}, "40" + "02" * 32),
+                               ({"type": "str", "value": "é"}, "0200000002c3a9")):
+            _, t, _, _, p = conv.parse_attribute({"name": "x", "indexed": True, **a})
             self.assertEqual((bytes([conv.TAGS[t]]) + p).hex(), tag_payload)
         _, t, _, _, p = conv.parse_attribute({"name": "x", "type": "bytes", "indexed": False, "value": "AAEC"})
         self.assertEqual((bytes([conv.TAGS[t]]) + p).hex(), "0300000003000102")
@@ -344,10 +412,19 @@ class V4PrefillTest(unittest.TestCase):
         self.assertEqual(report["streamHash"], "0x" + stream)
         self.assertEqual(report["canonicalBytes"], len(data))
         self.assertEqual(report["prefillSha256"], hashlib.sha256(data).hexdigest())
-        self.assertEqual(report["entitiesByKind"], {"chunk": 2, "code": 2, "compilation": 2, "contract": 3, "source": 2})
+        kinds = {}
+        for l in s.lines:
+            kinds[kind_of(l)] = kinds.get(kind_of(l), 0) + 1
+        self.assertEqual(report["entitiesByKind"], dict(sorted(kinds.items())))
         self.assertEqual(int(report["storageUnits"]), sum(units(l) for l in s.lines))
-        self.assertEqual(report["references"], {"chunk": 2, "code": 4, "compilation": 3, "source": 2, "total": 11})
-        self.assertEqual(report["chunkListsJoined"], 1)
+        # The chunked source, compilation artifacts and contract data are joined and checked in the ordered pass.
+        self.assertEqual(report["chunkListsJoined"], 3)
+        self.assertEqual(report["chunkRowsNeverJoined"], 0)
+        self.assertEqual(report["contractsWithAbihashLeftToHydrate"], 0)
+        self.assertEqual(report["references"]["compilation"], 3)
+        self.assertEqual(report["references"]["source"], 2)
+        self.assertEqual(report["references"]["code"], 4)
+        self.assertEqual(report["references"]["chunk"], kinds["chunk"])
         self.assertFalse(report["rekeyed"])
         lock = json.loads((self.tmp / "out" / "source-lock.json").read_text())
         self.assertEqual([f["path"] for f in lock["files"][:3]], ["SHA256SUMS", "seed.json", "report.json"])
@@ -355,7 +432,7 @@ class V4PrefillTest(unittest.TestCase):
                          ["conversion-report.json", "prefill.bin", "source-lock.json"])
         # Deterministic across worker counts.
         again = run(["convert", "--bundle", self.tmp / "bundle", "--out", self.tmp / "again", "--workers", "1",
-                     "--reserve-gib", "0"])
+                     "--reserve-gib", "0", "--chain-id", CHAIN])
         self.assertEqual((self.tmp / "again" / "prefill.bin").read_bytes(), data)
         self.assertEqual(json.loads(again.stdout)["streamHash"], report["streamHash"])
         # inventory checks the same and publishes no stream.
@@ -364,171 +441,218 @@ class V4PrefillTest(unittest.TestCase):
         self.assertNotIn("streamHash", inv)
         self.assertFalse((self.tmp / "inv" / "prefill.bin").exists())
 
+    def test_convert_names_the_chain(self):
+        build().write(self.tmp / "bundle")
+        done = run(["convert", "--bundle", self.tmp / "bundle", "--out", self.tmp / "out", "--reserve-gib", "0"], check=False)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("convert needs --chain-id", done.stderr)
+
+    def test_shared_and_unused_chunks(self):
+        def mutate(lines):
+            # A second contract with the first chunked contract's data: its chunks are joined twice.
+            first = find(lines, "contract", 2)
+            twin = copy.deepcopy(first)
+            nonce = len(lines)
+            twin.update(nonce=nonce, key="0x" + key_of(CHAIN, OWNER, nonce).hex())
+            attr(twin, "address")["value"] = "0x" + "12" * 20
+            attr(twin, "matchid")["value"] = "0x63"
+            lines.append(twin)
+            # A chunk nothing names.
+            orphan = copy.deepcopy(find(lines, "chunk"))
+            orphan.update(nonce=nonce + 1, key="0x" + key_of(CHAIN, OWNER, nonce + 1).hex())
+            lines.append(orphan)
+        s = build()
+        s.write(self.tmp / "bundle", mutate=mutate)
+        report, _ = self.convert(self.tmp / "bundle")
+        self.assertEqual(report["chunkListsJoined"], 4)
+        self.assertEqual(report["chunkRowsNeverJoined"], 1)
+
+    def test_abihash_behind_an_abi_reference_is_left_to_hydration(self):
+        def mutate(lines):
+            comp = find(lines, "compilation")
+            recompile(lines, comp, lambda m: m["refs"].append({"kind": "source", "path": "/abi/0/doc", "source": 0}))
+            attr(find(lines, "contract"), "abihash")["value"] = "0x" + "77" * 32
+        s = build()
+        s.write(self.tmp / "bundle", mutate=mutate)
+        report, _ = self.convert(self.tmp / "bundle")
+        self.assertEqual(report["contractsWithAbihashLeftToHydrate"], 2)
+
     def test_rekey_rewrites_every_key(self):
         s = build()
         s.write(self.tmp / "bundle")
         owner, chain = bytes.fromhex("22" * 20), 9001
-        report, data = self.convert(self.tmp / "bundle", extra=("--owner", "0x" + owner.hex(), "--chain-id", chain))
+        report, data = self.convert(self.tmp / "bundle", extra=("--owner", "0x" + owner.hex()), chain=chain)
         self.assertTrue(report["rekeyed"])
+        self.assertEqual((report["chainId"], report["creator"]), (chain, "0x" + owner.hex()))
         self.assertEqual(report["firstKey"], "0x" + key_of(chain, owner, 0).hex())
         old = {key_of(CHAIN, OWNER, n): n for n in range(len(s.lines))}
         new = lambda k: key_of(chain, owner, old[k])
-        rows = decode_stream(data)
+        rows, rewritten = decode_stream(data), 0
         for row, line in zip(rows, s.lines):
             self.assertEqual(row["creator"], owner)
             for (name, kind, t, value), (_n, _k, _t, was) in zip(row["attributes"], line_cells(line)):
                 if t == "key":
                     self.assertEqual(value, new(was))
+                    rewritten += 1
                 elif name == "sourcerefs":
                     self.assertEqual(value, b"\x00" + b"".join(new(was[i:i + 32]) for i in range(1, len(was), 32)))
+                    rewritten += 1
                 elif t == "bytes" and was[:1] == b"\x02" and kind_of(line) != "chunk":
                     self.assertEqual(value[:37], was[:37])
                     self.assertEqual(value[37:], b"".join(new(was[i:i + 32]) for i in range(37, len(was), 32)))
+                    rewritten += 1
                 else:
                     self.assertEqual(value, was)
+        self.assertEqual(rewritten, 3 + 2 + 1 + 1 + 1 + 3)  # key attributes, sourcerefs, three chunk lists
 
     def test_refuses_row_rule_violations(self):
-        def attr(lines, n, name):
-            return next(a for a in lines[n]["attributes"] if a["name"] == name)
-
         def first(kind):
-            return lambda lines: next(i for i, l in enumerate(lines) if kind_of(l) == kind)
+            return lambda lines: next(l for l in lines if kind_of(l) == kind)
         contract, source, chunk = first("contract"), first("source"), first("chunk")
         cases = [
-            (lambda l: l[1].update(nonce=5), "nonce 5, expected 1"),
-            (lambda l: l[1].update(key="0x" + "00" * 32), "key is not the salt-0 key"),
-            (lambda l: l[1].update(expiresAt="0x100"), "entity is not permanent"),
-            (lambda l: l[1]["attributes"].reverse(), "not strictly ascending"),
+            (lambda l: l[1].update(nonce=5), r"line 2: nonce 5, expected 1$"),
+            (lambda l: l[1].update(key="0x" + "00" * 32), r": key is not the salt-0 key of nonce 1$"),
+            (lambda l: l[1].update(expiresAt="0x100"), r": entity is not permanent$"),
+            (lambda l: l[1]["attributes"].reverse(), r": attributes not strictly ascending$"),
             (lambda l: l[0]["attributes"].extend({"name": f"z{i:02d}", "type": "u64", "indexed": False, "value": "0x1"}
-                                                 for i in range(31)), "more than 32 attributes"),
-            (lambda l: attr(l, source(l), "content").update(indexed=True), "bytes cannot be indexed"),
-            (lambda l: attr(l, contract(l), "name").update(value="a\nb"), "control characters"),
-            (lambda l: attr(l, contract(l), "name").update(value="x" * 129), "longer than 128 bytes"),
-            (lambda l: attr(l, contract(l), "matchid").update(value="0x07"), "compact 0x quantity"),
-            (lambda l: attr(l, contract(l), "optimizerruns").update(value=1 << 31), "i32 value"),
-            (lambda l: l[contract(l)]["attributes"].append({"name": "zzz", "type": "u64", "indexed": True, "value": "0x1"}),
-             "contract has no attribute zzz"),
-            (lambda l: l[contract(l)]["attributes"].remove(attr(l, contract(l), "deployer")), "contract is missing deployer"),
-            (lambda l: attr(l, contract(l), "deployer").update(type="bytes32", value="0x" + "00" * 32), "must be indexed addr"),
-            (lambda l: attr(l, contract(l), "match").update(indexed=False), "must be indexed str"),
-            (lambda l: attr(l, chunk(l), "data").update(value=base64.b64encode(b"x" * 120001).decode()), "120,000-byte budget"),
-            (lambda l: attr(l, source(l), "content").update(value=""), "empty bytes value"),
-            (lambda l: attr(l, source(l), "content").update(value=base64.b64encode(b"\x03abc").decode()), "unknown codec 3"),
-            (lambda l: attr(l, source(l), "content").update(value="AAE"), "invalid base64"),
-            (lambda l: attr(l, source(l), "arkiv.schema").update(value="other.v4.chunk"), "is not a sourcify.v4 kind"),
-            (lambda l: l[0].update(extra=1), "exactly nonce, key, expiresAt and attributes"),
+                                                 for i in range(31)), r": more than 32 attributes$"),
+            (lambda l: attr(source(l), "content").update(indexed=True), r": content: bytes cannot be indexed$"),
+            (lambda l: attr(contract(l), "name").update(value="a\nb"), r": name: str with control characters$"),
+            (lambda l: attr(contract(l), "name").update(value="x" * 129), r": name: str longer than 128 bytes$"),
+            (lambda l: attr(contract(l), "matchid").update(value="0x07"), r": matchid: u64 must be a compact 0x quantity$"),
+            (lambda l: attr(contract(l), "optimizerruns").update(value=1 << 31), r": optimizerruns: i32 value$"),
+            (lambda l: attr(contract(l), "optimizer").update(value=1), r": optimizer: bool value$"),
+            (lambda l: contract(l)["attributes"].append({"name": "zzz", "type": "u64", "indexed": True, "value": "0x1"}),
+             r": contract has no attribute zzz$"),
+            (lambda l: contract(l)["attributes"].append({"name": "zzz", "type": "u256", "indexed": True, "value": "0x1"}),
+             r": zzz: unsupported attribute type 'u256'$"),
+            (lambda l: contract(l)["attributes"].append({"name": "Key", "type": "u64", "indexed": True, "value": "0x1"}),
+             r": invalid attribute name 'Key'$"),
+            (lambda l: contract(l)["attributes"].remove(attr(contract(l), "deployer")), r": contract is missing deployer$"),
+            (lambda l: attr(contract(l), "deployer").update(type="bytes32", value="0x" + "00" * 32),
+             r": contract attribute deployer must be indexed addr$"),
+            (lambda l: attr(contract(l), "match").update(indexed=False), r": contract attribute match must be indexed str$"),
+            (lambda l: attr(chunk(l), "data").update(value=base64.b64encode(b"x" * 120001).decode()),
+             r": entity exceeds the 120,000-byte budget$"),
+            (lambda l: attr(source(l), "content").update(value=""), r": empty bytes value content$"),
+            (lambda l: set_raw(source(l), "content", b"\x03abc"), r": bytes value content has unknown codec 3$"),
+            (lambda l: attr(source(l), "content").update(value="AAE"), r": content: invalid base64$"),
+            (lambda l: attr(source(l), "content").update(value="AAF="), r": content: noncanonical base64$"),
+            (lambda l: attr(source(l), "arkiv.schema").update(value="other.v4.chunk"),
+             r": arkiv.schema other.v4.chunk is not a sourcify.v4 kind$"),
+            (lambda l: l[0].update(extra=1), r": line must have exactly nonce, key, expiresAt and attributes$"),
         ]
-        for mutate, message in cases:
-            with self.subTest(message=message):
-                self.refused(mutate, message)
+        for mutate, pattern in cases:
+            with self.subTest(pattern=pattern):
+                self.refused(mutate, f"(?m){pattern}")
 
     def test_refuses_reference_and_content_violations(self):
-        def find(lines, kind, n=0):
-            return [l for l in lines if any(a["value"] == f"{PREFIX}.{kind}" for a in l["attributes"])][n]
+        def flip(line, name):
+            value = bytearray(raw(line, name))
+            value[-1] ^= 1
+            set_raw(line, name, bytes(value))
 
-        def attr(line, name):
-            return next(a for a in line["attributes"] if a["name"] == name)
+        def standalone(lines, kind, values, hashes):
+            nonce = len(lines)
+            attrs = [{"name": "arkiv.schema", "type": "str", "indexed": True, "value": f"{PREFIX}.{kind}"}]
+            attrs += [{"name": n, "type": "bytes", "indexed": False, "value": base64.b64encode(v).decode()} for n, v in values]
+            attrs += [{"name": n, "type": "bytes32", "indexed": True, "value": "0x" + h.hex()} for n, h in hashes]
+            attrs.sort(key=lambda a: a["name"].encode())
+            lines.append({"nonce": nonce, "key": "0x" + key_of(CHAIN, OWNER, nonce).hex(),
+                          "expiresAt": "0xffffffffffffffff", "attributes": attrs})
 
-        def flip(a):
-            raw = bytearray(base64.b64decode(a["value"]))
-            raw[-1] ^= 1
-            a["value"] = base64.b64encode(bytes(raw)).decode()
+        def first_ref(lines):
+            attr(find(lines, "contract"), "compilationref")["value"] = "0x" + key_of(CHAIN, OWNER, len(lines) - 1).hex()
 
-        def set_bytes(a, raw):
-            a["value"] = base64.b64encode(raw).decode()
-
-        def later_ref(lines):
-            c = find(lines, "contract")
-            attr(c, "compilationref")["value"] = "0x" + key_of(CHAIN, OWNER, len(lines) - 1).hex()
-
-        def wrong_kind(lines):
-            c = find(lines, "contract")
-            attr(c, "compilationref")["value"] = find(lines, "code")["key"]
-
-        def sourcerefs_codec(lines):
-            a = attr(find(lines, "compilation"), "sourcerefs")
-            raw = bytearray(base64.b64decode(a["value"]))
-            raw[0] = 1
-            set_bytes(a, bytes(raw))
-
-        def manifest_change(lines):
-            a = attr(find(lines, "compilation"), "manifest")
-            set_bytes(a, b"\x00" + b'{"codes":{},"digests":{},"refs":[],"sources":[]}')
-
-        def group_change(lines):
-            set_bytes(attr(find(lines, "compilation"), "artifacts"), b"\x00{}")
-
-        def chunk_change(lines):
-            flip(attr(find(lines, "chunk"), "data"))
-
-        def compilationhash(lines):
-            attr(find(lines, "contract"), "compilationhash")["value"] = "0x" + "77" * 32
-
-        def abihash(lines):
-            attr(find(lines, "contract"), "abihash")["value"] = "0x" + "77" * 32
-
-        def codehash(lines):
-            attr(find(lines, "contract"), "runtimecodehash")["value"] = "0x" + "77" * 32
-
-        def literal(lines):
-            attr(find(lines, "contract", 1), "creationcodehash")["value"] = "0x" + "77" * 32
-
-        def matchid(lines):
-            attr(find(lines, "contract", 1), "matchid")["value"] = "0x7"
-
-        def address(lines):
-            attr(find(lines, "contract", 1), "address")["value"] = "0x" + "ab" * 20
-
-        def chainid(lines):
-            attr(find(lines, "contract"), "chainid")["value"] = "0x2"
-
-        def source_hash(lines):
-            attr(find(lines, "source"), "hash")["value"] = "0x" + "77" * 32
-
-        def code_content(lines):
-            set_bytes(attr(find(lines, "code"), "code"), b"\x00\x60\x00")
-
-        def coderef_missing(lines):
+        def swap_sources(lines):
             comp = find(lines, "compilation")
-            comp["attributes"].remove(attr(comp, "runtimecoderef"))
+            refs = raw(comp, "sourcerefs")
+            set_raw(comp, "sourcerefs", refs[:1] + refs[33:65] + refs[1:33])
 
-        def chunk_list_len(lines):
-            a = attr(find(lines, "source", 1), "content")
-            raw = bytearray(base64.b64decode(a["value"]))
-            raw[33:37] = (int.from_bytes(raw[33:37], "big") - 1).to_bytes(4, "big")
-            set_bytes(a, bytes(raw))
+        def swap_codes(lines):
+            comp = find(lines, "compilation")
+            a, b = attr(comp, "creationcoderef"), attr(comp, "runtimecoderef")
+            a["value"], b["value"] = b["value"], a["value"]
 
-        def duplicate_hash(lines):
-            find(lines, "code", 1)["attributes"] = copy.deepcopy(find(lines, "code")["attributes"])
+        def deflate_tail(lines):
+            code = find(lines, "code")
+            set_raw(code, "code", raw(code, "code") + b"\x00")
+
+        def manifest_spaced(lines):
+            comp = find(lines, "compilation")
+            manifest = decode(raw(comp, "manifest")).replace(b'":', b'": ', 1)
+            set_raw(comp, "manifest", b"\x00" + manifest)
+            old = attr(comp, "hash")["value"]
+            attr(comp, "hash")["value"] = "0x" + hashlib.sha256(manifest).hexdigest()
+            for l in lines:
+                if kind_of(l) == "contract" and attr(l, "compilationhash")["value"] == old:
+                    attr(l, "compilationhash")["value"] = attr(comp, "hash")["value"]
+
+        def refs(change):
+            return lambda lines: recompile(lines, find(lines, "compilation"), change)
+
+        def group_not_json(lines):
+            recompile(lines, find(lines, "compilation"), lambda m: None, {"artifacts": b"\x00{"})
 
         cases = [
-            (later_ref, "before it exists"),
-            (wrong_kind, "but it is a code"),
-            (sourcerefs_codec, "malformed sourcerefs"),
-            (manifest_change, "compilation hash mismatch"),
-            (group_change, "group artifacts digest mismatch"),
-            (chunk_change, "chunk integrity mismatch"),
-            (compilationhash, "without its compilationhash"),
-            (abihash, "abihash does not match"),
-            (codehash, "without its code hash"),
-            (literal, "literal code hash mismatch"),
-            (matchid, "two contracts with matchid 7"),
-            (address, "two contracts for"),
-            (chainid, "another source chain"),
-            (source_hash, "source hash mismatch"),
-            (code_content, "code hash mismatch"),
-            (coderef_missing, "code slot runtime and its coderef disagree"),
-            (chunk_list_len, "chunk"),
-            (duplicate_hash, "two code entities with hash"),
+            (first_ref, r": compilationref names 0x[0-9a-f]{64} before it exists$"),
+            (lambda l: attr(find(l, "contract"), "compilationref").update(value=find(l, "code")["key"]),
+             r": compilationref names 0x[0-9a-f]{64} as a compilation, but it is a code$"),
+            (lambda l: set_raw(find(l, "compilation"), "sourcerefs", b"\x01" + raw(find(l, "compilation"), "sourcerefs")[1:]),
+             r": malformed sourcerefs \(must be codec 0 and 32-byte keys\)$"),
+            (lambda l: set_raw(find(l, "compilation"), "manifest", b"\x00{}"), r": compilation hash mismatch$"),
+            (lambda l: set_raw(find(l, "compilation"), "artifacts", b"\x00{}"), r": group artifacts digest mismatch$"),
+            (lambda l: flip(find(l, "chunk"), "data"), r": chunk integrity mismatch$"),
+            (lambda l: attr(find(l, "contract"), "compilationhash").update(value="0x" + "77" * 32),
+             r": contract's compilationref names an entity without its compilationhash$"),
+            (lambda l: attr(find(l, "contract"), "abihash").update(value="0x" + "77" * 32),
+             r": abihash does not match the compilation's abi digest$"),
+            (lambda l: attr(find(l, "contract"), "runtimecodehash").update(value="0x" + "77" * 32),
+             r": contract's runtimecoderef names an entity without its code hash$"),
+            (lambda l: attr(find(l, "contract", 1), "creationcodehash").update(value="0x" + "77" * 32),
+             r": literal code hash mismatch$"),
+            (lambda l: attr(find(l, "contract", 1), "matchid").update(value="0x7"), r": two contracts with matchid 7$"),
+            (lambda l: attr(find(l, "contract", 1), "address").update(value="0x" + "ab" * 20), r": two contracts for 0x(ab){20}$"),
+            (lambda l: attr(find(l, "contract"), "chainid").update(value="0x2"), r": contract of another source chain$"),
+            (lambda l: attr(find(l, "source"), "hash").update(value="0x" + "77" * 32), r": source hash mismatch$"),
+            (lambda l: set_raw(find(l, "code"), "code", b"\x00\x60\x00"), r": code hash mismatch$"),
+            (lambda l: find(l, "compilation")["attributes"].remove(attr(find(l, "compilation"), "runtimecoderef")),
+             r": code slot runtime and its coderef disagree$"),
+            (lambda l: set_raw(find(l, "source", 1), "content", raw(find(l, "source", 1), "content")[:33]
+                               + (int.from_bytes(raw(find(l, "source", 1), "content")[33:37], "big") - 1).to_bytes(4, "big")
+                               + raw(find(l, "source", 1), "content")[37:]), r": chunk size mismatch$"),
+            (lambda l: find(l, "code", 1).update(attributes=copy.deepcopy(find(l, "code")["attributes"])),
+             r": two code entities with hash 0x[0-9a-f]{64}$"),
+            (swap_sources, r": a source behind sourcerefs does not have the manifest's hash$"),
+            (swap_codes, r": the creation code does not have the manifest's hash$"),
+            (deflate_tail, r": DEFLATE value is truncated or has trailing bytes$"),
+            (lambda l: set_raw(find(l, "contract"), "data", b"\x01garbage"), r": invalid DEFLATE value: .*$"),
+            (lambda l: set_raw(find(l, "contract"), "data", b"\x00not json"), r": contract data is not JSON: .*$"),
+            (lambda l: set_raw(find(l, "contract"), "data", b"\x00[1]"), r": contract data must be an object$"),
+            (lambda l: set_raw(find(l, "contract"), "data", b"\x00\xef\xbb\xbf{}"),
+             r": contract data is not JSON: .*$"),
+            (manifest_spaced, r": manifest is not canonical$"),
+            (group_not_json, r": group artifacts is not JSON: .*$"),
+            (refs(lambda m: m["refs"].append(dict(m["refs"][0]))), r": duplicate reference path '/sources/s0.sol/content'$"),
+            (refs(lambda m: m["refs"].append({"kind": "source", "path": "/sources", "source": 0})),
+             r": overlapping references$"),
+            (refs(lambda m: m["refs"].append({"kind": "local", "path": "/abi/x", "pointer": "/compilation"})),
+             r": invalid or cyclic local reference$"),
+            (refs(lambda m: m["refs"].append({"kind": "source", "path": "/sources/x~2", "source": 0})),
+             r": invalid reference path '/sources/x~2'$"),
+            (refs(lambda m: m["refs"].append({"kind": "source", "path": "/sources/y", "source": 5})),
+             r": source index out of range$"),
+            (refs(lambda m: m["refs"].append({"kind": "blob", "path": "/sources/y"})), r": unsupported reference kind 'blob'$"),
+            (lambda l: standalone(l, "source", [("content", b"\x00\xff\xfe")], [("hash", hashlib.sha256(b"\xff\xfe").digest())]),
+             r": source content is not UTF-8$"),
         ]
-        for mutate, message in cases:
-            with self.subTest(message=message):
-                self.refused(mutate, message)
+        for mutate, pattern in cases:
+            with self.subTest(pattern=pattern):
+                self.refused(mutate, f"(?m){pattern}")
 
     def test_refuses_bundle_violations(self):
         s = build()
         s.write(self.tmp / "ok")
-        cases = []
 
         def copy_bundle(name, change):
             root = self.tmp / name
@@ -545,48 +669,46 @@ class V4PrefillTest(unittest.TestCase):
                            for p in [l.split("  ")[1] for l in (root / "SHA256SUMS").read_text().splitlines()])
             (root / "SHA256SUMS").write_text(sums)
 
-        def report_field(field, value):
+        def document(name, field, value):
             def change(root):
-                r = json.loads((root / "report.json").read_text())
-                r[field] = value
-                (root / "report.json").write_text(json.dumps(r))
+                d = json.loads((root / name).read_text())
+                d[field] = value
+                (root / name).write_text(json.dumps(d))
                 resum(root)
             return change
-
-        def seed_version(root):
-            d = json.loads((root / "seed.json").read_text())
-            d["version"] = 1
-            (root / "seed.json").write_text(json.dumps(d))
-            resum(root)
 
         def extra_file(root):
             (root / "SHA256SUMS").write_text((root / "SHA256SUMS").read_text() + "0" * 64 + "  payloads.bin\n")
 
         cases = [
-            ("bytes", part_bytes, "checksum mismatch"),
-            ("units", report_field("storageUnits", 1), "storage units differ"),
-            ("values", report_field("bytesValues", 1), "bytes values differ"),
-            ("kinds", report_field("kinds", {"contract": 3}), "kind counts differ"),
-            ("eof", report_field("sourceCompleteRequired", False), "without a source-complete marker"),
-            ("seed", seed_version, "is not a version-2"),
-            ("sums", extra_file, "SHA256SUMS must list exactly"),
+            ("bytes", part_bytes, r"entities/000001.jsonl: checksum mismatch"),
+            ("units", document("report.json", "storageUnits", 1), r": storage units differ from report.json"),
+            ("values", document("report.json", "bytesValues", 1), r": bytes values differ from report.json"),
+            ("kinds", document("report.json", "kinds", {"contract": 3}), r": kind counts differ from report.json"),
+            ("eof", document("report.json", "sourceCompleteRequired", False), r"without a source-complete marker"),
+            ("seed", document("seed.json", "version", 1), r"seed.json is not a version-2"),
+            ("float", document("seed.json", "version", 2.0), r"seed.json is not a version-2"),
+            ("bool", document("report.json", "sourceChainId", True), r"source chain must be Ethereum mainnet"),
+            ("nonce", document("seed.json", "firstNonce", False), r"seed.json firstNonce must be 0"),
+            ("sums", extra_file, r"SHA256SUMS must list exactly"),
         ]
-        for name, change, message in cases:
-            with self.subTest(message=message):
+        for name, change, pattern in cases:
+            with self.subTest(pattern=pattern):
                 root = copy_bundle(name, change)
-                done = run(["convert", "--bundle", root, "--out", self.tmp / f"{name}-out", "--reserve-gib", "0"], check=False)
+                done = run(["convert", "--bundle", root, "--out", self.tmp / f"{name}-out", "--reserve-gib", "0",
+                            "--chain-id", CHAIN], check=False)
                 self.assertNotEqual(done.returncode, 0)
-                self.assertIn(message, done.stderr)
-        root = copy_bundle("eof-allowed", report_field("sourceCompleteRequired", False))
+                self.assertRegex(done.stderr, pattern)
+        root = copy_bundle("eof-allowed", document("report.json", "sourceCompleteRequired", False))
         self.convert(root, "eof-allowed-out", ("--allow-eof-source",))
-        done = run(["convert", "--bundle", self.tmp / "ok", "--out", self.tmp / "eof-allowed-out", "--reserve-gib", "0"],
-                   check=False)
+        done = run(["convert", "--bundle", self.tmp / "ok", "--out", self.tmp / "eof-allowed-out", "--reserve-gib", "0",
+                    "--chain-id", CHAIN], check=False)
         self.assertIn("output already exists", done.stderr)
 
     @unittest.skipUnless(os.environ.get("SOURCIFY_V4_BUNDLE"), "SOURCIFY_V4_BUNDLE not set")
     def test_real_bundle(self):
         root = Path(os.environ["SOURCIFY_V4_BUNDLE"])
-        report, data = self.convert(root)
+        report, data = self.convert(root, chain=json.loads((root / "seed.json").read_text())["chainId"])
         bundle_report = json.loads((root / "report.json").read_text())
         self.assertEqual(report["rows"], bundle_report["entities"])
         self.assertEqual(report["entitiesByKind"], bundle_report["kinds"])

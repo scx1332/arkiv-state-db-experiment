@@ -69,7 +69,7 @@ def bundle(dir):
 
 
 def keys(args, rpc, seed, report):
-    chain, owner = seed["chainId"], bytes.fromhex(seed["owner"][2:])
+    chain, owner = args.chain_id, bytes.fromhex(args.owner[2:])
     total = report["entities"]
     lines = None
     if args.bundle_keys:
@@ -79,7 +79,7 @@ def keys(args, rpc, seed, report):
                     for line in f:
                         yield json.loads(line)["key"]
         lines = bundle_lines()
-    query = f"$owner = addr({seed['owner']})"
+    query = f"$owner = addr({args.owner})"
     cursor, nonce, started, last = None, 0, time.monotonic(), time.monotonic()
     while True:
         options = {"limit": hex(args.page), "atBlock": hex(args.block), "select": {"key": True, "attributes": False}}
@@ -113,7 +113,7 @@ def keys(args, rpc, seed, report):
 
 def counts(args, rpc, seed, report):
     out, prefix = {}, seed["schemaPrefix"]
-    owner_clause = f"$owner = addr({seed['owner']})"
+    owner_clause = f"$owner = addr({args.owner})"
     for kind in KINDS:
         n = rpc.call("arkiv_getEntityCount", [{"query": f"{owner_clause} AND arkiv.schema = str('{prefix}.{kind}')",
                                                 "block": args.block}])
@@ -136,14 +136,19 @@ def reads(args, rpc, seed, report):
     def one(i):
         line = expected[i]
         address = json.loads(line)["address"]
-        command = [str(args.processor), "read-arkiv", "--rpc-url", args.rpc, "--owner", seed["owner"],
-                   "--arkiv-chain-id", str(seed["chainId"]), "--format", "udc", "--schema-prefix", seed["schemaPrefix"],
+        command = [str(args.processor), "read-arkiv", "--rpc-url", args.rpc, "--owner", args.owner,
+                   "--arkiv-chain-id", str(args.chain_id), "--format", "udc", "--schema-prefix", seed["schemaPrefix"],
                    "--read-view", "pinned", "--block", str(args.block), address]
         for attempt in range(3):
             done = subprocess.run(command, capture_output=True)
             if done.returncode == 0:
                 break
-        stats = json.loads(done.stderr.decode().strip().splitlines()[-1]).get("readArkiv", {}) if done.returncode == 0 else {}
+        stats = {}
+        if done.returncode == 0:
+            try:
+                stats = json.loads(done.stderr.decode().strip().splitlines()[-1]).get("readArkiv", {})
+            except (ValueError, IndexError):
+                pass
         return i, address, done.returncode, done.stdout == line, done.stderr.decode()[-500:], stats
 
     failures, queries, entities = [], 0, 0
@@ -172,6 +177,8 @@ def main():
     p.add_argument("--rpc", required=True)
     p.add_argument("--bundle", type=Path, required=True, help="the v4 bundle the prefill came from")
     p.add_argument("--block", type=int, default=0)
+    p.add_argument("--chain-id", type=int, help="chain the prefill was converted for (default: the bundle's)")
+    p.add_argument("--owner", help="creator of the rows (default: the bundle's owner); with --chain-id, a re-keyed prefill")
     p.add_argument("--page", type=int, default=200)
     p.add_argument("--bundle-keys", action="store_true", help="keys: also read every bundle line's key")
     p.add_argument("--expected", type=Path, help="reads: NDJSON of hydrated contracts (bundle hydrate output)")
@@ -181,11 +188,15 @@ def main():
     p.add_argument("--concurrency", type=int, default=4)
     args = p.parse_args()
     seed, report = bundle(args.bundle)
+    args.chain_id = seed["chainId"] if args.chain_id is None else args.chain_id
+    args.owner = (seed["owner"] if args.owner is None else args.owner).lower()
+    if args.bundle_keys and (args.chain_id, args.owner) != (seed["chainId"], seed["owner"].lower()):
+        raise SystemExit("--bundle-keys compares with the bundle's own keys: not for a re-keyed prefill")
     rpc = Rpc(args.rpc)
     head = rpc.call("eth_getBlockByNumber", [hex(args.block), False])
     result = {"keys": keys, "counts": counts, "reads": reads}[args.check](args, rpc, seed, report)
-    result.update({"check": args.check, "block": args.block, "blockHash": head["hash"], "owner": seed["owner"],
-                   "chainId": seed["chainId"], "schemaPrefix": seed["schemaPrefix"]})
+    result.update({"check": args.check, "block": args.block, "blockHash": head["hash"], "owner": args.owner,
+                   "chainId": args.chain_id, "schemaPrefix": seed["schemaPrefix"]})
     print(json.dumps(result, sort_keys=True))
 
 

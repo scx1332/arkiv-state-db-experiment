@@ -7,7 +7,9 @@
 > [the genesis bundle contract](genesis-bundle-v1.md#versions-and-identity):
 > for example the payload as an unindexed `bytes` attribute and the content
 > type as a `str` attribute, each attribute with its indexed flag. The
-> description below is of the codec-2 converter.
+> description below is of the codec-2 converter. The processor's v4 (UDC)
+> bundles have no payload and convert line for line to codec 3 with
+> [`scripts/sourcify-v4-prefill.py`](sourcify-v4-prefill.md).
 
 `scripts/sourcify-prefill.py` converts a completed, checksummed Sourcify processor
 or supported helper export into the experimental v2 canonical entity stream. It preserves the

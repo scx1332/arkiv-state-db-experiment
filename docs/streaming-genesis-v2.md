@@ -8,8 +8,9 @@ zero. See [the bulk construction design](bulk-prefill.md).
 
 ## Build, verify and start
 
-First convert a completed processor bundle using the
-[Sourcify adapter](sourcify-prefill-converter.md). Preserve the original source.
+First convert a completed processor bundle: a v4 (UDC) bundle with
+[the v4 converter](sourcify-v4-prefill.md) (row codec 3); the older
+[Sourcify adapter](sourcify-prefill-converter.md) emits the refused codec 2. Preserve the original source.
 Create a base `genesis.bin` using the existing TOML genesis commands; its
 allocations must fund the selected rent sponsor, and its proposer must match the
 key used to start the producer. The streaming builder discards the base's old

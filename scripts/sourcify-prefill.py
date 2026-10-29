@@ -187,6 +187,7 @@ def manifest(root, chain_id, max_skipped):
         documents[name] = parse_json(raw)
         locks.append({"path": name, "bytes": len(raw), "sha256": digest})
     seed = documents["seed.json"]
+    require(seed.get("version") != 2, "seed.json version 2 is a v4 (UDC) bundle: convert it with scripts/sourcify-v4-prefill.py")
     require(set(seed) == {"version", "chainId", "entities"} and seed["version"] == 1, "unsupported seed schema/defaults")
     require(seed["chainId"] == chain_id, "destination chain ID differs from source seed")
     if audit_name == "report.json":

@@ -145,3 +145,29 @@ Results on 2026-10-29 (arkiv-state-db-experiment `2aff63b` node, processor `udc`
   the v3 hydration of the same records), 420 of 420 server responses
   (`crates/server --format udc`, 20 contracts × 21 queries) identical to the v3
   path, and the window paging walk in both directions in `matchid` order.
+
+Full scale on 2026-10-29: the mirror's daily v4 seed of that day
+(`seed-inputs/udc/sourcify-ethereum-20261029.tar.zst`, 8,287,602 contracts,
+15,695,623 entities, built for owner `0x73d4…fc72`), re-keyed to the alt node's
+dataset owner `0x68cf…5c56` on chain 7706815:
+
+- `convert` took 270 s with 12 workers (peak RSS 5.9 GB in the main process,
+  0.35 GB per worker): 15,695,623 rows, 31,722,670 references rewritten and
+  resolved, 556 chunk lists joined, 86,288,479,799 storage units, a
+  43,476,280,714-byte stream. The processor's `verify` of the seed agreed
+  (31,722,670 references).
+- `genesis stream-build` on a permanent-prefill base took 1 h 41 min (peak RSS
+  437 MB): version 4, burned 0, a 101 GB prebuilt state.
+- A producer started from it with `--prebuilt-state --genesis-install adopt`
+  (capped at 32 GiB and 8 CPUs) was ready in 28 min (4 stream audits of about
+  105 s, adopt verification 1,227 s) and restarted in 217 s; its process
+  memory peaked at 0.58 GB, its directory is 151 GB.
+- On that node: every count per kind; all 15,695,623 keys in creation order
+  equal to the salt-0 keys of the new owner (78,480 pages, 26 min);
+  `read-arkiv --format udc` of 3,000 random contracts byte-identical to
+  hydrating the original, un-re-keyed seed; 252 of 252 server responses
+  identical to the v3 path; ascending and cursor-started descending paging
+  walks exactly in `matchid` order. A descending walk from the very top
+  exceeds the read deadline: a two-sided `matchid` window far from the start
+  of creation order is driven by the `arkiv.schema` posting once its range run
+  passes 65,536 terms (see the planner rules in `snapshot-query-plan.md`).

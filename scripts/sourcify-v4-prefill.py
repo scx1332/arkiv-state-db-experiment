@@ -247,7 +247,7 @@ def parse_json(raw):
 def parse_value(raw, label):
     """A stored JSON value (contract data, compilation groups) that the reader parses."""
     try:
-        return json.loads(json_text(raw))
+        return json.loads(json_text(raw), parse_constant=no_constant)
     except (ValueError, RecursionError) as error:
         raise Invalid(f"{label} is not JSON: {error}") from error
 

@@ -190,6 +190,8 @@ def main():
     seed, report = bundle(args.bundle)
     args.chain_id = seed["chainId"] if args.chain_id is None else args.chain_id
     args.owner = (seed["owner"] if args.owner is None else args.owner).lower()
+    if not (len(args.owner) == 42 and args.owner.startswith("0x") and all(c in "0123456789abcdef" for c in args.owner[2:])):
+        raise SystemExit("--owner must be a 0x-prefixed 20-byte hex address")
     if args.bundle_keys and (args.chain_id, args.owner) != (seed["chainId"], seed["owner"].lower()):
         raise SystemExit("--bundle-keys compares with the bundle's own keys: not for a re-keyed prefill")
     rpc = Rpc(args.rpc)

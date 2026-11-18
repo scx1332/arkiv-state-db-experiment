@@ -14,6 +14,9 @@ It also runs an object-cache sweep and a reader/producer workload. It is
 built to start from `at` with nobody watching, so a failed run is logged and
 the runner moves on to the next one.
 
+It does not run a node. For the node under sustained load see the
+[node soak](node-soak.md).
+
 ## Launch
 
 ```sh

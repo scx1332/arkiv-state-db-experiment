@@ -1,0 +1,9 @@
+{
+  "name": "arkiv-node-soak",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@arkiv-network/sdk": "1.0.1",
+    "viem": "2.55.0"
+  }
+}

@@ -5,17 +5,20 @@
 //   bun load.ts write     write for DURATION_S seconds, one JSON line per WINDOW_S
 //   bun load.ts probe     time each read once over, print one JSON line
 //   bun load.ts readers   CONC callers reading for DURATION_S seconds, one line per WINDOW_S
+//   bun load.ts mutate    patch Sourcify contracts for DURATION_S seconds, one JSON line per WINDOW_S
 //
 // Env: RPC_URL, PRIVATE_KEY, PHASE (label copied into every line), and per mode:
 //   write    TAG, MIX (create|churn), BATCH (16), WAVE (8), LIFETIME_BLOCKS, RATE_EPS (0 = unthrottled)
 //   cohort   COHORT_TAG, COHORT (2000), COHORT_KEYS (file the keys are written to)
 //   probe    COHORT_TAG, COHORT, COHORT_KEYS, GROW_TAG (optional), READS (100), CONC (4)
 //   readers  COHORT_TAG, COHORT, COHORT_KEYS, CONC (4)
+//   mutate   SOURCIFY_KEYS (file of contract keys this account owns), SET (reverify|verifiedat), BATCH, WAVE
+// With SOURCIFY_KEYS set, probe and readers also time reads of the Sourcify dataset.
 // A reverted or lost transaction ends `write` with exit code 1 and the reason on stderr.
 import { createPublicClient, createWalletClient, ExpirationTime } from "@arkiv-network/sdk"
 import { localhost } from "@arkiv-network/sdk/chains"
 import { and, desc, eq, gte, lt } from "@arkiv-network/sdk/query"
-import { bytes, defineSchema, str, u64 } from "@arkiv-network/sdk/schema"
+import { bool, bytes, defineSchema, str, u64 } from "@arkiv-network/sdk/schema"
 import { defineChain, type Hex, http } from "viem"
 import { privateKeyToAccount } from "viem/accounts"
 
@@ -53,6 +56,18 @@ const Item = defineSchema({
   score: u64().indexed(),
   title: str().indexed(),
   body: bytes().optional(),
+})
+// The Sourcify contract attributes a re-verification rewrites that SDK 1.0.1 can type (it has no
+// bytes32): the node merges a patch's `set` into the entity, so the rest stay as they are.
+const Contract = defineSchema("sourcify.v4.contract", {
+  verifiedat: u64().indexed(),
+  match: str().indexed(),
+  matchid: u64().indexed(),
+  chainid: u64().indexed(),
+  language: str().indexed(),
+  evmversion: str().indexed(),
+  compilerversion: str().indexed(),
+  optimizer: bool().indexed(),
 })
 const body = new Uint8Array(256).fill(7)
 const item = (run: string, n: number) => ({
@@ -198,6 +213,136 @@ async function write(tag: string, opts: { seconds?: number; entities?: number; c
   return created
 }
 
+// ---------------------------------------------------------------- mutate --
+
+/**
+ * Patches Sourcify contracts the way a re-verification does. Each one is read first (as the sync
+ * reads before it patches), then `SET=reverify` rewrites `chainid`, `language`, `evmversion`,
+ * `compilerversion` and `optimizer` with their current values, flips `match` between `match` and
+ * `exact_match` and sets `verifiedat` to now. Nearly every contract shares its `chainid`,
+ * `language` and `match` values, so these touch posting lists of millions of entries.
+ * `SET=verifiedat` only sets `verifiedat`, the baseline. Read and transaction time are timed apart.
+ */
+async function mutate() {
+  const BATCH = num("BATCH", 16)
+  const WAVE = num("WAVE", 8)
+  const WINDOW_MS = num("WINDOW_S", 10) * 1000
+  const SET = process.env.SET ?? "reverify"
+  if (SET !== "reverify" && SET !== "verifiedat") throw new Error(`unknown SET ${SET}`)
+  const keys: Hex[] = JSON.parse(await Bun.file(env("SOURCIFY_KEYS")).text())
+  let next = num("OFFSET", 0) % keys.length
+  let nonce = await pub.getTransactionCount({ address: account.address, blockTag: "pending" })
+  let head = await pub.getBlockNumber()
+  const deadline = performance.now() + num("DURATION_S", 60) * 1000
+  let windowStart = performance.now()
+  let windowBlock = head
+  let lat: number[] = []
+  let readLat: number[] = []
+  let gas = 0n
+  let patches = 0
+  let txs = 0
+  let refused = 0
+  let moved = 0
+  const read = async (key: Hex) => {
+    for (;;) {
+      const t = performance.now()
+      try {
+        const e = await pub.getEntity(key)
+        readLat.push(performance.now() - t)
+        if (!e) throw new Error(`contract ${key} not found`)
+        return (e as unknown as { $attributes: Record<string, { value: unknown }> }).$attributes
+      } catch (error) {
+        if (!busy(error)) throw error
+        refused++
+        await sleep(5)
+      }
+    }
+  }
+  const flush = async () => {
+    const now = performance.now()
+    head = await pub.getBlockNumber()
+    const seconds = (now - windowStart) / 1000
+    emit({
+      seconds: +seconds.toFixed(2),
+      set: SET,
+      txs,
+      creates: 0,
+      patches,
+      deletes: 0,
+      extensions: 0,
+      entitiesPerSecond: 0,
+      opsPerSecond: +(patches / seconds).toFixed(1),
+      matchMoved: moved,
+      blocks: Number(head - windowBlock),
+      head: Number(head),
+      txMsP50: pct(lat, 50),
+      txMsP95: pct(lat, 95),
+      txMsMax: pct(lat, 100),
+      readMsP50: pct(readLat, 50),
+      readMsP95: pct(readLat, 95),
+      readsRefused: refused,
+      gas: gas.toString(),
+      createdTotal: 0,
+    })
+    windowStart = now
+    windowBlock = head
+    lat = []
+    readLat = []
+    gas = 0n
+    patches = txs = refused = moved = 0
+  }
+  while (performance.now() < deadline) {
+    const batches: Hex[][] = []
+    for (let w = 0; w < WAVE; w++) {
+      batches.push(Array.from({ length: BATCH }, () => keys[next++ % keys.length]!))
+    }
+    // Reads stay under the node's read concurrency (4): three at a time.
+    const current: Record<string, Record<string, { value: unknown }>> = {}
+    const flat = batches.flat()
+    let i = 0
+    await Promise.all(
+      Array.from({ length: 3 }, async () => {
+        while (i < flat.length) {
+          const key = flat[i++]!
+          current[key] = await read(key)
+        }
+      }),
+    )
+    const now = BigInt(Math.floor(Date.now() / 1000))
+    await Promise.all(
+      batches.map(async (batch) => {
+        const sentNonce = nonce++
+        const set = (key: Hex) => {
+          if (SET === "verifiedat") return { verifiedat: u64(now) }
+          const a = current[key]!
+          const was = String(a.match?.value)
+          moved++
+          return {
+            verifiedat: u64(now),
+            match: str(was === "match" ? "exact_match" : "match"),
+            chainid: u64(BigInt(a.chainid!.value as bigint | string)),
+            language: str(String(a.language!.value)),
+            evmversion: str(String(a.evmversion!.value)),
+            compilerversion: str(String(a.compilerversion!.value)),
+            optimizer: bool(Boolean(a.optimizer!.value)),
+          }
+        }
+        const t = performance.now()
+        const res = await send(
+          { patches: batch.map((key) => ({ schema: Contract, entityKey: key, set: set(key) })) },
+          sentNonce,
+        )
+        lat.push(performance.now() - t)
+        gas += res.gas
+        txs++
+        patches += batch.length
+      }),
+    )
+    if (performance.now() - windowStart >= WINDOW_MS) await flush()
+  }
+  if (txs > 0) await flush()
+}
+
 // ----------------------------------------------------------------- reads --
 
 const COHORT = num("COHORT", 2000)
@@ -249,6 +394,32 @@ if (process.env.GROW_TAG) {
   }
 }
 
+// Reads of the Sourcify dataset, when SOURCIFY_KEYS names contract keys it holds.
+let sourcifyKeys: Hex[] = []
+if (process.env.SOURCIFY_KEYS) {
+  reads["sourcify getEntity"] = {
+    rows: 1,
+    run: async (i) => ((await pub.getEntity(sourcifyKeys[(i * 7919) % sourcifyKeys.length]!)) ? 1 : 0),
+  }
+  reads["sourcify Vyper, limit 100"] = {
+    rows: null,
+    run: async () =>
+      (await pub.select("*").from(Contract).where(eq("language", str("Vyper"))).limit(100).fetch()).entities.length,
+  }
+  reads["sourcify matchid window, limit 100"] = {
+    rows: null,
+    run: async (i) => {
+      const lo = BigInt(1_000_000 + ((i * 7_919_993) % 58_000_000))
+      return (await pub.select("*").from(Contract).where(gte("matchid", u64(lo)), lt("matchid", u64(lo + 50_000n))).limit(100).fetch())
+        .entities.length
+    },
+  }
+  reads["sourcify count Vyper"] = {
+    rows: null,
+    run: async () => Number(await pub.count().from(Contract).where(eq("language", str("Vyper"))).fetch()),
+  }
+}
+
 /** Whether the node refused a read because `--read-concurrency` reads were already running. */
 const busy = (error: unknown): boolean => {
   const e = error as { message?: string; details?: string; code?: number; status?: number; cause?: unknown }
@@ -258,6 +429,7 @@ const busy = (error: unknown): boolean => {
 }
 
 async function loadCohort() {
+  if (process.env.SOURCIFY_KEYS) sourcifyKeys = JSON.parse(await Bun.file(process.env.SOURCIFY_KEYS).text())
   cohortKeys = JSON.parse(await Bun.file(env("COHORT_KEYS")).text())
   if (cohortKeys.length !== COHORT) throw new Error(`${env("COHORT_KEYS")} holds ${cohortKeys.length} keys, expected ${COHORT}`)
 }
@@ -268,7 +440,14 @@ async function probe() {
   await loadCohort()
   const out: Record<string, unknown> = {}
   for (const [name, read] of Object.entries(reads)) {
-    const rows = await read.run(0)
+    let rows: number
+    try {
+      rows = await read.run(0)
+    } catch (error) {
+      // One read the node refuses (a read budget, say) is a result, not the end of the probe.
+      out[name] = { error: String((error as Error)?.message ?? error).split("\n")[0]!.slice(0, 200) }
+      continue
+    }
     if (read.rows !== null && rows !== read.rows) throw new Error(`${name}: ${rows} rows, expected ${read.rows}`)
     const lat: number[] = []
     for (let i = 0; i < READS; i++) {
@@ -350,6 +529,7 @@ try {
   } else if (mode === "write") await write(env("TAG"), { seconds: num("DURATION_S", 60) })
   else if (mode === "probe") await probe()
   else if (mode === "readers") await readers()
+  else if (mode === "mutate") await mutate()
   else throw new Error(`unknown mode ${mode}`)
 } catch (error) {
   console.error(`${mode} failed: ${(error as Error)?.stack ?? error}`)

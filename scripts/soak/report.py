@@ -93,6 +93,35 @@ def main():
         rows,
     ))  # fmt: skip
 
+    # ---------------------------------------------------------- mutation --
+    mutating = [r for r in writes if r["phase"].startswith("mutate")]
+    if mutating:
+        out.append("## Patching dataset contracts\n")
+        out.append(
+            "Each patch first reads the contract. `verifiedat` sets one attribute with a unique value; "
+            "`reverify` also flips `match` and rewrites `chainid`, `language`, `evmversion`, "
+            "`compilerversion` and `optimizer`, whose values millions of contracts share.\n"
+        )
+        rows = []
+        for phase in dict.fromkeys(r["phase"] for r in mutating):
+            windows = [r for r in mutating if r["phase"] == phase]
+            seconds = sum(r["seconds"] for r in windows)
+            patches = sum(r["patches"] for r in windows)
+            median = lambda key: statistics.median([r[key] for r in windows if r.get(key) is not None] or [0])
+            rows.append([
+                phase, fmt(seconds / 60), f"{patches:,}", fmt(patches / seconds) if seconds else None,
+                fmt(median("txMsP50"), 0), fmt(median("txMsP95"), 0),
+                fmt(max(r["txMsP95"] for r in windows if r["txMsP95"] is not None), 0),
+                fmt(median("readMsP50")), fmt(median("readMsP95")),
+                f"{sum(r.get('readsRefused', 0) for r in windows):,}",
+                fmt(sum(int(r["gas"]) for r in windows) / patches, 0) if patches else None,
+            ])  # fmt: skip
+        out.append(table(
+            ["Phase", "Minutes", "Patches", "Patches/s", "Tx p50 ms", "Tx p95 ms", "Tx p95 ms (worst)",
+             "Read p50 ms", "Read p95 ms", "Reads refused", "Gas/patch"],
+            rows,
+        ))  # fmt: skip
+
     # --------------------------------------------------------- over time --
     out.append("## Over time\n")
     out.append(

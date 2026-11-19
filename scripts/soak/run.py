@@ -3,10 +3,19 @@
 
     scripts/soak/run.py --work DIR [--quick] [--growth-min 60] [--churn-min 40]
         [--readers-min 15] [--block-ms 250] [--port 18700] [--drop-caches]
+        [--bundle DIR --prebuilt-state DIR --sourcify-keys FILE --mutate-min 60]
+
+By default the node starts from an empty genesis. With --bundle it starts from
+a built genesis bundle instead (the Sourcify prefill, say), installing
+--prebuilt-state on the first start, and --sourcify-keys names contract keys
+of that dataset, owned by the soak account, for the mutate phases and probes.
 
 Phases, each writing JSON lines under DIR (see docs/benchmarking.md):
 
   cohort   2,000 entities every read probe is aimed at, so probes stay comparable
+  mutate   (with --sourcify-keys) patch dataset contracts: a third of the time
+           only `verifiedat`, then as a re-verification does, rewriting
+           attributes whose values millions of contracts share
   growth   creates at the block cap with a long lifetime; state only grows
   churn    creates, patches, deletes and extensions with a 10-minute lifetime,
            so the expiry sweep deletes as fast as the workload creates
@@ -84,6 +93,8 @@ class Soak:
         self.done = threading.Event()
         self.probing = threading.Event()
         self.restart = {}
+        self.bundle = Path(args.bundle).resolve() if args.bundle else self.work / "bundle"
+        self.prebuilt = Path(args.prebuilt_state).resolve() if args.prebuilt_state else None
         self.env = dict(
             os.environ,
             RPC_URL=self.url,
@@ -93,6 +104,8 @@ class Soak:
             COHORT_KEYS=str(self.work / "cohort-keys.json"),
             GROW_TAG="growth",
         )
+        if args.sourcify_keys:
+            self.env["SOURCIFY_KEYS"] = str(Path(args.sourcify_keys).resolve())
 
     # ------------------------------------------------------------ records --
 
@@ -132,7 +145,9 @@ class Soak:
                 "load1": os.getloadavg()[0],
             },
             "blockMs": a.block_ms,
-            "minutes": {"growth": a.growth_min, "churn": a.churn_min, "readers": a.readers_min},
+            "minutes": {"mutate": a.mutate_min, "growth": a.growth_min, "churn": a.churn_min, "readers": a.readers_min},
+            "start": {"bundle": str(self.bundle), "prebuiltState": a.prebuilt_state, "sourcifyKeys": a.sourcify_keys}
+            if a.bundle else "empty genesis",
             "workload": {
                 "sdk": json.loads((HERE / "package.json").read_text())["dependencies"],
                 "batch": 16,
@@ -171,15 +186,21 @@ class Soak:
             str(self.binary), "producer",
             "--run-dir", str(self.work / "producer"),
             "--key-file", str(self.work / "proposer.key"),
-            "--bundle", str(self.work / "bundle"),
+            "--bundle", str(self.bundle),
             "--listen", f"127.0.0.1:{port}",
             "--private-listen", f"127.0.0.1:{port + 1}",
             "--metrics-listen", f"127.0.0.1:{port + 2}",
             "--metrics-interval-secs", "60",
             "--start", "running",
-        ]  # fmt: skip
+        ] + (["--prebuilt-state", str(self.prebuilt), "--genesis-install", "adopt"] if self.prebuilt else [])  # fmt: skip
 
     def genesis(self):
+        if self.args.bundle:
+            # A built bundle: only the proposer key, the fixture key every bundle here is made for.
+            key = self.work / "proposer.key"
+            key.write_text("0x" + "01" * 32)
+            key.chmod(0o600)
+            return
         spec = importlib.util.spec_from_file_location("fixture", ROOT / "scripts/genesis-bundle-smoke.py")
         fixture = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(fixture)
@@ -219,6 +240,8 @@ class Soak:
     def start_node(self):
         log = (self.work / "producer.log").open("a")
         self.node = subprocess.Popen(self.node_flags(), env=self.env, stdout=log, stderr=log)
+        # The first start consumes the prebuilt state (it is moved into the run directory).
+        self.prebuilt = None
         started = time.monotonic()
         while time.monotonic() - started < self.args.ready_min * 60:
             if self.node.poll() is not None:
@@ -334,6 +357,13 @@ class Soak:
         self.enter("cohort")
         self.load("cohort", "writes.jsonl", lifetime_blocks=self.growth_lifetime)
 
+        if a.sourcify_keys and a.mutate_min > 0:
+            self.probing.set()
+            self.enter("mutate-verifiedat")
+            self.load("mutate", "writes.jsonl", set="verifiedat", duration_s=minutes(a.mutate_min / 3))
+            self.enter("mutate-reverify")
+            self.load("mutate", "writes.jsonl", set="reverify", duration_s=minutes(2 * a.mutate_min / 3), offset=100_000)
+
         self.enter("growth")
         self.probing.set()
         self.load("write", "writes.jsonl", tag="growth", mix="create", duration_s=minutes(a.growth_min),
@@ -379,13 +409,17 @@ def main():
     parser.add_argument("--churn-min", type=float, default=40)
     parser.add_argument("--readers-min", type=float, default=15)
     parser.add_argument("--ready-min", type=float, default=60, help="how long a (re)start may take")
+    parser.add_argument("--bundle", help="start from this built genesis bundle instead of an empty genesis")
+    parser.add_argument("--prebuilt-state", help="the bundle's prebuilt state (stream-build --state-out), installed on the first start")
+    parser.add_argument("--sourcify-keys", help="JSON list of dataset contract keys the soak account owns")
+    parser.add_argument("--mutate-min", type=float, default=60, help="minutes of patching dataset contracts (with --sourcify-keys)")
     parser.add_argument("--block-ms", type=int, default=250)
     parser.add_argument("--port", type=int, default=18700, help="RPC port; the next two are also used")
     parser.add_argument("--min-free-gb", type=int, default=100)
     parser.add_argument("--drop-caches", action="store_true", help="drop the page cache before the restart (needs sudo)")
     args = parser.parse_args()
     if args.quick:
-        args.growth_min, args.churn_min, args.readers_min = 1, 1, 0.5
+        args.growth_min, args.churn_min, args.readers_min, args.mutate_min = 1, 1, 0.5, 1.5
 
     soak = Soak(args)
     if not soak.binary.is_file() or not (HERE / "node_modules").is_dir() or not shutil.which("bun"):

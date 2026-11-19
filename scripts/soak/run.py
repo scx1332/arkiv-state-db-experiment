@@ -220,7 +220,7 @@ class Soak:
         log = (self.work / "producer.log").open("a")
         self.node = subprocess.Popen(self.node_flags(), env=self.env, stdout=log, stderr=log)
         started = time.monotonic()
-        while time.monotonic() - started < 600:
+        while time.monotonic() - started < self.args.ready_min * 60:
             if self.node.poll() is not None:
                 raise Stop(f"the node exited with {self.node.returncode} while starting")
             try:
@@ -229,7 +229,7 @@ class Soak:
             except (OSError, ValueError, KeyError):
                 pass
             time.sleep(0.05)
-        raise Stop("the node was not ready within 10 minutes")
+        raise Stop(f"the node was not ready within {self.args.ready_min:g} minutes")
 
     def stop_node(self):
         if self.node and self.node.poll() is None:
@@ -378,6 +378,7 @@ def main():
     parser.add_argument("--growth-min", type=float, default=60)
     parser.add_argument("--churn-min", type=float, default=40)
     parser.add_argument("--readers-min", type=float, default=15)
+    parser.add_argument("--ready-min", type=float, default=60, help="how long a (re)start may take")
     parser.add_argument("--block-ms", type=int, default=250)
     parser.add_argument("--port", type=int, default=18700, help="RPC port; the next two are also used")
     parser.add_argument("--min-free-gb", type=int, default=100)

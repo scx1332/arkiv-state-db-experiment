@@ -39,8 +39,11 @@ two target the set the growth phase is writing.
 ## Stop rules
 
 The run ends, keeping the node directory and every record, when a
-transaction reverts or is lost, the node exits, or free disk falls below
-`--min-free-gb` (100). Nothing is retried. A failed read probe is recorded
+transaction reverts or is lost, the node exits, free disk falls below
+`--min-free-gb` (100), or a start or restart takes longer than
+`--ready-min` (60; a restart rebuilds the JSON-RPC index from every block,
+see the [2026-11-19 run](benchmarks/2026-11-19-node-soak.md)). Nothing is
+retried. A failed read probe is recorded
 in `probe-failures.jsonl` and does not stop the run.
 
 ## Results directory

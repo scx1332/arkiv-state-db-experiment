@@ -43,3 +43,17 @@ form `<area>.<feature>`, for example `queries.cursor-paging`.
 `board/meta` holds the board's title, description, the two columns
 (`subjects`: `id`, `name`, `detail`) and the area order. The status keys
 `ours` and `arkiv` must match the subject ids.
+
+## The static report on rogue-one.eu
+
+`scripts/board-report.py` renders the board's rows as one HTML page with no
+scripts. It is served unlisted from this host's nginx at
+`https://rogue-one.eu/u/<token>/features/`. The token is in
+`~/scx1332/.unlisted-token` on the host, never in the repository. Everything
+else on the domain returns 404, and every response carries
+`X-Robots-Tag: noindex`. To refresh it, export the board with `ArtifactData`
+(`list` of `features` and `get` of `board/meta`, both with `out_dir`), then:
+
+```sh
+python3 -I scripts/board-report.py EXPORT_DIR /var/www/rogue-one/u/$(cat ~/scx1332/.unlisted-token)/features/index.html
+```

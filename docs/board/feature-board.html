@@ -1,0 +1,373 @@
+<title>Node Parity Board</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a ledger. Summary of each node on top, then one row per feature,
+   grouped by area, with the two nodes side by side; rows become cards on phones. */
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --ink: #161b26;
+  --muted: #5b6475;
+  --rule: #dde1e8;
+  --accent: #2d4fc4;
+  --accent-soft: #e6ebfa;
+  --done: #1f7a4d;      --done-bg: #e2f3ea;
+  --partial: #9a6300;   --partial-bg: #fbefd7;
+  --progress: #2d4fc4;  --progress-bg: #e6ebfa;
+  --planned: #6a4fb3;   --planned-bg: #eee9fa;
+  --missing: #b3261e;   --missing-bg: #fbe4e2;
+  --na: #6b7280;        --na-bg: #eceef1;
+  --unknown: #8a8f99;   --unknown-bg: #f0f1f3;
+  --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --body: "Instrument Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f131b; --surface: #171c27; --ink: #e7eaf0; --muted: #9aa3b5; --rule: #2a3142;
+    --accent: #8ea7ff; --accent-soft: #1e2a4d;
+    --done: #6fd29c; --done-bg: #143426; --partial: #f0b85a; --partial-bg: #3a2c12;
+    --progress: #8ea7ff; --progress-bg: #1e2a4d; --planned: #b9a3f5; --planned-bg: #2b2346;
+    --missing: #ff8f86; --missing-bg: #3e1a18; --na: #9aa3b5; --na-bg: #232a38;
+    --unknown: #8a93a5; --unknown-bg: #1f2533;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f131b; --surface: #171c27; --ink: #e7eaf0; --muted: #9aa3b5; --rule: #2a3142;
+  --accent: #8ea7ff; --accent-soft: #1e2a4d;
+  --done: #6fd29c; --done-bg: #143426; --partial: #f0b85a; --partial-bg: #3a2c12;
+  --progress: #8ea7ff; --progress-bg: #1e2a4d; --planned: #b9a3f5; --planned-bg: #2b2346;
+  --missing: #ff8f86; --missing-bg: #3e1a18; --na: #9aa3b5; --na-bg: #232a38;
+  --unknown: #8a93a5; --unknown-bg: #1f2533;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--body); font-size: 15px; line-height: 1.5; }
+.wrap {
+  max-width: 1180px; margin: 0 auto;
+  padding-block: 28px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 24px;
+}
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(1.6rem, 3vw, 2.1rem); font-weight: 700; letter-spacing: -0.01em; }
+.eyebrow { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.lede { color: var(--muted); max-width: 68ch; margin: 6px 0 0; }
+header { display: grid; gap: 6px; }
+.meta-line { font-family: var(--mono); font-size: 0.78rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.note { font-size: 0.85rem; color: var(--partial); }
+
+/* Summary */
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.subject { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 18px; display: grid; gap: 12px; min-width: 0; }
+.subject-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.subject h2 { font-size: 1.15rem; font-weight: 600; }
+.subject .detail { font-family: var(--mono); font-size: 0.75rem; color: var(--muted); overflow-wrap: anywhere; }
+.pct { font-family: var(--display); font-size: 2rem; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
+.pct small { font-size: 0.9rem; color: var(--muted); font-weight: 500; margin-left: 4px; }
+.bar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--unknown-bg); }
+.bar span { display: block; height: 100%; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.8rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: 0; }
+.diff { background: var(--accent-soft); color: var(--ink); border-radius: 10px; padding: 18px; display: grid; gap: 6px; align-content: start; }
+.diff .pct { color: var(--accent); }
+
+/* Controls */
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.controls input[type="search"] {
+  font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--rule);
+  border-radius: 8px; padding: 8px 12px; min-width: 0; flex: 1 1 220px; max-width: 360px;
+}
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  font: inherit; font-size: 0.85rem; border: 1px solid var(--rule); background: var(--surface); color: var(--ink);
+  border-radius: 999px; padding: 5px 12px; cursor: pointer;
+}
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 0.88rem; color: var(--muted); cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Ledger */
+.ledger { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; }
+.cols, .row { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1fr); }
+.cols { background: var(--bg); border-bottom: 1px solid var(--rule); }
+.cols div { padding: 10px 16px; font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.area { padding: 14px 16px 8px; border-top: 1px solid var(--rule); display: flex; align-items: baseline; gap: 10px; }
+.area:first-of-type { border-top: 0; }
+.area h3 { font-size: 0.95rem; font-weight: 600; }
+.area span { font-family: var(--mono); font-size: 0.75rem; color: var(--muted); }
+.row { border-top: 1px solid var(--rule); }
+.row > div { padding: 12px 16px; min-width: 0; }
+.feature-name { font-weight: 600; }
+.feature-summary { color: var(--muted); font-size: 0.88rem; margin-top: 2px; }
+.ref { font-family: var(--mono); font-size: 0.72rem; color: var(--muted); margin-top: 6px; }
+.cell { display: grid; gap: 6px; align-content: start; }
+.cell .who { display: none; font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.pill { justify-self: start; font-size: 0.78rem; font-weight: 600; border-radius: 999px; padding: 2px 10px; white-space: nowrap; }
+.s-done { color: var(--done); background: var(--done-bg); }
+.s-partial { color: var(--partial); background: var(--partial-bg); }
+.s-in-progress { color: var(--progress); background: var(--progress-bg); }
+.s-planned { color: var(--planned); background: var(--planned-bg); }
+.s-missing { color: var(--missing); background: var(--missing-bg); }
+.s-na { color: var(--na); background: var(--na-bg); }
+.s-unknown { color: var(--unknown); background: var(--unknown-bg); }
+.cell p { margin: 0; font-size: 0.88rem; overflow-wrap: anywhere; }
+.evidence { font-family: var(--mono); font-size: 0.72rem; color: var(--muted); overflow-wrap: anywhere; }
+.evidence a { color: var(--accent); }
+.checked { font-family: var(--mono); font-size: 0.7rem; color: var(--muted); }
+.row.differs > div:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+
+.empty { padding: 40px 20px; text-align: center; color: var(--muted); display: grid; gap: 8px; justify-items: center; }
+.empty strong { color: var(--ink); font-family: var(--display); font-size: 1.1rem; }
+
+details.format { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 18px; }
+details.format summary { cursor: pointer; font-weight: 600; }
+details.format p { color: var(--muted); max-width: 72ch; }
+pre { font-family: var(--mono); font-size: 0.78rem; background: var(--bg); border: 1px solid var(--rule); border-radius: 8px; padding: 12px; overflow-x: auto; margin: 8px 0 0; }
+
+@media (max-width: 760px) {
+  .cols { display: none; }
+  .row { grid-template-columns: minmax(0, 1fr); }
+  .row > div { padding: 10px 16px; }
+  .row > div:first-child { padding-bottom: 2px; }
+  .cell .who { display: block; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .bar span { transition: width 300ms ease; }
+}
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Feature parity</div>
+    <h1 id="title">Node Parity Board</h1>
+    <p class="lede" id="lede">What each node implements, feature by feature. Agents write the rows; this page only shows them.</p>
+    <div class="meta-line"><span id="count">Loading…</span><span id="updated"></span></div>
+    <div class="note" id="note" hidden></div>
+  </header>
+
+  <section class="summary" id="summary" aria-label="Completion by node"></section>
+
+  <section class="controls" aria-label="Filters">
+    <input type="search" id="q" placeholder="Search features, notes, evidence" aria-label="Search">
+    <div class="chips" id="areas" role="group" aria-label="Area"></div>
+    <label class="toggle" for="diffOnly"><input type="checkbox" id="diffOnly"> Only where the nodes differ</label>
+  </section>
+
+  <section class="ledger" id="ledger" aria-label="Features">
+    <div class="empty" id="empty">
+      <strong>No features yet</strong>
+      <span>Rows appear here as agents add them to the board's data. The format is below.</span>
+    </div>
+  </section>
+
+  <details class="format">
+    <summary>Data format for agents</summary>
+    <p>One document per feature in the collection <code>features</code>, with an id such as <code>queries.cursor-paging</code>. State is one of <code>done</code>, <code>partial</code>, <code>in-progress</code>, <code>planned</code>, <code>missing</code>, <code>na</code> or <code>unknown</code>. Completion counts <code>done</code> as 1 and <code>partial</code> or <code>in-progress</code> as half; <code>na</code> rows are left out. Column names come from <code>board/meta</code>.</p>
+<pre>features/queries.cursor-paging
+{
+  "area": "Queries",
+  "name": "Cursor paging",
+  "summary": "Continue a query from an opaque cursor",
+  "reference": "Litepaper p9",
+  "order": 40,
+  "status": {
+    "ours":  { "state": "done", "note": "…", "evidence": "crates/…/rpc_reads/mod.rs:554", "checkedAt": "2026-11-19", "checkedBy": "agent-name" },
+    "arkiv": { "state": "partial", "note": "…", "evidence": "…", "checkedAt": "2026-11-19", "checkedBy": "agent-name" }
+  },
+  "updatedAt": "2026-11-19T12:00:00Z"
+}
+
+board/meta
+{
+  "title": "Node Parity Board",
+  "subjects": [
+    { "id": "ours",  "name": "Our node",   "detail": "arkiv-state-db-experiment" },
+    { "id": "arkiv", "name": "Arkiv node", "detail": "Arkiv-Network/arkiv" }
+  ],
+  "areas": ["Entities", "Queries", "…"]
+}</pre>
+  </details>
+</div>
+
+<script>
+(() => {
+  const STATES = [
+    ["done", "Done"], ["partial", "Partial"], ["in-progress", "In progress"],
+    ["planned", "Planned"], ["missing", "Missing"], ["na", "Not applicable"], ["unknown", "Unknown"],
+  ];
+  const LABEL = Object.fromEntries(STATES);
+  const WEIGHT = { done: 1, partial: 0.5, "in-progress": 0.5, planned: 0, missing: 0, unknown: 0 };
+  const COLOR = { done: "var(--done)", partial: "var(--partial)", "in-progress": "var(--progress)",
+    planned: "var(--planned)", missing: "var(--missing)", na: "var(--na)", unknown: "var(--unknown-bg)" };
+  const DEFAULT_SUBJECTS = [
+    { id: "ours", name: "Our node", detail: "arkiv-state-db-experiment" },
+    { id: "arkiv", name: "Arkiv node", detail: "Arkiv-Network/arkiv" },
+  ];
+
+  let meta = {}, features = [], area = "All", loaded = false;
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const str = (v) => (typeof v === "string" ? v : v == null ? "" : String(v));
+  const stateOf = (f, id) => { const s = str(f.status?.[id]?.state).toLowerCase(); return LABEL[s] ? s : "unknown"; };
+  const subjects = () => (Array.isArray(meta.subjects) && meta.subjects.length ? meta.subjects : DEFAULT_SUBJECTS)
+    .filter((s) => s && typeof s.id === "string").slice(0, 4);
+
+  function when(v) {
+    const d = new Date(str(v));
+    return isNaN(d) ? str(v) : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  }
+
+  function renderSummary() {
+    const box = $("summary"); box.replaceChildren();
+    const subs = subjects();
+    for (const s of subs) {
+      const counts = Object.fromEntries(STATES.map(([k]) => [k, 0]));
+      for (const f of features) counts[stateOf(f, s.id)]++;
+      const scored = features.length - counts.na;
+      const score = features.reduce((a, f) => a + (WEIGHT[stateOf(f, s.id)] ?? 0), 0);
+      const card = el("article", "subject");
+      const head = el("div", "subject-head");
+      const left = el("div"); left.append(el("h2", null, str(s.name) || s.id), el("div", "detail", str(s.detail)));
+      const pct = el("div", "pct", scored ? Math.round((100 * score) / scored) + "%" : "–");
+      pct.append(el("small", null, "complete"));
+      head.append(left, pct);
+      const bar = el("div", "bar"); bar.setAttribute("role", "img");
+      bar.setAttribute("aria-label", STATES.map(([k, l]) => `${l}: ${counts[k]}`).join(", "));
+      const legend = el("div", "legend");
+      for (const [k, l] of STATES) {
+        if (!counts[k]) continue;
+        const seg = el("span"); seg.style.width = (100 * counts[k]) / Math.max(1, features.length) + "%"; seg.style.background = COLOR[k];
+        bar.append(seg);
+        const item = el("span"); const sw = el("i"); sw.style.background = COLOR[k]; item.append(sw, `${l} ${counts[k]}`);
+        legend.append(item);
+      }
+      card.append(head, bar, legend);
+      box.append(card);
+    }
+    if (subs.length >= 2) {
+      const n = features.filter(differs).length;
+      const d = el("article", "diff");
+      d.append(el("div", "eyebrow", "Where they differ"));
+      const pct = el("div", "pct", String(n)); pct.append(el("small", null, `of ${features.length} features`));
+      d.append(pct, el("div", "legend", `Rows where ${str(subs[0].name)} and ${str(subs[1].name)} have different states are marked at the left edge.`));
+      box.append(d);
+    }
+  }
+
+  function differs(f) {
+    const subs = subjects();
+    return subs.length >= 2 && new Set(subs.map((s) => stateOf(f, s.id))).size > 1;
+  }
+
+  function renderAreas() {
+    const box = $("areas"); box.replaceChildren();
+    const order = Array.isArray(meta.areas) ? meta.areas.map(str) : [];
+    const found = [...new Set(features.map((f) => str(f.area) || "Other"))];
+    const list = ["All", ...order.filter((a) => found.includes(a)), ...found.filter((a) => !order.includes(a)).sort()];
+    if (!list.includes(area)) area = "All";
+    for (const a of list) {
+      const b = el("button", "chip", a); b.type = "button"; b.setAttribute("aria-pressed", String(a === area));
+      b.addEventListener("click", () => { area = a; renderAreas(); renderLedger(); });
+      box.append(b);
+    }
+  }
+
+  function evidence(text) {
+    const box = el("div", "evidence");
+    const t = str(text);
+    if (/^https:\/\//.test(t)) { const a = el("a", null, t); a.href = t; a.target = "_blank"; a.rel = "noopener"; box.append(a); }
+    else box.textContent = t;
+    return box;
+  }
+
+  function renderLedger() {
+    const box = $("ledger"); const empty = $("empty");
+    box.replaceChildren(empty);
+    const q = $("q").value.trim().toLowerCase();
+    const diffOnly = $("diffOnly").checked;
+    const subs = subjects();
+    let shown = features.filter((f) => (area === "All" || (str(f.area) || "Other") === area)
+      && (!diffOnly || differs(f))
+      && (!q || JSON.stringify([f.name, f.summary, f.area, f.reference, f.status]).toLowerCase().includes(q)));
+    empty.hidden = shown.length > 0;
+    if (!shown.length) {
+      empty.querySelector("strong").textContent = !loaded ? "Loading the board…" : features.length ? "No features match" : "No features yet";
+      empty.querySelector("span").textContent = features.length ? "Clear the search or pick another area." : "Rows appear here as agents add them to the board's data. The format is below.";
+      return;
+    }
+    const cols = el("div", "cols"); cols.append(el("div", null, "Feature"));
+    for (const s of subs.slice(0, 2)) cols.append(el("div", null, str(s.name) || s.id));
+    box.append(cols);
+    const order = Array.isArray(meta.areas) ? meta.areas.map(str) : [];
+    const rank = (a) => { const i = order.indexOf(a); return i < 0 ? order.length : i; };
+    shown = shown.slice().sort((x, y) => {
+      const ax = str(x.area) || "Other", ay = str(y.area) || "Other";
+      return rank(ax) - rank(ay) || ax.localeCompare(ay) || (Number(x.order) || 0) - (Number(y.order) || 0) || str(x.name).localeCompare(str(y.name));
+    });
+    let current = null;
+    for (const f of shown) {
+      const a = str(f.area) || "Other";
+      if (a !== current) {
+        current = a;
+        const h = el("div", "area"); h.append(el("h3", null, a), el("span", null, `${shown.filter((g) => (str(g.area) || "Other") === a).length}`));
+        box.append(h);
+      }
+      const row = el("div", "row" + (differs(f) ? " differs" : ""));
+      const name = el("div");
+      name.append(el("div", "feature-name", str(f.name) || f.id));
+      if (f.summary) name.append(el("div", "feature-summary", str(f.summary)));
+      if (f.reference) name.append(el("div", "ref", str(f.reference)));
+      row.append(name);
+      for (const s of subs.slice(0, 2)) {
+        const st = f.status?.[s.id] || {};
+        const k = stateOf(f, s.id);
+        const cell = el("div", "cell");
+        cell.append(el("div", "who", str(s.name) || s.id), el("span", "pill s-" + k, LABEL[k]));
+        if (st.note) cell.append(el("p", null, str(st.note)));
+        if (st.evidence) cell.append(evidence(st.evidence));
+        const by = [st.checkedBy, st.checkedAt].map(str).filter(Boolean).join(" · ");
+        if (by) cell.append(el("div", "checked", "Checked " + by));
+        row.append(cell);
+      }
+      box.append(row);
+    }
+  }
+
+  function render() {
+    if (meta.title) { $("title").textContent = str(meta.title); }
+    if (meta.description) { $("lede").textContent = str(meta.description); }
+    $("count").textContent = loaded ? `${features.length} feature${features.length === 1 ? "" : "s"}` : "Loading…";
+    const latest = features.map((f) => str(f.updatedAt)).filter(Boolean).sort().pop();
+    $("updated").textContent = latest ? "Last change " + when(latest) : "";
+    renderSummary(); renderAreas(); renderLedger();
+  }
+
+  $("q").addEventListener("input", renderLedger);
+  $("diffOnly").addEventListener("change", renderLedger);
+  render();
+
+  function showNote(text) { const n = $("note"); n.textContent = text; n.hidden = !text; }
+
+  (async () => {
+    const db = await window.claude?.use?.("db");
+    if (!db) { loaded = true; showNote("The board's data is not available in this view."); render(); return; }
+    let timer = setTimeout(() => showNote("The board's data can't be reached yet. What is shown may be out of date."), 10000);
+    const settle = (snap) => { if (!snap.metadata.fromCache) { clearTimeout(timer); showNote(""); } };
+    db.doc("board/meta").onSnapshot((snap) => { meta = snap.exists ? snap.data() : {}; render(); },
+      () => {});
+    db.collection("features").onSnapshot((snap) => {
+      features = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      loaded = true; settle(snap); render();
+    }, (e) => {
+      clearTimeout(timer); loaded = true;
+      showNote(e.code === "revoked" ? "" : "The board's data could not be loaded.");
+      render();
+    });
+  })();
+})();
+</script>

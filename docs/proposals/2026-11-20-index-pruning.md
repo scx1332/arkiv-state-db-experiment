@@ -20,6 +20,11 @@ client needs to finish reading a result: 256 blocks is 64 s at 250 ms
 blocks. Older history is not kept for its own sake. Rollback, if it is
 added, also needs states inside the window, but it does not set `N`.
 
+**Decision (2026-11-20): bounded disk comes before commit time.** Longer
+commits are acceptable; a state file that grows without bound is not. Where
+this proposal trades the two, it takes the slower commit that keeps the
+file bounded.
+
 **Decision (2026-11-20): everything older than the window disappears.** The
 chain is optimised for throughput, not for recovering history. Receipts,
 logs, blocks and transaction lookups expire with the state they are rebuilt
@@ -325,22 +330,27 @@ Sourcify run. These are estimates, to be measured in count-only mode first
   retained), in separate transactions committed with `Durability::None`
   and made durable by the next block commit. redb keeps the freed pages of
   non-durable commits apart (`redb-4.3.0/src/transactions.rs:2266-2285`).
-  How soon those pages can be reused is **not verified**. Use this only if
-  in-commit GC costs too much on large states.
+  How soon those pages can be reused is **not verified**. Commit time is not
+  a reason to use it (see the decision above); only a correctness or
+  recovery problem with in-commit GC would be.
 
 **Bounded work per block.** There are two budgets, both node options, not
 consensus:
 
 - `release_budget`: decoded nodes in the release cascade, for example
-  4 × the block's staged objects plus 4,096.
+  4 × the block's staged objects plus 4,096. Because disk comes first, the
+  budget is a floor, not a cap: when the backlog is above one block's worth,
+  a commit releases more than the budget until the backlog shrinks, even if
+  the commit takes longer.
 - `delete_budget`: queue entries deleted, for example 2 × the block's
   deaths plus 4,096.
 
 Leftover work stays queued. Empty blocks drain the backlog. Expiry bursts
 (up to `expiry_per_block` entity deletions per block,
 [expiry spill](expiry-spill.md)) and namespace deletions are smoothed the
-same way. The backlog is exported as a metric. A backlog that keeps growing
-means the budget is too small, not that the result is wrong.
+same way. The backlog is exported as a metric. Because the budget rises with
+the backlog, the backlog cannot keep growing; the cost shows up as longer
+commits instead.
 
 **Crash safety.**
 
@@ -653,10 +663,9 @@ block, mostly feed JSON) should move to `history.redb` or shrink. Then
 - **Query pagination.** The window is what makes paging consistent, so 64 s
   is the time a client has to read a result. If that proves too short for
   large results, raise `N` rather than add per-cursor pins or leases.
-- **Commit cost** on states larger than RAM. Commit time is already up to
-  208 ms against 250 ms blocks. If count-only mode adds more than about
-  20%, use the trailing collector, or fold counts into object values
-  (layout ii).
+- **Commit cost** on states larger than RAM. Accepted: longer commits are
+  fine as long as the file stays bounded. Measure it so block time and
+  throughput can be set from it, not to choose a cheaper design.
 - **Size of `gc_shared`.** One-member posting roots may make sharing common
   on Sourcify-like data. If the table nears the size of the object table,
   layout (iii) loses its advantage over (i).

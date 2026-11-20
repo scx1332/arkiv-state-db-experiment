@@ -321,3 +321,80 @@ fn wrong_counts_suspend_collection_and_a_rebuild_restores_it() {
     )
     .unwrap();
 }
+
+/// An archive file copy-migrated to a window keeps every record, only the
+/// objects of the retained snapshots, refuses older ones and then prunes
+/// as any collecting file does.
+#[test]
+fn copy_migration_keeps_the_window_and_drops_older_history() {
+    let dir = std::env::temp_dir().join(format!("gc-migrate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("node.redb");
+    let target = dir.join("copy.redb");
+    let archive_objects = {
+        let store: Arc<RedbStore> = Arc::new(RedbStore::create(&source, config()).unwrap());
+        let mut engine = initialize(store.clone(), 0);
+        for n in 0..30 {
+            step(&mut engine, n);
+        }
+        store
+            .stats()
+            .spaces
+            .values()
+            .map(|s| s.objects_written)
+            .sum::<u64>()
+    };
+    let retained = {
+        let store = RedbStore::open(&source, config()).unwrap();
+        gc::retained(&store, 3).unwrap()
+    };
+    assert_eq!((retained.head, retained.floor), (30, 27));
+    let report = arkiv_db_redb::copy_reachable(
+        &source,
+        &target,
+        &retained.snapshots,
+        &EngineGraph,
+        &retained.floor_record.iter().cloned().collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert!(
+        report.objects > 0 && report.objects < archive_objects,
+        "{report:?}"
+    );
+    let store = Arc::new(RedbStore::open(&target, config()).unwrap());
+    let state = gc::enable(store.as_ref(), None).unwrap();
+    assert_eq!(state.stored_objects, report.objects);
+    gc::verify(store.as_ref()).unwrap();
+    for sequence in 27..=30 {
+        check_snapshot(store.as_ref(), sequence).unwrap();
+    }
+    // Records are all there: every manifest, even below the floor.
+    let source_store = RedbStore::open(&source, config()).unwrap();
+    for height in 0..=30u64 {
+        for table in [
+            arkiv_db_storage::versioned::Table::Manifests,
+            arkiv_db_storage::versioned::Table::Blocks,
+        ] {
+            assert_eq!(
+                store.read_record(table, &height.to_be_bytes()).unwrap(),
+                source_store
+                    .read_record(table, &height.to_be_bytes())
+                    .unwrap()
+            );
+        }
+    }
+    drop(source_store);
+    // Archive is refused; a window opens at the copied floor and prunes on.
+    assert!(DurableEngine::open(store.clone(), genesis(), options(0)).is_err());
+    let mut engine = DurableEngine::open(store.clone(), genesis(), pruned(3)).unwrap();
+    assert_eq!(engine.state_floor().sequence(), 27);
+    assert!(engine.collects_garbage());
+    for n in 30..40 {
+        step(&mut engine, n);
+        check(&engine, store.as_ref());
+    }
+    assert!(store.gc_state().unwrap().unwrap().deleted_total > 0);
+    drop((engine, store));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

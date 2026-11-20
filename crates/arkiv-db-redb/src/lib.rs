@@ -69,12 +69,14 @@ mod counting;
 mod error;
 mod gc;
 mod metrics;
+mod migrate;
 mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
 pub use counting::{CountingBackend, IoProbe};
 pub use metrics::{DURATION_BUCKETS_NANOSECONDS, OperationTimingSnapshot};
+pub use migrate::{CopyReport, copy_reachable};
 pub use store::{
     DEFAULT_CACHE_SIZE, DataStats, LayoutStats, OpenReport, RedbConfig, RedbStore,
     STORE_FORMAT_VERSION, TableLayout, compact_file, initialization_path,

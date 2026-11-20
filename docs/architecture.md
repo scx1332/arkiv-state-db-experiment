@@ -664,8 +664,10 @@ a structure. See [metering](metering.md) for the charge table.
   `arkiv-proposer` turns on garbage collection in a `node.redb` it creates or
   adopts, and objects no snapshot from the floor up reaches are deleted inside
   block commits. Blocks, bodies, manifests and `history.redb` are kept; an
-  older state file keeps everything until `state gc-enable` (see the
-  [pruning design](pruning-design.md)). The default is archive.
+  older state file keeps everything until `state gc-enable` or `state
+  migrate` (see the
+  [pruning design](pruning-design.md)). The default for new producer and
+  full state is a window of 256; an existing archive file stays an archive.
 - Corruption of a stored object is found when the object is read, not at
   open.
 - Cache and preparation limits bound retained objects and bytes, not the

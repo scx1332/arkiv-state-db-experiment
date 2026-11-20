@@ -1,10 +1,13 @@
 # Proposal: prune state to the latest 256 blocks
 
-Status: design only, not implemented (2026-11-20). Written against commit
-`e77cf27`. Every `file:line` below refers to that commit. It refines phase 2
-of [state history pruning](../pruning-design.md), which is still the
-reference for the retention floor, pins and API errors (phases 0 and 1,
-implemented). Where this proposal differs from that document, it says so.
+Status: implemented for trie objects (2026-11-20), including copy-migration;
+`Blocks` records, bodies and restart are not pruned yet. See
+[Implementation](#implementation-2026-11-20) for what was built, the measured
+result and what is left. The design text below was written against commit
+`e77cf27`, and every `file:line` in it refers to that commit. It refines
+phase 2 of [state history pruning](../pruning-design.md), which is still the
+reference for the retention floor, pins and API errors (phases 0 and 1).
+Where this proposal differs from that document, it says so.
 
 Later changes to the index layout are out of scope. Changes to the store
 layout are proposed only where pruning needs them.
@@ -68,6 +71,213 @@ needs old history run an archive node or index the chain themselves.
   are local to the node and never hashed. A bug in garbage collection (GC)
   surfaces as a storage availability error, never as a different root or
   charge.
+
+## Implementation (2026-11-20)
+
+Built on `main` in three commits after `f876be6`: the metrics walk removed
+(`018eec7`), the collector in the storage contract, both stores and the
+engine (`8a1f471`), and the node wiring (`8ad573d`), followed by
+copy-migration, the default window and this record. What follows is what the
+code does; where it differs from the design above, the code is the
+reference.
+
+### Mechanism as built
+
+- **Store contract.** `VersionedStore` gains `gc_state`, `commit_gc`,
+  `gc_report`, `gc_enable` and `gc_dump`
+  (`crates/arkiv-db-storage/src/versioned.rs`). A collecting store refuses
+  plain `commit`, `stage_objects` and `relabel`, so no object escapes the
+  counts. The algorithm lives once, in
+  `crates/arkiv-db-storage/src/gc.rs`: `plan()` computes everything one
+  commit changes from reads only, and each store applies the plan in the
+  transaction that moves the head (memory store under its lock, redb in the
+  same `WriteTransaction`).
+- **Edges** (`EngineGraph`, version 1, `crates/arkiv-db/src/durable/gc.rs`):
+  hash children (inline children searched too), the four non-empty map
+  roots of a catalog leaf, and every 40-byte namespace leaf value that reads
+  as a non-empty `root ‖ len` handle (speculative).
+- **Phantoms (new).** A speculative edge can name an object that does not
+  exist yet, and the bytes it names can be created later (a user can store
+  a 36-byte raw value that predicts a posting root). Ignoring such an edge
+  on increment but honouring it on decrement would push a live object's
+  count below its real value. So a speculative reference to an absent id is
+  counted in `gc_phantom`, and an object inserted later starts from its
+  phantom count. Strict references to absent objects are an invariant
+  failure.
+- **Layout (option iii).** redb tables (`crates/arkiv-db-redb/src/gc.rs`):
+  `gc_shared` (counts of two or more; no row means one), `gc_dead`
+  (`epoch ‖ release seq ‖ size`), `gc_release` (the release stack),
+  `gc_queue` (`epoch ‖ space ‖ id`), `gc_phantom`, `gc_epochs` (height to
+  epoch, for retained heights only) and `gc_epoch_counts` (queue entries per
+  epoch, so the deletion backlog is known without a range count). The state
+  record `store/gc/state` keeps every counter the metrics export.
+- **Commit steps.** Staged objects are put if absent; absent and dead ones
+  have their edges counted (resurrection is the same path). Then the new
+  roots are acquired and the old ones released. Increments run before
+  decrements and a live object's count is only read when its decrements
+  outrun its increments, so the sibling `+1/-1` of a rewritten path costs no
+  read and no write. A count reaching zero is a death at this commit's
+  epoch; the dead object goes on the release stack.
+- **Release budget, a floor.** Each commit releases at least
+  `gc_release_budget + gc_release_per_object × staged objects` dead objects
+  (defaults 4,096 and 4) when that many are pending, newest first, so a
+  dropped subtree is released depth first and the stack stays small. When
+  the pending backlog at the start of the commit is above the budget, the
+  commit keeps releasing until the backlog is below where it started: it
+  cannot grow from one commit to the next.
+- **Deletion.** The engine passes `horizon = min(durable floor before the
+  commit, lowest pinned snapshot)`. The store maps it to the epoch of the
+  highest retained height at or below it, and deletes queued objects that
+  died at or before that epoch: at least `gc_delete_budget + 2 × deaths in
+  this commit` (default 4,096), and at least a sixteenth of the deletable
+  backlog, so a jump of the horizon (a long pin released) drains
+  geometrically instead of in one commit.
+- **Epochs**, not heights, tag deaths: a commit counter that is never
+  reused, mapped from heights in `gc_epochs`. Without rewind the two are in
+  step; with rewind the format need not change.
+- **Invariant failures** (a decrement of a dead object, a count below zero,
+  a strict reference to a missing object, bytes that do not decode) abort
+  the GC part; the store commits the batch without collection under the
+  same writer lock and marks the state `suspended`. The node keeps
+  producing; `state gc-enable` rebuilds the counts.
+- **Seeding** (`gc::Seeder`): one scan of every object table. Every edge of
+  every present object is counted, plus each head root; present objects that
+  end with no reference are dead at the seeding epoch and pending, so their
+  release removes their edges again. A store need not hold only live
+  objects: an archive's history is collected this way. Records go to 256
+  bucket files in a scratch directory (about 42 bytes per object and per
+  edge), sorted one bucket at a time.
+- **Format gate.** A collecting redb file has `store/format = 2`; binaries
+  that only know format 1 refuse it. A format-2 file without its GC state
+  is `Corrupt`. The engine refuses archive retention on a collecting store.
+- **Consensus.** Roots, manifests, receipts and charges are computed before
+  the store sees the batch; nothing reads a GC row. The differential test
+  below checks receipts, roots, reads, query pages, counts and eq proofs
+  against an archive engine.
+
+### Node
+
+- `arkiv-proposer producer|full` turns on collection when it creates or
+  adopts its `node.redb` with a window (`arkiv_node::retention::
+  collect_new_state`, event `state_gc_enabled`). A state file past genesis
+  without collection is reported (`state_gc_off`) and left alone.
+- **Default (decided by this work).** Without `--state-retention`, a
+  producer or full node keeps a window of 256 for new state, and for state
+  that already prunes. A state file that has always been an archive stays
+  one: turning it into a window is irreversible, so it takes the flag or
+  `state migrate`. `archive` remains available. The engine and
+  `arkiv-simulator` still default to archive, and the simulator never
+  collects.
+- Offline tools, node stopped: `state gc-enable` (count in place: history
+  below the head is deleted once the floor passes the head; the file does
+  not shrink), `state migrate --state-retention N` (copy-migrate, below),
+  `state gc-status`, `state gc-verify` (every invariant; reads the store
+  into memory, small states only), `state table-stats` (per-table bytes, a
+  walk) and `state compact` (redb compaction).
+- Status gains `stateGc` (`on`, `suspended`, `off`). Metrics are listed in
+  [metrics](../metrics.md#state-pruning); none walks the database.
+- `ARKIV_STATE_GC_COUNT_ONLY=1` counts and releases but deletes nothing
+  (soak step 2).
+
+### A pruned producer from a prebuilt genesis
+
+```sh
+arkiv-proposer genesis stream-build BASE_GENESIS --prefill FILE --out BUNDLE \
+    --sponsor 0xADDRESS --state-out STATE
+arkiv-proposer producer --run-dir RUN --key-file KEY --bundle BUNDLE \
+    --prebuilt-state STATE --genesis-install adopt [--state-retention 256] ...
+```
+
+The prebuilt state needs no extra step: the producer adopts it as before
+(the verification walk), then, because the run has a window (256 by
+default), counts the adopted file once (`state_gc_enabled` in the log, with
+its duration) before it serves. The count reads every object table once and
+writes about 42 bytes per object and per edge to `RUN/gc-seed`, removed
+afterwards. A crash during it leaves a plain file at genesis, which the next
+start counts again. `--state-retention archive` adopts without collection.
+
+### Copy-migration
+
+`state migrate --run-dir DIR --state-retention N` copies `node.redb` into a
+new file: every record of every table, and only the objects that the
+snapshots from `max(durable floor, head - N)` to the head reach, walked once
+each with the copy as the visited set (`arkiv_db_redb::copy_reachable`).
+It raises the head's floor record to that floor, seeds the copy, keeps the
+old file as `node.redb.archive` and swaps the copy in. Objects that only the
+snapshots below the head reach are dead at the head's epoch and are deleted
+once the floor passes the head. Tested on small files only; the time and
+peak disk on the 146 GiB and 650 GiB files are not measured. It needs free
+disk for about the live state plus every record.
+
+### Tests
+
+- `arkiv-db-storage` `gc::tests`: the planner against a toy graph over
+  tiny domains (300 seeds; windows 0, 1, 2, 5; budgets 0 to 1,000; random
+  pins), checked by `verify` after every commit and by reading every
+  snapshot the horizon protects; the zero-budget backlog bound; seeding in
+  memory and through bucket files. Two seeded bugs (deleting a resurrected
+  object, dropping the shrink rule) each fail them.
+- `arkiv-db` `it/durable_gc.rs`: an archive and a pruned engine run the
+  same random blocks (4 record keys, 3 colours, a second attribute that
+  often equals the first so one-member postings are shared and move
+  between terms, 36-byte raw values that look like posting handles, host
+  writes, held readers): identical effects and receipts per operation,
+  identical commit info, and inside the window identical reads, query pages
+  through cursors, counts, eq proofs and host reads; `HistoryPruned` below.
+  Resurrections, deletions, shared rows, phantom rows and pending releases
+  all occur. Also count-only mode and the archive refusal.
+- `arkiv-db-redb` `it/gc.rs`: counts across a reopen, a GC commit (with
+  births, deaths and deletions) cut at every mutating disk call and
+  reopened from durable, all-unsynced and torn images, the format gate,
+  suspension with rebuild, and copy-migration.
+- `arkiv-node`: the signed retention tests run with collection on (and
+  verify it); an adopted `stream-build --state-out` state collects by
+  default and passes `state gc-verify`; metrics shape and GC export.
+
+### Local soak: a fixed state under sustained patches
+
+[2026-11-20 pruning soak](../benchmarks/2026-11-20-pruning-patch-soak.md):
+an archive and a pruned producer side by side, 12 minutes of patches of a
+fixed set of 2,000 items at the block cap (368,640 patches each).
+
+| | Archive | Pruned, `W = 256` |
+| --- | ---: | ---: |
+| `node.redb` allocated at head 2,882 | 1,131 MiB | 788 MiB |
+| Growth per block after warm-up | 0.39 MiB | 0.25 MiB |
+| Trie object pages at the stop | 397 MiB, growing | 42.5 MiB, flat |
+| `blocks` table pages at the stop | 724 MiB | 724 MiB |
+| Mean state commit | 12.8 ms | 23.7 ms |
+| Transaction p95 (median window) | 251 ms | 251 ms |
+
+The trie objects are bounded: stored object bytes stayed at 25.4 MB and
+dead objects at about 49,500 (one window of garbage) from the moment the
+window filled; the release backlog stayed at zero. **The file is not yet
+bounded**: the `blocks` records (about 180 KiB per block, almost all feed
+JSON) grow with the chain in both runs and are now the whole of the
+pruned file's growth. Collection doubled the commit and added 60% to bytes
+written at this load, without changing block time. Copy-migration of the
+archive file took 2.2 s (2,056 MiB to 1,028 MiB).
+
+### Not done or not verified
+
+- Nothing has run on the Sourcify state yet: seeding time and spill size
+  at adoption, commit cost on a state larger than RAM, and the size of
+  `gc_shared` there are not measured.
+- **`Blocks` records are the next thing to prune for a bounded file.**
+  `node.redb` keeps, for every height, the certificate, the body reference
+  and the feed JSON (about 180 KiB per block in the soak above), and
+  `history.redb` keeps every body. The feed is a stored log, which the
+  decision above says should expire with the window; dropping it below the
+  floor needs a record removal in the store contract and a `HistoryPruned`
+  answer from the feed endpoints. Certificates and bodies are still needed
+  by light clients and follower replication from genesis, and restart
+  rebuilds its hash index from every block: item 5 of the plan.
+- The insert-only floor records (`engine/state-floor/<height>`, one per
+  commit, about 50 bytes) also grow with the chain.
+- Copy-migration and `state compact` are not timed on large files.
+- The simulator binary does not collect.
+- `gc-verify` holds the whole store in memory; a streaming verifier for
+  large files is not written.
 
 ## The problem, measured
 
@@ -557,8 +767,9 @@ block, mostly feed JSON) should move to `history.redb` or shrink. Then
 - **The node** keeps `--state-retention archive|N`. `N` is the
   query-consistency window and defaults to 256. Once rollback exists, a
   constant `ROLLBACK_DEPTH` may set a minimum for producer and full roles;
-  - the default stays `archive` until copy-migrate lands, then becomes
-    `256` for producer and full roles;
+  - built: with copy-migrate in place the default is `256` for producer
+    and full roles' new state; a state file that has always been an
+    archive stays one unless the flag or `state migrate` says otherwise;
   - archive stays an opt-in for explorers. An archive file has no GC
     tables.
 - **Genesis**, later: when rollback depth becomes a protocol property
@@ -638,15 +849,17 @@ block, mostly feed JSON) should move to `history.redb` or shrink. Then
 
 0. Drop the periodic `data_stats` from the exporter and rerun the Sourcify
    soak (soak step 1). This is independent of pruning and stops most of the
-   growth seen.
+   growth seen. **Done** (`018eec7`); the Sourcify rerun is not.
 1. Bound restart: rebuild the transaction and block hash index from the
    window's bodies only, once bodies are pruned; until then, keep the
    current full rebuild.
 2. Add the GC extension to the store contract, with counts in count-only
-   mode, the verifier and metrics (soak step 2).
-3. Turn on deletion with budgets (soak steps 3 to 5).
+   mode, the verifier and metrics (soak step 2). **Done**; count-only is
+   `ARKIV_STATE_GC_COUNT_ONLY=1`.
+3. Turn on deletion with budgets (soak steps 3 to 5). **Done**; only a
+   12-minute small-state soak has run.
 4. Write copy-migrate (soak step 6). Then switch the producer and full
-   default to 256.
+   default to 256. **Done**, small files only.
 5. Snapshot sync, then body retention with the same window, so that
    blocks, receipts and the hash index disappear with the state.
 6. Later: rewind and the genesis minimum.

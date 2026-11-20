@@ -9,8 +9,11 @@ whose "Implementation" section describes what was built.
 
 ## Goals
 
-- Keep the default unchanged: a node keeps and serves every snapshot
-  (archive) unless an operator configures a window.
+- Defaults (changed 2026-11-20): `arkiv-proposer producer|full` keeps a
+  window of 256 for new state and for state that already prunes; a state
+  file that has always been an archive stays one unless the operator passes
+  `--state-retention` or migrates it. The engine and the simulator default to
+  archive.
 - Make retention a runtime choice of one node, so it can be tried without a
   new genesis. The policy type is shaped so it can move into genesis later
   (a minimum window shared by every node, golem-db's `#minRetention`).
@@ -101,8 +104,10 @@ in-memory backend applies the same floor to its reads. `table_log` reports
 
 ### Node consumers and errors
 
-**Configuration.** `--state-retention archive|<N>` (default `archive`) on
-`arkiv-proposer producer|full` and `arkiv-simulator producer|full|inspect`.
+**Configuration.** `--state-retention archive|<N>` on
+`arkiv-proposer producer|full` (default 256, or archive for a state file that
+has always been one) and `arkiv-simulator producer|full|inspect` (default
+`archive`).
 Light roles have no state and reject the flag, as does a malformed value.
 
 **Two floors.**

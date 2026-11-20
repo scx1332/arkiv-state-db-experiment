@@ -14,8 +14,9 @@ of that dataset, owned by the soak account, for the mutate phases and probes.
 Phases, each writing JSON lines under DIR (see docs/benchmarking.md):
 
   cohort   2,000 entities every read probe is aimed at, so probes stay comparable
-  patch    (with --patch-min) patch the cohort itself, rewriting two indexed attributes of a
-           fixed small state: what the state file does under sustained patches
+  patch    (with --patch-min) create a second set of 2,000 items and patch it, rewriting two
+           indexed attributes of a fixed small state: what the state file does under
+           sustained patches
   mutate   (with --sourcify-keys) patch dataset contracts: a third of the time
            only `verifiedat`, then as a re-verification does, rewriting
            attributes whose values millions of contracts share
@@ -362,10 +363,13 @@ class Soak:
         self.load("cohort", "writes.jsonl", lifetime_blocks=self.growth_lifetime)
 
         if a.patch_min > 0:
+            # A second set of 2,000 items is patched; the probes' cohort stays as created.
+            patched = str(self.work / "patch-keys.json")
+            self.load("cohort", "writes.jsonl", lifetime_blocks=self.growth_lifetime, cohort_tag="patchset",
+                      cohort_keys=patched)  # fmt: skip
             self.probing.set()
             self.enter("patch")
-            self.load("mutate", "writes.jsonl", set="cohort", duration_s=minutes(a.patch_min),
-                      sourcify_keys=str(self.work / "cohort-keys.json"))  # fmt: skip
+            self.load("mutate", "writes.jsonl", set="cohort", duration_s=minutes(a.patch_min), sourcify_keys=patched)
 
         if a.sourcify_keys and a.mutate_min > 0:
             self.probing.set()
@@ -427,7 +431,7 @@ def main():
     parser.add_argument("--port", type=int, default=18700, help="RPC port; the next two are also used")
     parser.add_argument("--min-free-gb", type=int, default=100)
     parser.add_argument("--drop-caches", action="store_true", help="drop the page cache before the restart (needs sudo)")
-    parser.add_argument("--state-retention", default="archive", help="the producer's --state-retention: archive or a window N")
+    parser.add_argument("--state-retention", default="256", help="the producer's --state-retention: archive or a window N (the node default, 256)")
     parser.add_argument("--patch-min", type=float, default=0, help="minutes of patching the cohort before growth")
     args = parser.parse_args()
     if args.quick:

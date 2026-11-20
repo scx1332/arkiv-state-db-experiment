@@ -690,9 +690,15 @@ fn state_command() -> Result<()> {
             return Err(ErrorCode::InvalidRequest.into());
         }
     }
-    let flags = Flags(flags).only(&[&["--run-dir"]])?;
+    let flags = Flags(flags).only(&[&["--run-dir", "--state-retention"]])?;
     let run_dir = PathBuf::from(flags.required("--run-dir")?);
     let path = run_dir.join("node.redb");
+    if sub == "migrate" {
+        return migrate_state(&run_dir, &flags);
+    }
+    if flags.contains_key("--state-retention") {
+        return Err(ErrorCode::InvalidRequest.into());
+    }
     if sub == "compact" {
         let started = std::time::Instant::now();
         let (before, after) = arkiv_db_redb::compact_file(&path)?;
@@ -731,6 +737,21 @@ fn state_command() -> Result<()> {
             out["seconds"] = serde_json::json!(started.elapsed().as_secs_f64());
             println!("{out}");
         }
+        "table-stats" => {
+            let file = std::fs::metadata(&path).map_err(unavailable(&path))?;
+            let tables: Vec<_> = store
+                .table_stats()?
+                .into_iter()
+                .map(|(name, entries, stored, pages)| {
+                    serde_json::json!({"table": name, "entries": entries,
+                        "storedBytes": stored, "pageBytes": pages})
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::json!({"fileBytes": file.len(), "tables": tables})
+            );
+        }
         "gc-status" => match store.gc_state()? {
             Some(state) => println!("{}", report(&state)),
             None => println!("{}", serde_json::json!({"stateGc": "off"})),
@@ -742,10 +763,73 @@ fn state_command() -> Result<()> {
             println!("{}", serde_json::json!({"verified": true}));
         }
         _ => {
-            eprintln!("state gc-enable|gc-status|gc-verify|compact --run-dir DIR");
+            eprintln!(
+                "state gc-enable|gc-status|gc-verify|table-stats|compact --run-dir DIR | \
+                 state migrate --run-dir DIR --state-retention N"
+            );
             return Err(ErrorCode::InvalidRequest.into());
         }
     }
+    Ok(())
+}
+
+/// `state migrate --run-dir DIR --state-retention N`: copies `node.redb`
+/// into a new file holding every record but only the objects the snapshots
+/// from the new floor to the head reach, counts it, and swaps it in. The
+/// old file is kept as `node.redb.archive` for the operator to delete.
+fn migrate_state(run_dir: &Path, flags: &Flags) -> Result<()> {
+    let window = match flags.required("--state-retention")?.parse() {
+        Ok(arkiv_db::durable::Retention::Window(window)) => window,
+        _ => return Err(ErrorCode::InvalidRequest.into()),
+    };
+    let path = run_dir.join("node.redb");
+    let copy = run_dir.join("node.redb.migrate");
+    let archive = run_dir.join("node.redb.archive");
+    if archive.exists() {
+        eprintln!("{} exists; remove it first", archive.display());
+        return Err(ErrorCode::InvalidRequest.into());
+    }
+    let started = std::time::Instant::now();
+    let retained = {
+        let store = RedbStore::open(&path, RedbConfig::default())?;
+        arkiv_db::durable::gc::retained(&store, window)?
+    };
+    let _ = std::fs::remove_file(&copy);
+    let overrides: Vec<_> = retained.floor_record.iter().cloned().collect();
+    let report = arkiv_db_redb::copy_reachable(
+        &path,
+        &copy,
+        &retained.snapshots,
+        &arkiv_db::durable::gc::EngineGraph,
+        &overrides,
+    )?;
+    let spill = run_dir.join("gc-seed");
+    let _ = std::fs::remove_dir_all(&spill);
+    let state = {
+        let store = RedbStore::open(&copy, RedbConfig::default())?;
+        arkiv_db::durable::gc::enable(&store, Some(&spill))?
+    };
+    let _ = std::fs::remove_dir_all(&spill);
+    std::fs::rename(&path, &archive).map_err(unavailable(&path))?;
+    std::fs::rename(&copy, &path).map_err(unavailable(&copy))?;
+    std::fs::File::open(run_dir)
+        .and_then(|dir| dir.sync_all())
+        .map_err(unavailable(run_dir))?;
+    let size = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "{}",
+        serde_json::json!({
+            "head": retained.head,
+            "floor": retained.floor,
+            "records": report.records,
+            "objectsCopied": report.objects,
+            "objectBytesCopied": report.object_bytes,
+            "deadAtHead": state.dead_objects,
+            "fileBytesBefore": size(&archive),
+            "fileBytesAfter": size(&path),
+            "seconds": started.elapsed().as_secs_f64(),
+        })
+    );
     Ok(())
 }
 
@@ -850,14 +934,14 @@ fn help() {
         "arkiv-proposer keygen --out FILE\n",
         "arkiv-proposer producer --run-dir DIR --key-file FILE [--listen 127.0.0.1:9500] ",
         "[--private-listen 127.0.0.1:9501] [--start paused|running] [--source-id UUID] ",
-        "[--chain-id 9001] [--block-period-ms 1000] [--state-retention archive|N] ",
+        "[--chain-id 9001] [--block-period-ms 1000] [--state-retention archive|N (256)] ",
         "[--read-concurrency 4] [--read-deadline-secs 30] [--read-max-groups N] ",
         "[--read-max-literals N] (--allocations-file FILE | --bundle BUNDLE ",
         "[--prebuilt-state DIR])\n",
         "arkiv-proposer full|light --run-dir DIR --peer URL --genesis-hash 0xHEX ",
         "--proposer 0xADDRESS --chain-id N --source-id UUID --run-id HEX32 ",
         "[--replication-peer URL] [--bundle BUNDLE] [--state-retention archive|N (full ",
-        "only)] [--read-concurrency 4] [--read-deadline-secs 30] [--read-max-groups N] ",
+        "only, 256)] [--read-concurrency 4] [--read-deadline-secs 30] [--read-max-groups N] ",
         "[--read-max-literals N]\n",
         "arkiv-proposer sign --key-file FILE --genesis-file FILE --tx-file FILE --nonce N ",
         "--out FILE\n",
@@ -868,7 +952,9 @@ fn help() {
         "--request-id 0xHEX64 --to 0xADDRESS --amount-wei DECIMAL --out FILE [--gas-limit ",
         "21000]\n",
         "arkiv-proposer submit --peer URL --transaction-file FILE\n",
-        "arkiv-proposer state gc-enable|gc-status|gc-verify|compact --run-dir DIR (node stopped)\n",
+        "arkiv-proposer state gc-enable|gc-status|gc-verify|table-stats|compact --run-dir DIR ",
+        "(node stopped)\n",
+        "arkiv-proposer state migrate --run-dir DIR --state-retention N (node stopped)\n",
         "Optional private Prometheus exporter: --metrics-listen 127.0.0.1:9600 ",
         "[--metrics-table-stats-secs N] (minimum 10; opt-in table walk, which keeps redb from ",
         "reusing freed pages while it runs). Metrics use rogue_one_ prefix.\n",
@@ -886,8 +972,9 @@ fn help() {
         "authentication supplies no consensus or finality. Bodies are retained in ",
         "history.redb separately from node.redb. --state-retention N serves state ",
         "(balances, proofs, queries, receipts/logs) only for the head and the N snapshots ",
-        "before it and refuses older heights with HistoryPruned; archive (default) serves ",
-        "every height. A pruned floor never moves back. A window node that creates or ",
+        "before it and refuses older heights with HistoryPruned; archive serves every ",
+        "height. Without the flag a new node keeps 256, and a node whose state file has ",
+        "always been an archive stays one. A pruned floor never moves back. A window node that creates or ",
         "adopts its state turns on garbage collection in node.redb: objects no snapshot ",
         "from the floor up (or open reader) reaches are deleted inside block commits, so ",
         "the file stays bounded. An older state file keeps everything until `state ",
@@ -1067,6 +1154,33 @@ struct NodeEnv<'a> {
 }
 
 /// `producer`, `full` and `light`: opens or creates the node and serves it.
+/// The window producers and full nodes keep without `--state-retention`.
+const DEFAULT_WINDOW: u64 = 256;
+
+/// `--state-retention` when not given: a window of [`DEFAULT_WINDOW`] for a
+/// producer or full node's new state, or for one that already prunes. A
+/// state file that has always been an archive stays one: turning it into a
+/// window is irreversible, so it takes the flag (or `state migrate`).
+fn default_retention(run_dir: &Path, command: &str) -> Result<arkiv_db::durable::Retention> {
+    use arkiv_db::durable::Retention;
+    if command == "light" {
+        return Ok(Retention::Archive);
+    }
+    // A missing or unopenable file is new state; the real open reports
+    // any damage.
+    let Ok(store) = RedbStore::open(run_dir.join("node.redb"), RedbConfig::default()) else {
+        return Ok(Retention::Window(DEFAULT_WINDOW));
+    };
+    let archive = store.head()?.is_some()
+        && store.gc_state()?.is_none()
+        && arkiv_db::durable::gc::durable_floor(&store)? == 0;
+    Ok(if archive {
+        Retention::Archive
+    } else {
+        Retention::Window(DEFAULT_WINDOW)
+    })
+}
+
 async fn node(command: &str, args: &Flags) -> Result<()> {
     // Only a bundle producer may reuse prebuilt state; followers always derive
     // streaming state independently from the stream.
@@ -1116,11 +1230,12 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
         Some("adopt") => true,
         Some(_) => return Err(ErrorCode::InvalidRequest.into()),
     };
+    let retention = match args.get("--state-retention") {
+        Some(value) => value.parse().map_err(|_| ErrorCode::InvalidRequest)?,
+        None => default_retention(&path, command)?,
+    };
     let options = Options {
-        retention: args
-            .get_or("--state-retention", "archive")
-            .parse()
-            .map_err(|_| ErrorCode::InvalidRequest)?,
+        retention,
         // Measurement switch: count but never delete (soak step "count-only").
         gc_count_only: std::env::var_os("ARKIV_STATE_GC_COUNT_ONLY").is_some(),
         ..Options::default()

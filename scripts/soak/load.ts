@@ -13,8 +13,8 @@
 //   probe    COHORT_TAG, COHORT, COHORT_KEYS, GROW_TAG (optional), READS (100), CONC (4)
 //   readers  COHORT_TAG, COHORT, COHORT_KEYS, CONC (4)
 //   mutate   SOURCIFY_KEYS (file of contract keys this account owns), SET (reverify|verifiedat|cohort), BATCH, WAVE
-//            SET=cohort patches the cohort's own items (keys from SOURCIFY_KEYS, which run.py
-//            points at COHORT_KEYS): a fixed small state rewritten for the whole phase
+//            SET=cohort patches items of the soak's own schema (keys from SOURCIFY_KEYS, which
+//            run.py points at a second cohort): a fixed small state rewritten for the phase
 // With SOURCIFY_KEYS set, probe and readers also time reads of the Sourcify dataset.
 // A reverted or lost transaction ends `write` with exit code 1 and the reason on stderr.
 import { createPublicClient, createWalletClient, ExpirationTime } from "@arkiv-network/sdk"

@@ -63,7 +63,8 @@ sessions. The private control GET alias requires a JSON body and is not usable
 with browser Fetch; use POST for control operations.
 
 State history is served according to the node's `--state-retention`
-(archive by default). `status` reports `stateRetention`,
+(a window of 256 for new state by default; a state file that has always been
+an archive stays one). `status` reports `stateRetention`,
 `stateRetentionWindow`, `stateFloor`, `receiptFloor` and `stateGc` (`on` when
 the state file deletes what no retained snapshot reaches, `suspended` after a
 failed count check, `off` when it keeps everything). State reads below

@@ -146,6 +146,53 @@ pub fn enable(
     Ok(store.gc_enable(&state_roots(&manifest.state), &EngineGraph, spill)?)
 }
 
+/// What a copy-migration to a window of `window` snapshots keeps: the
+/// head, the new floor `max(durable floor, head - window)`, the roots of
+/// every snapshot from the floor to the head, and the floor record the copy
+/// must carry so that it is never opened as an archive again.
+#[derive(Clone, Debug)]
+pub struct Retained {
+    pub head: u64,
+    pub floor: u64,
+    pub snapshots: Vec<Vec<(SpaceId, ObjectId)>>,
+    pub floor_record: Option<(String, Vec<u8>)>,
+}
+
+/// The state floor recorded with the store's head (zero for an archive or
+/// a store without a head).
+pub fn durable_floor(store: &dyn VersionedStore) -> Result<u64, DurableError> {
+    match store.head()? {
+        Some(head) => super::read_floor(store, head.height),
+        None => Ok(0),
+    }
+}
+
+/// [`Retained`] for a store no engine has open.
+pub fn retained(store: &dyn VersionedStore, window: u64) -> Result<Retained, DurableError> {
+    let head = store
+        .head()?
+        .ok_or_else(|| corrupt("store has no head"))?
+        .height;
+    let durable = super::read_floor(store, head)?;
+    let floor = durable.max(head.saturating_sub(window));
+    let mut snapshots = Vec::new();
+    for sequence in floor..=head {
+        snapshots.push(state_roots(&manifest_at(store, sequence)?.state));
+    }
+    let floor_record = (floor > 0).then(|| {
+        (
+            super::retention::floor_key(head),
+            floor.to_be_bytes().to_vec(),
+        )
+    });
+    Ok(Retained {
+        head,
+        floor,
+        snapshots,
+        floor_record,
+    })
+}
+
 /// Checks the store's GC tables against its objects and head
 /// ([`arkiv_db_storage::gc::verify`]). Reads the whole store into memory:
 /// tests and small stores only.

@@ -151,6 +151,9 @@ impl Producer {
         if let Some(prebuilt) = prebuilt {
             command.arg("--prebuilt-state").arg(prebuilt);
         }
+        if tag.starts_with("adopt") {
+            command.arg("--genesis-install").arg("adopt");
+        }
         let file = std::fs::File::create(&log).unwrap();
         let child = Child(
             command
@@ -231,6 +234,41 @@ fn producer_serves_the_prebuilt_state_without_rebuilding_and_the_default_rebuild
             std::fs::read(bundle.join(name)).unwrap()
         );
     }
+}
+
+/// The path a large genesis takes: `stream-build --state-out`, then a
+/// producer that adopts it. With the default window the adopted state
+/// collects garbage from its first block.
+#[test]
+fn an_adopted_prebuilt_state_collects_garbage_by_default() {
+    let tmp = temp("adopt-gc");
+    let (base, input, key) = inputs(&tmp.0, 7);
+    let (bundle, state) = (tmp.0.join("bundle"), tmp.0.join("genesis-state"));
+    let report = stream_build(&tmp.0, &base, &input, &bundle, Some(&state));
+    let node = tmp.0.join("node");
+    let mut producer = Producer::start(&tmp.0, &node, &bundle, &key, Some(&state), "adopt");
+    let ready = producer
+        .ready()
+        .unwrap_or_else(|code| panic!("{code}: {}", producer.log()));
+    assert_genesis_head(&ready, &report);
+    assert_eq!(ready["stateRetentionWindow"], "256");
+    assert_eq!(ready["stateGc"], "on");
+    let log = producer.log();
+    assert!(log.contains(r#""stage":"adopted""#), "{log}");
+    assert!(log.contains(r#""event":"state_gc_enabled""#), "{log}");
+    assert!(!node.join("gc-seed").exists());
+    drop(producer);
+    // Offline: the counts check out against the adopted objects.
+    let verified = Command::new(BIN)
+        .args(["state", "gc-verify", "--run-dir"])
+        .arg(&node)
+        .output()
+        .unwrap();
+    assert!(verified.status.success(), "{verified:?}");
+    // A restart keeps collecting without a new scan.
+    let mut restarted = Producer::start(&tmp.0, &node, &bundle, &key, Some(&state), "adopt-again");
+    assert_eq!(restarted.ready().unwrap()["stateGc"], "on");
+    assert!(!restarted.log().contains("state_gc_enabled"));
 }
 
 #[test]

@@ -420,6 +420,26 @@ impl RedbStore {
         self.gc_nanos.load(Ordering::Relaxed) as f64 / 1e9
     }
 
+    /// Per user table: name, entries, stored key and value bytes, and the
+    /// bytes of its pages (stored, metadata and unused bytes within them). Walks every table in one read transaction, like
+    /// [`Self::data_stats`]: offline diagnostics only.
+    pub fn table_stats(&self) -> Result<Vec<(String, u64, u64, u64)>, StorageError> {
+        use redb::TableHandle as _;
+        self.with_db(|db| {
+            let read = db.begin_read()?;
+            let mut out = Vec::new();
+            for handle in read.list_tables()? {
+                let name = handle.name().to_owned();
+                let table = read.open_untyped_table(handle)?;
+                let stats = table.stats()?;
+                let pages =
+                    stats.stored_bytes() + stats.metadata_bytes() + stats.fragmented_bytes();
+                out.push((name, table.len()?, stats.stored_bytes(), pages));
+            }
+            Ok(out)
+        })
+    }
+
     /// How many times the database handle has been replaced by `recover`.
     pub fn epoch(&self) -> u64 {
         self.slot

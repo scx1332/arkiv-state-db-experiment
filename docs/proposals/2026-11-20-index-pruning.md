@@ -9,6 +9,17 @@ implemented). Where this proposal differs from that document, it says so.
 Later changes to the index layout are out of scope. Changes to the store
 layout are proposed only where pruning needs them.
 
+## Purpose of the window
+
+The node keeps the last `N` blocks of state so that queries stay
+consistent. A query that is paged with cursors, or read at a block tag, is
+answered from one snapshot: every page of the result comes from the same
+block, even while new blocks change the indices. A snapshot older than `N`
+blocks is refused with `HistoryPruned`. `N` is therefore sized by how long a
+client needs to finish reading a result: 256 blocks is 64 s at 250 ms
+blocks. Older history is not kept for its own sake. Rollback, if it is
+added, also needs states inside the window, but it does not set `N`.
+
 ## Summary
 
 - **Mechanism.** Each object gets a persistent reference count from the
@@ -441,7 +452,7 @@ migration path, and `compact` is the fallback when disk is short.
 | --- | --- | --- |
 | Historical state reads (`eth_getBalance`, `eth_getTransactionCount`, `eth_call`, `arkiv_getEntityCount` at a tag; signed REST at `?height`) | served for `[F, head]`, refused below with `-32006` or HTTP 410 (`crates/arkiv-node/src/retention.rs:1-60`) | none. Phase 1 already refuses |
 | Proofs (`accounts/{a}/proof`, `query/eq`, `query/range`) and light verified reads | the same window. A light client must request a proof within 64 s of the height it verifies | none in code. Document the horizon for light-client and SDK users |
-| `arkiv_query` with `atBlock` and cursors | the cursor reopens the snapshot on every page and is refused once the height falls below the floor. Paging through a large result at a fixed block must finish within about 64 s | an open question, see below |
+| `arkiv_query` with `atBlock` and cursors | **the reason for the window.** The cursor reopens the snapshot on every page and is refused once the height falls below the floor. Paging through a result at a fixed block must finish within `N` blocks, about 64 s at 256 | return a clear `HistoryPruned` on an expired cursor, and document the limit for SDK users |
 | **Receipts, logs, `logsBloom`, `eth_getBlockByNumber`/`ByHash`, `eth_getTransactionReceipt`, `eth_getLogs`, filter logs** | rebuilt from body `h` plus **state `h-1`** (`crates/arkiv-node/src/signed/rpc/logs.rs:96-100`), so refused below `F + 1`. A transaction receipt older than about 64 s is gone, and so is the block with its bloom | **store per-block logs and the bloom at commit**: derived data, written beside the block record, which makes receipts independent of state retention. The feed already stores a `changes` list (`crates/arkiv-node/src/simulator/wire.rs:225-237`). Whether it is enough to rebuild logs is **not verified** |
 | WebSocket `logs`/`newHeads` replay | a replay that falls below the floor ends with a `-32006` notification (phase 1) | none, or solved by stored logs |
 | Transaction-hash and block-hash index | built from `history.redb` bodies, not from state (`crates/arkiv-node/src/signed/rpc/mod.rs:46-62`), so not affected | none for pruning. See restart |
@@ -521,10 +532,9 @@ block, mostly feed JSON) should move to `history.redb` or shrink. Then
 
 - **The engine** keeps a generic `Retention { Archive, Window(w) }`
   (`retention.rs:44-52`). `Window(0)` stays for golem-db conformance.
-- **The node** keeps `--state-retention archive|N`, and adds a constant
-  `ROLLBACK_DEPTH = 256`:
-  - once rollback exists, producer and full roles on a GC file refuse
-    `N < ROLLBACK_DEPTH`;
+- **The node** keeps `--state-retention archive|N`. `N` is the
+  query-consistency window and defaults to 256. Once rollback exists, a
+  constant `ROLLBACK_DEPTH` may set a minimum for producer and full roles;
   - the default stays `archive` until stored receipts and copy-migrate
     land, then becomes `256` for producer and full roles;
   - archive stays an opt-in for explorers. An archive file has no GC
@@ -618,18 +628,16 @@ block, mostly feed JSON) should move to `history.redb` or shrink. Then
 
 ## 6. Open questions and risks
 
-- **Exact window semantics.** Does "the latest 256 blocks" mean `W = 256`
-  (257 states, rollback 256 deep) or 256 states including the head
-  (`W = 255`)? This proposal assumes `W = 256`.
+- **Exact window semantics.** The window keeps queries consistent for 256
+  blocks. This proposal takes `W = 256`: a snapshot taken at the head stays
+  readable while 256 more blocks are produced (257 states kept).
 - **Receipts.** Store logs (recommended), or accept that receipts expire
   after 64 s on pruned nodes and send SDK and explorer users to archive
   nodes? Is the feed's `changes` list enough to rebuild logs without state?
   (Not verified.)
-- **Query pagination.** 64 s may be too short for paging large `atBlock`
-  results. Options:
-  - a time-based or larger window;
-  - cursors that hold a pin, and so a lease, for a bounded time;
-  - documenting the limit.
+- **Query pagination.** The window is what makes paging consistent, so 64 s
+  is the time a client has to read a result. If that proves too short for
+  large results, raise `N` rather than add per-cursor pins or leases.
 - **Commit cost** on states larger than RAM. Commit time is already up to
   208 ms against 250 ms blocks. If count-only mode adds more than about
   20%, use the trailing collector, or fold counts into object values

@@ -107,9 +107,12 @@ walks were shorter. That run was not checked for it.
 - Rerun this soak without the walk, to measure the real per-operation
   growth. That needs about 400 GiB of free disk, or a stop rule on retained
   bytes.
-- Any long read (a 12-second range query, an RPC snapshot, an export) pins
-  freed pages the same way, for its duration. That cost grows with the
-  write rate.
+- Ordinary state reads open and drop a redb read transaction per object
+  (`crates/arkiv-db-redb/src/store.rs:1026`), so a long query does not pin
+  pages this way. Only whole-database walks (`data_stats`, `layout`) do.
+  Not checked at runtime.
+- Pruning old versions (`docs/proposals/2026-11-20-index-pruning.md`) is a
+  separate fix, for the retained data rather than the pinned pages.
 
 ## Not verified
 

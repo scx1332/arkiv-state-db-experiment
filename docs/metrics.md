@@ -23,7 +23,10 @@ By default nothing walks the database. Each scrape reads:
 - `db_file_allocated_bytes`: actual filesystem allocation (`st_blocks * 512`,
   Unix only). This is absent on platforms without that measurement.
 - the operation timings and commit counters below, which the store keeps in
-  memory.
+  memory;
+- on a state file with garbage collection, the `state_gc_*` counters (see
+  [state pruning](#state-pruning)), which every block commit keeps up to date
+  in the file itself.
 
 ### Opt-in table walk
 
@@ -55,6 +58,42 @@ the walk enabled the scrape also exports:
 
 The walk never takes the node mutex or a redb write transaction, and walks
 never overlap within a process. Backend read counters include its traffic.
+
+## State pruning
+
+A full node exports what bounds deletion (sampled each second from the
+engine, without the node lock if it is busy):
+
+- `state_floor`, `state_durable_floor`: the lowest height served, and the one
+  recorded with the durable head.
+- `state_gc_horizon_height`: `min(durable floor, lowest pin)`. Objects that
+  died before the epoch this height was committed in are deleted.
+- `state_lowest_pin_height`, `state_pinned_handles`: open snapshot handles. A
+  pin that stays low holds deletion back.
+
+A `node.redb` with garbage collection (`database="state"`) also exports, from
+the GC state the store keeps in each commit:
+
+- gauges `state_gc_stored_objects` and `state_gc_stored_bytes` (all objects in
+  the object tables), `state_gc_live_objects`, `state_gc_live_bytes`,
+  `state_gc_dead_objects`, `state_gc_pending_release` (dead objects whose
+  references are not released yet), `state_gc_queued_objects` and
+  `state_gc_queued_bytes` (released, waiting for the horizon),
+  `state_gc_shared_entries` (objects referenced twice or more),
+  `state_gc_phantom_entries`, `state_gc_epoch`, `state_gc_suspended`;
+- gauges of the last commit: `state_gc_last_released`,
+  `state_gc_last_deleted`, `state_gc_last_eligible` (deletable objects when
+  it started: the deletion backlog);
+- counters since the counts were built: `state_gc_born_total`,
+  `state_gc_died_total`, `state_gc_released_total`, `state_gc_deleted_total`,
+  `state_gc_deleted_bytes_total`, `state_gc_resurrected_total`,
+  `state_gc_over_budget_total` (commits that worked past their budget to
+  shrink a backlog), and `state_gc_seconds_total` (wall time of collecting
+  commits in this process).
+
+`state_gc_stored_bytes` counts encoded object values; with
+`db_file_allocated_bytes` it shows how much of the file is B-tree slack and
+free pages without a table walk.
 
 ## DB timings and node activity
 

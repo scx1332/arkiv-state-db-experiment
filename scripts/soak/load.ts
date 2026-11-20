@@ -12,7 +12,9 @@
 //   cohort   COHORT_TAG, COHORT (2000), COHORT_KEYS (file the keys are written to)
 //   probe    COHORT_TAG, COHORT, COHORT_KEYS, GROW_TAG (optional), READS (100), CONC (4)
 //   readers  COHORT_TAG, COHORT, COHORT_KEYS, CONC (4)
-//   mutate   SOURCIFY_KEYS (file of contract keys this account owns), SET (reverify|verifiedat), BATCH, WAVE
+//   mutate   SOURCIFY_KEYS (file of contract keys this account owns), SET (reverify|verifiedat|cohort), BATCH, WAVE
+//            SET=cohort patches the cohort's own items (keys from SOURCIFY_KEYS, which run.py
+//            points at COHORT_KEYS): a fixed small state rewritten for the whole phase
 // With SOURCIFY_KEYS set, probe and readers also time reads of the Sourcify dataset.
 // A reverted or lost transaction ends `write` with exit code 1 and the reason on stderr.
 import { createPublicClient, createWalletClient, ExpirationTime } from "@arkiv-network/sdk"
@@ -228,7 +230,7 @@ async function mutate() {
   const WAVE = num("WAVE", 8)
   const WINDOW_MS = num("WINDOW_S", 10) * 1000
   const SET = process.env.SET ?? "reverify"
-  if (SET !== "reverify" && SET !== "verifiedat") throw new Error(`unknown SET ${SET}`)
+  if (SET !== "reverify" && SET !== "verifiedat" && SET !== "cohort") throw new Error(`unknown SET ${SET}`)
   const keys: Hex[] = JSON.parse(await Bun.file(env("SOURCIFY_KEYS")).text())
   let next = num("OFFSET", 0) % keys.length
   let nonce = await pub.getTransactionCount({ address: account.address, blockTag: "pending" })
@@ -298,7 +300,7 @@ async function mutate() {
     }
     // Reads stay under the node's read concurrency (4): three at a time.
     const current: Record<string, Record<string, { value: unknown }>> = {}
-    const flat = batches.flat()
+    const flat = SET === "cohort" ? [] : batches.flat()
     let i = 0
     await Promise.all(
       Array.from({ length: 3 }, async () => {
@@ -329,13 +331,23 @@ async function mutate() {
         }
         const t = performance.now()
         const res = await send(
-          { patches: batch.map((key) => ({ schema: Contract, entityKey: key, set: set(key) })) },
+          SET === "cohort"
+            ? {
+                // A new score and category per patch: both are indexed, so every patch moves
+                // the item between posting lists.
+                patches: batch.map((key) => ({
+                  schema: Item,
+                  entityKey: key,
+                  set: { score: u64(now * 1000n + BigInt(patches++ % 1000)), category: `cat-${Number(now) % 10}` },
+                })),
+              }
+            : { patches: batch.map((key) => ({ schema: Contract, entityKey: key, set: set(key) })) },
           sentNonce,
         )
         lat.push(performance.now() - t)
         gas += res.gas
         txs++
-        patches += batch.length
+        if (SET !== "cohort") patches += batch.length
       }),
     )
     if (performance.now() - windowStart >= WINDOW_MS) await flush()

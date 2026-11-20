@@ -1,9 +1,11 @@
 # State history pruning
 
 This document describes how the durable engine and the nodes bound the state
-history they serve and, later, store. Phases 0 (reachability report) and 1
-(retention floor and API semantics) are implemented. Phase 2 (physical
-deletion) is designed and not implemented: nothing is deleted today.
+history they serve and store. Phases 0 (reachability report), 1 (retention
+floor and API semantics) and 2 (physical deletion of trie objects) are
+implemented. Phase 2 follows the refined design in
+[the 256-block pruning proposal](proposals/2026-11-20-index-pruning.md),
+whose "Implementation" section describes what was built.
 
 ## Goals
 
@@ -75,8 +77,8 @@ is unchanged by this feature.
 historical snapshot, a prepared publication) registers its sequence until its
 last clone, including branches built on it, is dropped. Pins do not hold the
 logical floor back, so answers depend only on head and window. A handle opened
-before the floor passed it keeps reading until dropped (nothing is deleted in
-phase 1, and phase 2 bounds deletion by the lowest pin). Cursors, filters and
+before the floor passed it keeps reading until dropped (deletion is bounded
+by the lowest pin). Cursors, filters and
 subscriptions are not leases: they re-open their snapshot for every page or
 step and are refused once it is below the floor.
 
@@ -140,8 +142,9 @@ recorded as a backstop.
 **Status.** `GET /signed/v1/status` and the simulator status keep
 `bodyRetention` (`all` on full nodes, `headers-only` on light nodes) and add
 `stateRetention` (`archive` or `window`), `stateRetentionWindow` (`"N"` or
-`null`), `stateFloor` and `receiptFloor` (decimal strings). All four are
-`null` on light nodes, whose reads inherit the peer's retention.
+`null`), `stateFloor` and `receiptFloor` (decimal strings), and `stateGc`
+(`on`, `suspended` or `off`). All five are `null` on light nodes, whose reads
+inherit the peer's retention.
 
 ## Reachability report (phase 0)
 
@@ -184,7 +187,16 @@ The archive union equals the stored totals exactly (objects and key+value
 bytes), which cross-checks the walker. A 128-snapshot window would keep 7 % of
 the objects; about 28 objects per block are history.
 
-## Physical deletion (phase 2, designed, not implemented)
+## Physical deletion (phase 2, implemented)
+
+Implemented as refined by
+[the 256-block pruning proposal](proposals/2026-11-20-index-pruning.md#implementation-2026-11-20):
+sparse counts, a release stack and a death queue tagged by commit epoch,
+speculative edges counted as phantoms while their target is absent, seeding
+by one scan of the object tables at create, adopt or `state gc-enable`, and
+budgets that are floors. The design below is the original phase 2 text; where
+it differs (dense `gc_refs`, a legacy sweep, heights instead of epochs), the
+proposal and the code win.
 
 Trie objects are content-addressed and shared: one object can be reached from
 many snapshots, from several maps of one namespace and from different

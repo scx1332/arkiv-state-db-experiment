@@ -531,6 +531,7 @@ pub fn status(node: &Node) -> Json {
                 "stateRetentionWindow": null,
                 "stateFloor": null,
                 "receiptFloor": null,
+                "stateGc": null,
             })
         }
     };

@@ -174,8 +174,11 @@ CI; each takes the binary path as an option.
 ## Not covered
 
 - Consensus: there is one proposer. No fork choice, no proposer rotation.
-- Physical pruning: retention sets a serving floor and reports
-  reachability; nothing is deleted, so no test deletes history.
+- Pruning of anything but trie objects: blocks, bodies and manifests are
+  never deleted. Garbage collection of trie objects is covered by
+  `arkiv-db-storage` (`gc::tests`, a toy graph over tiny domains),
+  `arkiv-db` (`it/durable_gc.rs`, archive against pruned) and
+  `arkiv-db-redb` (`it/gc.rs`, reopen, crash cuts, format gate, suspension).
 - Query proofs other than complete equality and range results.
 - Latency or throughput guarantees on shared hardware; benchmarks are
   reported separately under `docs/benchmarks/`.

@@ -678,6 +678,77 @@ fn genesis_command() -> Result<()> {
     Ok(())
 }
 
+/// `state gc-enable|gc-status|gc-verify|compact --run-dir DIR`: offline
+/// garbage collection tooling for a stopped node's `node.redb`.
+fn state_command() -> Result<()> {
+    let mut args = std::env::args().skip(2);
+    let sub = args.next().unwrap_or_default();
+    let mut flags = BTreeMap::new();
+    while let Some(key) = args.next() {
+        let value = args.next().ok_or(ErrorCode::InvalidRequest)?;
+        if !key.starts_with("--") || flags.insert(key, value).is_some() {
+            return Err(ErrorCode::InvalidRequest.into());
+        }
+    }
+    let flags = Flags(flags).only(&[&["--run-dir"]])?;
+    let run_dir = PathBuf::from(flags.required("--run-dir")?);
+    let path = run_dir.join("node.redb");
+    if sub == "compact" {
+        let started = std::time::Instant::now();
+        let (before, after) = arkiv_db_redb::compact_file(&path)?;
+        println!(
+            "{}",
+            serde_json::json!({"fileBytesBefore": before, "fileBytesAfter": after,
+                "seconds": started.elapsed().as_secs_f64()})
+        );
+        return Ok(());
+    }
+    // Opening takes the file lock: refused while a node runs on it.
+    let store = Arc::new(RedbStore::open(&path, RedbConfig::default())?);
+    let report = |state: &arkiv_db_storage::gc::GcState| {
+        serde_json::json!({
+            "suspended": state.suspended,
+            "epoch": state.epoch,
+            "storedObjects": state.stored_objects,
+            "storedBytes": state.stored_bytes,
+            "liveObjects": state.live_objects(),
+            "deadObjects": state.dead_objects,
+            "pendingRelease": state.pending,
+            "queued": state.queued,
+            "sharedRows": state.shared,
+            "phantomRows": state.phantoms,
+            "deletedTotal": state.deleted_total,
+        })
+    };
+    match sub.as_str() {
+        "gc-enable" => {
+            let spill = run_dir.join("gc-seed");
+            let _ = std::fs::remove_dir_all(&spill);
+            let started = std::time::Instant::now();
+            let state = arkiv_db::durable::gc::enable(store.as_ref(), Some(&spill))?;
+            let _ = std::fs::remove_dir_all(&spill);
+            let mut out = report(&state);
+            out["seconds"] = serde_json::json!(started.elapsed().as_secs_f64());
+            println!("{out}");
+        }
+        "gc-status" => match store.gc_state()? {
+            Some(state) => println!("{}", report(&state)),
+            None => println!("{}", serde_json::json!({"stateGc": "off"})),
+        },
+        "gc-verify" => {
+            arkiv_db::durable::gc::verify(store.as_ref()).map_err(|detail| {
+                ErrorCode::StorageUnavailable.caused_by(format_args!("gc verify: {detail}"))
+            })?;
+            println!("{}", serde_json::json!({"verified": true}));
+        }
+        _ => {
+            eprintln!("state gc-enable|gc-status|gc-verify|compact --run-dir DIR");
+            return Err(ErrorCode::InvalidRequest.into());
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
@@ -701,6 +772,9 @@ async fn main() {
 async fn run() -> Result<()> {
     if std::env::args().nth(1).as_deref() == Some("genesis") {
         return genesis_command();
+    }
+    if std::env::args().nth(1).as_deref() == Some("state") {
+        return state_command();
     }
     let (command, args) = arguments()?;
     match command.as_str() {
@@ -794,6 +868,7 @@ fn help() {
         "--request-id 0xHEX64 --to 0xADDRESS --amount-wei DECIMAL --out FILE [--gas-limit ",
         "21000]\n",
         "arkiv-proposer submit --peer URL --transaction-file FILE\n",
+        "arkiv-proposer state gc-enable|gc-status|gc-verify|compact --run-dir DIR (node stopped)\n",
         "Optional private Prometheus exporter: --metrics-listen 127.0.0.1:9600 ",
         "[--metrics-table-stats-secs N] (minimum 10; opt-in table walk, which keeps redb from ",
         "reusing freed pages while it runs). Metrics use rogue_one_ prefix.\n",
@@ -812,7 +887,11 @@ fn help() {
         "history.redb separately from node.redb. --state-retention N serves state ",
         "(balances, proofs, queries, receipts/logs) only for the head and the N snapshots ",
         "before it and refuses older heights with HistoryPruned; archive (default) serves ",
-        "every height. Nothing is deleted yet, and a pruned floor never moves back. ",
+        "every height. A pruned floor never moves back. A window node that creates or ",
+        "adopts its state turns on garbage collection in node.redb: objects no snapshot ",
+        "from the floor up (or open reader) reaches are deleted inside block commits, so ",
+        "the file stays bounded. An older state file keeps everything until `state ",
+        "gc-enable` counts it offline. ",
         "Entity queries and counts, proofs and the state tree explorer run outside the ",
         "node lock against a pinned snapshot: at most --read-concurrency (1-64) at once, ",
         "others refused with ServerBusy (HTTP 429), each stopped after ",
@@ -1042,6 +1121,8 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
             .get_or("--state-retention", "archive")
             .parse()
             .map_err(|_| ErrorCode::InvalidRequest)?,
+        // Measurement switch: count but never delete (soak step "count-only").
+        gc_count_only: std::env::var_os("ARKIV_STATE_GC_COUNT_ONLY").is_some(),
         ..Options::default()
     };
     let databases = std::cell::RefCell::new(Vec::<arkiv_node::signed::metrics::Database>::new());
@@ -1230,6 +1311,7 @@ fn producer_node(env: &NodeEnv<'_>, adopt: bool) -> Result<Node> {
     } else {
         launch_producer(env, state, history_store, signer, adopt)?
     };
+    arkiv_node::retention::collect_new_state(&mut host.engine, path)?;
     match args.get_or("--start", "paused").as_str() {
         "paused" => {}
         "running" => {
@@ -1503,6 +1585,7 @@ async fn follower_node(env: &NodeEnv<'_>, light: bool) -> Result<Node> {
         if host.identity != identity {
             return Err(ErrorCode::IdentityMismatch.into());
         }
+        arkiv_node::retention::collect_new_state(&mut host.engine, path)?;
         host.paused = false;
         host.health = Health::Following;
         Ok(Node::Full(Box::new(host)))

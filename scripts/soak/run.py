@@ -4,6 +4,7 @@
     scripts/soak/run.py --work DIR [--quick] [--growth-min 60] [--churn-min 40]
         [--readers-min 15] [--block-ms 250] [--port 18700] [--drop-caches]
         [--bundle DIR --prebuilt-state DIR --sourcify-keys FILE --mutate-min 60]
+        [--state-retention archive|N] [--patch-min 0]
 
 By default the node starts from an empty genesis. With --bundle it starts from
 a built genesis bundle instead (the Sourcify prefill, say), installing
@@ -13,6 +14,8 @@ of that dataset, owned by the soak account, for the mutate phases and probes.
 Phases, each writing JSON lines under DIR (see docs/benchmarking.md):
 
   cohort   2,000 entities every read probe is aimed at, so probes stay comparable
+  patch    (with --patch-min) patch the cohort itself, rewriting two indexed attributes of a
+           fixed small state: what the state file does under sustained patches
   mutate   (with --sourcify-keys) patch dataset contracts: a third of the time
            only `verifiedat`, then as a re-verification does, rewriting
            attributes whose values millions of contracts share
@@ -60,7 +63,8 @@ METRICS = re.compile(
     r"^rogue_one_((?:head_height|pending_transactions|blocks_produced_total|node_tick_\w+"
     r"|db_(?:stored_bytes|file_allocated_bytes|entries|commits_total|commit_\w+_total"
     r"|backend_(?:read|write)_bytes_total|operation_errors_total"
-    r"|operation_duration_seconds_(?:sum|count)))(?:\{[^}]*\})?) (\S+)$"
+    r"|operation_duration_seconds_(?:sum|count))"
+    r"|state_(?:floor|durable_floor|lowest_pin_height|pinned_handles|gc_\w+))(?:\{[^}]*\})?) (\S+)$"
 )
 
 
@@ -191,6 +195,7 @@ class Soak:
             "--private-listen", f"127.0.0.1:{port + 1}",
             "--metrics-listen", f"127.0.0.1:{port + 2}",
             "--start", "running",
+            "--state-retention", self.args.state_retention,
         ] + (["--prebuilt-state", str(self.prebuilt), "--genesis-install", "adopt"] if self.prebuilt else [])  # fmt: skip
 
     def genesis(self):
@@ -356,6 +361,12 @@ class Soak:
         self.enter("cohort")
         self.load("cohort", "writes.jsonl", lifetime_blocks=self.growth_lifetime)
 
+        if a.patch_min > 0:
+            self.probing.set()
+            self.enter("patch")
+            self.load("mutate", "writes.jsonl", set="cohort", duration_s=minutes(a.patch_min),
+                      sourcify_keys=str(self.work / "cohort-keys.json"))  # fmt: skip
+
         if a.sourcify_keys and a.mutate_min > 0:
             self.probing.set()
             self.enter("mutate-verifiedat")
@@ -416,6 +427,8 @@ def main():
     parser.add_argument("--port", type=int, default=18700, help="RPC port; the next two are also used")
     parser.add_argument("--min-free-gb", type=int, default=100)
     parser.add_argument("--drop-caches", action="store_true", help="drop the page cache before the restart (needs sudo)")
+    parser.add_argument("--state-retention", default="archive", help="the producer's --state-retention: archive or a window N")
+    parser.add_argument("--patch-min", type=float, default=0, help="minutes of patching the cohort before growth")
     args = parser.parse_args()
     if args.quick:
         args.growth_min, args.churn_min, args.readers_min, args.mutate_min = 1, 1, 0.5, 1.5

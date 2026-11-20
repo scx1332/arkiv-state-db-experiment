@@ -66,8 +66,9 @@ fn create(nonce: u64) -> SignedTx {
 
 /// Head 6: block 1 bootstrap, creates in blocks 2 and 3, then empty blocks.
 fn node(retention: Retention) -> (Shared, String) {
+    let store = Arc::new(MemoryVersionedStore::new());
     let mut host = Host::create(
-        Arc::new(MemoryVersionedStore::new()),
+        store.clone(),
         Options {
             retention,
             ..Options::default()
@@ -82,6 +83,18 @@ fn node(retention: Retention) -> (Shared, String) {
         Prefill::None,
     )
     .unwrap();
+    // A window node collects garbage in the state it creates.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let scratch = std::env::temp_dir().join(format!(
+        "signed-retention-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    arkiv_node::retention::collect_new_state(&mut host.engine, &scratch).unwrap();
+    assert_eq!(
+        host.engine.collects_garbage(),
+        retention != Retention::Archive
+    );
     host.produce().unwrap();
     let tx = create(0);
     let hash = hex(tx.hash().as_slice());
@@ -93,6 +106,11 @@ fn node(retention: Retention) -> (Shared, String) {
         host.produce().unwrap();
     }
     assert_eq!(host.head.height, 6);
+    if host.engine.collects_garbage() {
+        arkiv_db::durable::gc::verify(store.as_ref()).unwrap();
+        let state = host.engine.gc_state().unwrap().unwrap();
+        assert!(state.deleted_total > 0, "{state:?}");
+    }
     (
         Runtime::new(Node::Full(Box::new(host)), None, None, None).unwrap(),
         hash,
@@ -271,6 +289,7 @@ async fn rest_answers_410_with_floor_details() {
     assert_eq!(status["stateRetentionWindow"], "2");
     assert_eq!(status["stateFloor"], "4");
     assert_eq!(status["receiptFloor"], "5");
+    assert_eq!(status["stateGc"], "on");
     let gone = |height: u64| {
         json!({
             "error": "HistoryPruned",
@@ -374,4 +393,5 @@ async fn archive_default_serves_every_height() {
     assert_eq!(status["stateRetentionWindow"], Value::Null);
     assert_eq!(status["stateFloor"], "0");
     assert_eq!(status["receiptFloor"], "0");
+    assert_eq!(status["stateGc"], "off");
 }

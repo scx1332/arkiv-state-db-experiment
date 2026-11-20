@@ -400,6 +400,21 @@ rogue_one_pending_transactions _
 # HELP rogue_one_production_paused Whether full host is paused (producer only meaningful).
 # TYPE rogue_one_production_paused gauge
 rogue_one_production_paused _
+# HELP rogue_one_state_durable_floor State floor recorded with the durable head.
+# TYPE rogue_one_state_durable_floor gauge
+rogue_one_state_durable_floor _
+# HELP rogue_one_state_floor Lowest height whose state is served.
+# TYPE rogue_one_state_floor gauge
+rogue_one_state_floor _
+# HELP rogue_one_state_gc_horizon_height Lowest height a reader may still open: min(durable floor, lowest pin). Objects that died before it are deleted.
+# TYPE rogue_one_state_gc_horizon_height gauge
+rogue_one_state_gc_horizon_height _
+# HELP rogue_one_state_lowest_pin_height Lowest snapshot height an open handle reads; a stuck one holds deletion.
+# TYPE rogue_one_state_lowest_pin_height gauge
+rogue_one_state_lowest_pin_height _
+# HELP rogue_one_state_pinned_handles Open snapshot handles.
+# TYPE rogue_one_state_pinned_handles gauge
+rogue_one_state_pinned_handles _
 # HELP rogue_one_uptime_seconds Exporter uptime in seconds.
 # TYPE rogue_one_uptime_seconds gauge
 rogue_one_uptime_seconds _

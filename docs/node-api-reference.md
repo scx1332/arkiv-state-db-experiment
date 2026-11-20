@@ -64,7 +64,9 @@ with browser Fetch; use POST for control operations.
 
 State history is served according to the node's `--state-retention`
 (archive by default). `status` reports `stateRetention`,
-`stateRetentionWindow`, `stateFloor` and `receiptFloor`. State reads below
+`stateRetentionWindow`, `stateFloor`, `receiptFloor` and `stateGc` (`on` when
+the state file deletes what no retained snapshot reaches, `suspended` after a
+failed count check, `off` when it keeps everything). State reads below
 `stateFloor`, and logs, receipts and block JSON (which carries `logsBloom`)
 below `receiptFloor`, are refused: REST answers `410 Gone` with
 `{"error":"HistoryPruned","requestedHeight":"N","stateFloor":"F"}`, JSON-RPC

@@ -19,11 +19,29 @@ The work directory must be new and on a real disk; a two-hour run writes
 about 15 GiB. `--drop-caches` needs passwordless `sudo`. The node listens on
 loopback at `--port` (18700) and the two ports after it.
 
+`--state-retention N` starts the producer with a window of `N` blocks, so its
+new `node.redb` collects garbage (default `archive`). `--patch-min M` adds a
+`patch` phase after the cohort: `M` minutes of patches that rewrite two
+indexed attributes of the cohort's own 2,000 items, a fixed small state
+under sustained patches. To compare the state file with and without pruning:
+
+```sh
+scripts/soak/run.py --work /data/soak/archive --patch-min 10 \
+    --growth-min 0 --churn-min 0 --readers-min 0
+scripts/soak/run.py --work /data/soak/pruned --patch-min 10 \
+    --growth-min 0 --churn-min 0 --readers-min 0 --state-retention 256
+```
+
+The metrics exporter no longer walks the database (see
+[metrics](metrics.md#opt-in-table-walk)); samples record file sizes from
+`stat` and, with pruning, the `state_gc_*` counters.
+
 ## Phases
 
 | Phase | Default | Load | What it shows |
 | --- | --- | --- | --- |
 | cohort | 4 s | 2,000 entities | The fixed set every read probe is aimed at |
+| patch | 0 (`--patch-min`) | Patches of the cohort's `score` and `category`, at the block cap | The state file under sustained patches of a fixed state |
 | growth | 60 min | Creates at the block cap, lifetime 2,000,000 blocks | Write rate, latency, memory and disk as state only grows |
 | churn | 40 min | Per 16 operations: 11 creates, 3 patches, 1 delete, 1 extension; lifetime 10 minutes | Steady state: after 10 minutes the expiry sweep deletes as fast as the workload creates |
 | readers | 15 min | Churn at half the block cap, plus 4 callers reading | Read latency beside production, and how many reads are refused with `ServerBusy` |

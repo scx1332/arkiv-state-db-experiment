@@ -49,6 +49,17 @@ struct NodeSample {
     pool: Option<(usize, usize)>,
     paused: Option<bool>,
     observed: Option<u64>,
+    retention: Option<RetentionSample>,
+}
+
+/// What bounds deletion on a full node: read from the engine's atomics.
+#[derive(Clone, Copy, Default)]
+struct RetentionSample {
+    floor: u64,
+    durable_floor: u64,
+    horizon: u64,
+    lowest_pin: Option<u64>,
+    pinned_handles: usize,
 }
 
 #[derive(Default)]
@@ -254,6 +265,14 @@ impl Metrics {
                         Node::Full(h) => {
                             sample.pool = Some((h.pool.len(), h.pool.bytes()));
                             sample.paused = Some(h.paused);
+                            let status = h.engine.retention_status();
+                            sample.retention = Some(RetentionSample {
+                                floor: status.floor,
+                                durable_floor: status.durable_floor,
+                                horizon: h.engine.gc_horizon(),
+                                lowest_pin: status.lowest_pinned,
+                                pinned_handles: status.pinned_handles,
+                            });
                         }
                         Node::Light { light, .. } => {
                             sample.observed = Some(light.observed);
@@ -342,6 +361,15 @@ impl Metrics {
             let labels = format!("{{database=\"{}\"}}", db.name);
             if let Some(file) = FileSize::of(&db.path) {
                 file.export(&mut families, &labels);
+            }
+            if let Ok(Some(state)) = db.store.gc_state() {
+                export_gc(
+                    &mut families,
+                    &labels,
+                    &state,
+                    db.store.gc_report(),
+                    db.store.gc_seconds(),
+                );
             }
             if self.table_stats {
                 sample.export(&mut families, &labels);
@@ -443,6 +471,41 @@ impl NodeSample {
                 observed,
             );
         }
+        if let Some(r) = self.retention {
+            families.gauge(
+                "state_floor",
+                "Lowest height whose state is served.",
+                "",
+                r.floor,
+            );
+            families.gauge(
+                "state_durable_floor",
+                "State floor recorded with the durable head.",
+                "",
+                r.durable_floor,
+            );
+            families.gauge(
+                "state_gc_horizon_height",
+                "Lowest height a reader may still open: min(durable floor, lowest pin). \
+                 Objects that died before it are deleted.",
+                "",
+                r.horizon,
+            );
+            if let Some(pin) = r.lowest_pin {
+                families.gauge(
+                    "state_lowest_pin_height",
+                    "Lowest snapshot height an open handle reads; a stuck one holds deletion.",
+                    "",
+                    pin,
+                );
+            }
+            families.gauge(
+                "state_pinned_handles",
+                "Open snapshot handles.",
+                "",
+                r.pinned_handles,
+            );
+        }
     }
 }
 
@@ -479,6 +542,143 @@ impl Activity {
             self.nanos.load(Ordering::Relaxed) as f64 / 1e9,
         );
     }
+}
+
+/// The garbage-collection counters the store keeps in every commit: no
+/// walk, no read.
+fn export_gc(
+    families: &mut Families,
+    labels: &str,
+    state: &arkiv_db_storage::gc::GcState,
+    report: Option<arkiv_db_storage::gc::GcReport>,
+    seconds: f64,
+) {
+    for (name, help, value) in [
+        (
+            "state_gc_suspended",
+            "1 when an invariant failed and collection stopped until a rebuild.",
+            u64::from(state.suspended),
+        ),
+        ("state_gc_epoch", "Commit epoch of the head.", state.epoch),
+        (
+            "state_gc_stored_objects",
+            "Objects in the object tables, live or dead.",
+            state.stored_objects,
+        ),
+        (
+            "state_gc_stored_bytes",
+            "Encoded bytes of the stored objects (values only).",
+            state.stored_bytes,
+        ),
+        (
+            "state_gc_live_objects",
+            "Stored objects that are not dead.",
+            state.live_objects(),
+        ),
+        (
+            "state_gc_live_bytes",
+            "Stored bytes not queued for deletion (pending objects included).",
+            state.live_bytes(),
+        ),
+        (
+            "state_gc_dead_objects",
+            "Dead objects not yet deleted: pending release or queued.",
+            state.dead_objects,
+        ),
+        (
+            "state_gc_pending_release",
+            "Dead objects whose references are not released yet (backlog).",
+            state.pending,
+        ),
+        (
+            "state_gc_queued_objects",
+            "Released dead objects waiting for the horizon.",
+            state.queued,
+        ),
+        (
+            "state_gc_queued_bytes",
+            "Bytes of the queued dead objects.",
+            state.queued_bytes,
+        ),
+        (
+            "state_gc_shared_entries",
+            "Rows of the sparse count table (objects referenced twice or more).",
+            state.shared,
+        ),
+        (
+            "state_gc_phantom_entries",
+            "Rows counting speculative references to absent objects.",
+            state.phantoms,
+        ),
+    ] {
+        families.gauge(name, help, labels, value);
+    }
+    if let Some(report) = report {
+        for (name, help, value) in [
+            (
+                "state_gc_last_released",
+                "Dead objects released by the last commit.",
+                report.released,
+            ),
+            (
+                "state_gc_last_deleted",
+                "Objects deleted by the last commit.",
+                report.deleted,
+            ),
+            (
+                "state_gc_last_eligible",
+                "Deletable objects when the last commit started (deletion backlog).",
+                report.eligible,
+            ),
+        ] {
+            families.gauge(name, help, labels, value);
+        }
+    }
+    for (name, help, value) in [
+        (
+            "state_gc_born_total",
+            "Objects inserted since the counts were built.",
+            state.born_total,
+        ),
+        (
+            "state_gc_died_total",
+            "Objects whose count reached zero.",
+            state.died_total,
+        ),
+        (
+            "state_gc_released_total",
+            "Dead objects whose references were released.",
+            state.released_total,
+        ),
+        (
+            "state_gc_deleted_total",
+            "Objects deleted.",
+            state.deleted_total,
+        ),
+        (
+            "state_gc_deleted_bytes_total",
+            "Bytes of the objects deleted.",
+            state.deleted_bytes_total,
+        ),
+        (
+            "state_gc_resurrected_total",
+            "Dead objects a later commit brought back.",
+            state.resurrected_total,
+        ),
+        (
+            "state_gc_over_budget_total",
+            "Commits that released or deleted past their budget to shrink a backlog.",
+            state.over_budget_total,
+        ),
+    ] {
+        families.counter(name, help, labels, value);
+    }
+    families.counter(
+        "state_gc_seconds_total",
+        "Wall time of garbage-collecting commits in this process (whole commit).",
+        labels,
+        seconds,
+    );
 }
 
 /// A file's size from one `stat`: cheap enough for every scrape.
@@ -716,6 +916,13 @@ mod tests {
             pool: Some((3, 4096)),
             paused: Some(true),
             observed: Some(9),
+            retention: Some(RetentionSample {
+                floor: 3,
+                durable_floor: 2,
+                horizon: 2,
+                lowest_pin: Some(4),
+                pinned_handles: 2,
+            }),
         };
         metrics.refresh();
         let rendered = metrics.render();
@@ -744,6 +951,47 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         // A missing file drops its gauges instead of failing the scrape.
         assert!(!metrics.render().contains("db_file_apparent_bytes{"));
+    }
+
+    /// A state file with garbage collection exports its counters at each
+    /// scrape, read from the store's cached state: no table is walked.
+    #[test]
+    fn collecting_state_exports_gc_counters_without_reading() {
+        use arkiv_db::durable::{DurableEngine, EngineGenesis, Initialization, Options, Retention};
+        let (path, metrics) = walking_databases(false);
+        let store = metrics.databases[0].store.clone();
+        let options = Options {
+            retention: Retention::Window(4),
+            ..Options::default()
+        };
+        let Initialization::Committed(mut engine) = DurableEngine::initialize(
+            store.clone(),
+            EngineGenesis::new([5; 32], arkiv_db::PriceSchedule::FIXTURE),
+            options,
+        )
+        .unwrap() else {
+            panic!("initialization commits")
+        };
+        engine.enable_gc(None).unwrap();
+        for _ in 0..3 {
+            let branch = engine.begin(engine.head(), None).unwrap();
+            engine.prepare(branch.try_seal().unwrap()).unwrap();
+            engine.commit().unwrap();
+        }
+        let reads = store.probe().stats().read_bytes;
+        let rendered = metrics.render();
+        assert_eq!(store.probe().stats().read_bytes, reads);
+        for family in [
+            "rogue_one_state_gc_live_objects{database=\"state\"}",
+            "rogue_one_state_gc_pending_release{database=\"state\"}",
+            "rogue_one_state_gc_deleted_total{database=\"state\"}",
+            "rogue_one_state_gc_last_eligible{database=\"state\"}",
+            "rogue_one_state_gc_seconds_total{database=\"state\"}",
+        ] {
+            assert!(rendered.contains(family), "{family} missing");
+        }
+        drop(engine);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

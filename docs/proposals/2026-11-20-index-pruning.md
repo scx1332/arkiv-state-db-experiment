@@ -20,6 +20,12 @@ client needs to finish reading a result: 256 blocks is 64 s at 250 ms
 blocks. Older history is not kept for its own sake. Rollback, if it is
 added, also needs states inside the window, but it does not set `N`.
 
+**Decision (2026-11-20): everything older than the window disappears.** The
+chain is optimised for throughput, not for recovering history. Receipts,
+logs, blocks and transaction lookups expire with the state they are rebuilt
+from; nothing is stored to outlive the window. Explorers and anyone who
+needs old history run an archive node or index the chain themselves.
+
 ## Summary
 
 - **Mechanism.** Each object gets a persistent reference count from the
@@ -49,11 +55,10 @@ added, also needs states inside the window, but it does not set `N`.
   4.5 GiB over the last 40 minutes. Removing that walk comes first. Pruning
   then removes the growth that is real history, roughly 20 KiB per
   operation (estimate below).
-- **A 256-block window costs more than state reads.** Receipts, logs,
+- **Receipts expire with the window, by decision.** Receipts, logs,
   `logsBloom` and so `eth_getBlockByNumber` are rebuilt from the state at
-  `h - 1`. With a 256-block window they disappear after 64 s at 250 ms
-  blocks. Before 256 becomes a default, receipts must be stored at commit
-  time, or that loss must be accepted explicitly.
+  `h - 1`, so they disappear after 64 s at 250 ms blocks. They are not
+  stored separately. Clients must read a receipt within the window.
 - **Nothing in consensus depends on pruning.** Counts, queues and floors
   are local to the node and never hashed. A bug in garbage collection (GC)
   surfaces as a storage availability error, never as a different root or
@@ -453,8 +458,8 @@ migration path, and `compact` is the fallback when disk is short.
 | Historical state reads (`eth_getBalance`, `eth_getTransactionCount`, `eth_call`, `arkiv_getEntityCount` at a tag; signed REST at `?height`) | served for `[F, head]`, refused below with `-32006` or HTTP 410 (`crates/arkiv-node/src/retention.rs:1-60`) | none. Phase 1 already refuses |
 | Proofs (`accounts/{a}/proof`, `query/eq`, `query/range`) and light verified reads | the same window. A light client must request a proof within 64 s of the height it verifies | none in code. Document the horizon for light-client and SDK users |
 | `arkiv_query` with `atBlock` and cursors | **the reason for the window.** The cursor reopens the snapshot on every page and is refused once the height falls below the floor. Paging through a result at a fixed block must finish within `N` blocks, about 64 s at 256 | return a clear `HistoryPruned` on an expired cursor, and document the limit for SDK users |
-| **Receipts, logs, `logsBloom`, `eth_getBlockByNumber`/`ByHash`, `eth_getTransactionReceipt`, `eth_getLogs`, filter logs** | rebuilt from body `h` plus **state `h-1`** (`crates/arkiv-node/src/signed/rpc/logs.rs:96-100`), so refused below `F + 1`. A transaction receipt older than about 64 s is gone, and so is the block with its bloom | **store per-block logs and the bloom at commit**: derived data, written beside the block record, which makes receipts independent of state retention. The feed already stores a `changes` list (`crates/arkiv-node/src/simulator/wire.rs:225-237`). Whether it is enough to rebuild logs is **not verified** |
-| WebSocket `logs`/`newHeads` replay | a replay that falls below the floor ends with a `-32006` notification (phase 1) | none, or solved by stored logs |
+| **Receipts, logs, `logsBloom`, `eth_getBlockByNumber`/`ByHash`, `eth_getTransactionReceipt`, `eth_getLogs`, filter logs** | rebuilt from body `h` plus **state `h-1`** (`crates/arkiv-node/src/signed/rpc/logs.rs:96-100`), so refused below `F + 1`. A transaction receipt older than about 64 s is gone, and so is the block with its bloom | none: accepted (see the decision above). Refuse with `HistoryPruned`, and document that SDK clients must fetch receipts within the window |
+| WebSocket `logs`/`newHeads` replay | a replay that falls below the floor ends with a `-32006` notification (phase 1) | none |
 | Transaction-hash and block-hash index | built from `history.redb` bodies, not from state (`crates/arkiv-node/src/signed/rpc/mod.rs:46-62`), so not affected | none for pruning. See restart |
 | Restart | `rpc::initial_state` (`rpc/mod.rs:66-79`) reads and authenticates every block from 0 (`crates/arkiv-node/src/signed/host.rs:565-596`). That is O(chain): 614 s at 108,056 blocks, about 5.7 ms per block. The index is also capped at 1,000,000 entries (`rpc/mod.rs:33`), and the cap error is ignored. Pruning does not change this. Opening a GC file reads only the head's floor record and `store/gc/state`, with no walk | separate fix, required for "bounded" restarts: persist the index in `history.redb`, written with each body. Entries above the durable head of `node.redb` are ignored and overwritten |
 | Metering (`crates/arkiv-db/src/meter.rs:4-11`) | charges count logical units and are "independent of … cache state … or the physical layout of storage". A historical read is priced with that snapshot's schedule (`docs/metering.md:444-447`). Pruning only decides whether a read is admitted. The floor check runs before any charge or storage access (`mod.rs:722-737`), and proof node counts depend only on trie shape, which pruning does not change | none. Add a differential test: same request, same receipt, archive against pruned, inside the window |
@@ -483,9 +488,15 @@ needs a new store operation. For pruning:
 - **Open handles on orphaned heights** stay safe because deaths and pins
   are tagged with epochs (see above).
 
-### history.redb: keep for now
+### history.redb: prune with the window (target), keep until snapshot sync
 
-Keep every body:
+The decision is that blocks disappear too. The target is a body floor that
+follows the state floor, so `history.redb`, the `Blocks` records in
+`node.redb` and the transaction-hash index all stay bounded by the window.
+That also makes restart bounded: the hash index is rebuilt from at most `N`
+bodies instead of the whole chain.
+
+Until then, bodies are kept, because:
 
 - Followers replicate and re-execute from genesis, and nothing else serves
   them. There is no state snapshot sync yet
@@ -496,9 +507,10 @@ Keep every body:
   which 10.6 GiB stored, against 146 GiB for `node.redb`. It grows linearly
   (about 100 KB per block under that load), not with write amplification.
 
-Body retention can come later, as its own floor that is made durable in
-`node.redb` first. It needs snapshot sync for new nodes and a persisted
-transaction index. Separately, the `Blocks` table in `node.redb` (84 KB per
+Body retention is its own floor, made durable in `node.redb` first. Its
+prerequisite is snapshot sync: a new follower must start from a recent
+state, not by replaying from genesis. With bodies bounded, a persisted
+transaction index is no longer needed. Separately, the `Blocks` table in `node.redb` (84 KB per
 block, mostly feed JSON) should move to `history.redb` or shrink. Then
 `node.redb` is bounded by state alone (an open question).
 
@@ -535,8 +547,8 @@ block, mostly feed JSON) should move to `history.redb` or shrink. Then
 - **The node** keeps `--state-retention archive|N`. `N` is the
   query-consistency window and defaults to 256. Once rollback exists, a
   constant `ROLLBACK_DEPTH` may set a minimum for producer and full roles;
-  - the default stays `archive` until stored receipts and copy-migrate
-    land, then becomes `256` for producer and full roles;
+  - the default stays `archive` until copy-migrate lands, then becomes
+    `256` for producer and full roles;
   - archive stays an opt-in for explorers. An archive file has no GC
     tables.
 - **Genesis**, later: when rollback depth becomes a protocol property
@@ -617,24 +629,27 @@ block, mostly feed JSON) should move to `history.redb` or shrink. Then
 0. Drop the periodic `data_stats` from the exporter and rerun the Sourcify
    soak (soak step 1). This is independent of pruning and stops most of the
    growth seen.
-1. Store per-block logs and the bloom; persist the transaction and block
-   hash index. Both are needed before a small window is useful to SDK users.
+1. Bound restart: rebuild the transaction and block hash index from the
+   window's bodies only, once bodies are pruned; until then, keep the
+   current full rebuild.
 2. Add the GC extension to the store contract, with counts in count-only
    mode, the verifier and metrics (soak step 2).
 3. Turn on deletion with budgets (soak steps 3 to 5).
 4. Write copy-migrate (soak step 6). Then switch the producer and full
    default to 256.
-5. Later: rewind, the genesis minimum, body retention, and snapshot sync.
+5. Snapshot sync, then body retention with the same window, so that
+   blocks, receipts and the hash index disappear with the state.
+6. Later: rewind and the genesis minimum.
 
 ## 6. Open questions and risks
 
 - **Exact window semantics.** The window keeps queries consistent for 256
   blocks. This proposal takes `W = 256`: a snapshot taken at the head stays
   readable while 256 more blocks are produced (257 states kept).
-- **Receipts.** Store logs (recommended), or accept that receipts expire
-  after 64 s on pruned nodes and send SDK and explorer users to archive
-  nodes? Is the feed's `changes` list enough to rebuild logs without state?
-  (Not verified.)
+- **Receipts.** Decided: they expire with the window. Open: whether the
+  SDK's receipt wait (`waitForTransactionReceipt`) always polls within 64 s
+  under load, since inclusion already takes up to 8 s at p95 on the large
+  state.
 - **Query pagination.** The window is what makes paging consistent, so 64 s
   is the time a client has to read a result. If that proves too short for
   large results, raise `N` rather than add per-cursor pins or leases.

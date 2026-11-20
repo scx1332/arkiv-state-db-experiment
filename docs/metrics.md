@@ -1,11 +1,11 @@
 # Node metrics
 
 `arkiv-proposer producer|full|light` accepts `--metrics-listen 127.0.0.1:19600`
-and optional `--metrics-interval-secs 300` (minimum 10). The dedicated HTTP
-listener serves Prometheus text at `/metrics`. Disabled unless configured.
-Keep the exporter on loopback and publish it, if at all, through a reverse
-proxy route that exposes exactly `/metrics`; the private control listener
-must stay blocked.
+and optional `--metrics-table-stats-secs N` (minimum 10, off by default). The
+dedicated HTTP listener serves Prometheus text at `/metrics`. Disabled unless
+configured. Keep the exporter on loopback and publish it, if at all, through a
+reverse proxy route that exposes exactly `/metrics`; the private control
+listener must stay blocked.
 
 Metric names use the prefix `rogue_one_`, after the first deployment
 (Prometheus identifiers cannot contain hyphens). Add chain and instance
@@ -17,32 +17,44 @@ Every DB has a bounded `database` label: `state` (node.redb), `history`
 (history.redb), or `headers` (headers.redb). The exporter never exposes paths,
 keys, payloads, namespace IDs, wallet addresses, or peer credentials.
 
+By default nothing walks the database. Each scrape reads:
+
+- `db_file_apparent_bytes`: file length, including sparse holes (`stat`).
+- `db_file_allocated_bytes`: actual filesystem allocation (`st_blocks * 512`,
+  Unix only). This is absent on platforms without that measurement.
+- the operation timings and commit counters below, which the store keeps in
+  memory.
+
+### Opt-in table walk
+
+`--metrics-table-stats-secs N` adds a background walk of every table
+(`RedbStore::data_stats`) every `N` seconds after the previous walk ends. **Do
+not enable it on a large state.** The walk runs in one redb read transaction,
+and redb reuses no page freed while that transaction is open: on the Sourcify
+state a walk took over an hour and the file grew from 106 GiB to 650 GiB with
+pages nobody could reuse
+([2026-11-19 Sourcify soak](benchmarks/2026-11-19-sourcify-soak.md)). Use it
+on small states, or run `data_stats` offline on a stopped copy instead. With
+the walk enabled the scrape also exports:
+
 - `db_stored_bytes`: encoded keys and values in redb user tables. This already
   includes our indexes, Merkle objects, serialized records, and retained history;
   it is **not** application payload bytes.
-- `db_file_apparent_bytes`: file length, including sparse holes.
-- `db_file_allocated_bytes`: actual filesystem allocation (`st_blocks * 512`,
-  Unix only). This is absent on platforms without that measurement.
-- `db_disk_overhead_bytes`: allocated bytes minus stored bytes, floored at zero.
-  Includes metadata, partially filled pages and allocated free space.
+- `db_disk_overhead_bytes`: allocated bytes at the walk minus stored bytes,
+  floored at zero. Includes metadata, partially filled pages and allocated free
+  space.
 - `db_table_metadata_bytes` and `db_table_fragmented_bytes`: metadata and unused
   bytes **within user table pages only**. They exclude the database directory,
   allocator and free pages. Do not add these to disk overhead: they overlap it.
 - `db_entries` and `db_tables`: retained table entries and table count, not the
   number of live entities. Expired data may remain in historical objects.
+- `db_stats_timestamp_seconds`, `db_stats_refresh_duration_seconds`,
+  `db_stats_refresh_success` and `db_stats_refresh_errors_total`: walk
+  freshness, cost and failures. Before the first success the data gauges are
+  absent. Failures retain the last good data with its original timestamp.
 
-A single background worker walks read-only table snapshots, never taking the
-node mutex or a redb write transaction. The next interval begins after the scan
-finishes; scans cannot overlap within a process. Scans can consume disk/cache
-bandwidth and temporarily pin old pages, so the conservative default is five
-minutes. Filesystem allocation is sampled just after the table snapshot; concurrent
-writes can introduce a small difference between these measurements. Backend read
-counters include scan traffic. No compaction or pruning is performed.
-
-`db_stats_timestamp_seconds`, `db_stats_refresh_duration_seconds`,
-`db_stats_refresh_success` and `db_stats_refresh_errors_total` expose scan
-freshness/cost/failures. Before first success data gauges are absent. Failures
-retain last good data with its original timestamp. Always check freshness.
+The walk never takes the node mutex or a redb write transaction, and walks
+never overlap within a process. Backend read counters include its traffic.
 
 ## DB timings and node activity
 
@@ -118,6 +130,6 @@ histogram_quantile(0.95, sum by (le, job, database, layer, operation) (
 rate(rogue_one_db_operation_duration_seconds_sum{layer="backend",operation="sync_data"}[5m])
 / rate(rogue_one_db_operation_duration_seconds_count{layer="backend",operation="sync_data"}[5m])
 
-# Storage sample age (seconds); default interval is 300 plus scan duration.
+# Opt-in table walk only: sample age (seconds), the interval plus the walk.
 time() - rogue_one_db_stats_timestamp_seconds
 ```

@@ -738,7 +738,7 @@ const NODE_FLAGS: &[&str] = &[
     "--private-listen",
     "--bundle",
     "--metrics-listen",
-    "--metrics-interval-secs",
+    "--metrics-table-stats-secs",
     "--read-concurrency",
     "--read-deadline-secs",
     "--read-max-groups",
@@ -795,7 +795,8 @@ fn help() {
         "21000]\n",
         "arkiv-proposer submit --peer URL --transaction-file FILE\n",
         "Optional private Prometheus exporter: --metrics-listen 127.0.0.1:9600 ",
-        "[--metrics-interval-secs 300] (minimum 10). Metrics use rogue_one_ prefix.\n",
+        "[--metrics-table-stats-secs N] (minimum 10; opt-in table walk, which keeps redb from ",
+        "reusing freed pages while it runs). Metrics use rogue_one_ prefix.\n",
         "Private listener/full replication use ARKIV_PROPOSER_TOKEN (at least 32 bytes). ",
         "Producer starts paused. Every chain runs the glm-v2 gas profile with funded ",
         "accounts. A bundle chain creates the entities namespace (and its prefill) at ",
@@ -1005,11 +1006,15 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
         .get("--bundle")
         .map(|dir| load_bundle(Path::new(dir)))
         .transpose()?;
-    let metrics_interval = number(&args.get_or("--metrics-interval-secs", "300"))?;
-    if metrics_interval < 10 {
+    // The table walk is opt-in: it pins every page freed while it runs.
+    let table_stats = args
+        .get("--metrics-table-stats-secs")
+        .map(|secs| number(secs))
+        .transpose()?;
+    if table_stats.is_some_and(|secs| secs < 10) {
         return Err(ErrorCode::InvalidRequest.into());
     }
-    if args.contains_key("--metrics-interval-secs") && !args.contains_key("--metrics-listen") {
+    if table_stats.is_some() && !args.contains_key("--metrics-listen") {
         return Err(ErrorCode::InvalidRequest.into());
     }
     let defaults = ReadLimits::default();
@@ -1095,7 +1100,7 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
                     _ => "light",
                 },
                 listen,
-                Duration::from_secs(metrics_interval),
+                table_stats.map(Duration::from_secs),
             )
             .await?,
         )

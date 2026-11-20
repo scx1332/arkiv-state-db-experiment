@@ -1,4 +1,11 @@
 //! Optional, private Prometheus exporter. Scrapes never walk redb or lock the node.
+//!
+//! By default nothing walks the database: file sizes are read with `stat` at
+//! each scrape and storage counters are kept by the store. The table walk
+//! (`RedbStore::data_stats`) is opt-in (`table_stats`), because it holds one
+//! redb read transaction for the whole walk, and redb cannot reuse any page
+//! freed while that transaction is open: on a large state the file grows by
+//! every commit's copy-on-write pages for the length of the walk.
 
 use super::{
     Error, ErrorCode, Result,
@@ -24,10 +31,10 @@ pub struct Database {
     pub store: Arc<RedbStore>,
 }
 
+/// The latest opt-in table walk of one database.
 #[derive(Default)]
 struct Sample {
     data: Option<DataStats>,
-    apparent: Option<u64>,
     allocated: Option<u64>,
     timestamp: Option<f64>,
     duration: f64,
@@ -80,6 +87,8 @@ impl Activity {
 
 pub struct Metrics {
     databases: Vec<Database>,
+    /// Whether the periodic table walk runs (`--metrics-table-stats-secs`).
+    table_stats: bool,
     samples: RwLock<Vec<Sample>>,
     node: RwLock<NodeSample>,
     started: Instant,
@@ -216,7 +225,7 @@ impl Metrics {
         databases: Vec<Database>,
         role: &'static str,
         listen: &str,
-        interval: Duration,
+        table_stats: Option<Duration>,
     ) -> Result<Arc<Self>> {
         let listener = tokio::net::TcpListener::bind(listen)
             .await
@@ -224,6 +233,7 @@ impl Metrics {
         let metrics = Arc::new(Self {
             samples: RwLock::new((0..databases.len()).map(|_| Sample::default()).collect()),
             databases,
+            table_stats: table_stats.is_some(),
             node: RwLock::new(NodeSample::default()),
             started: Instant::now(),
             role,
@@ -254,21 +264,24 @@ impl Metrics {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         });
-        let sampled = metrics.clone();
-        tokio::spawn(async move {
-            loop {
-                let worker = sampled.clone();
-                // A single read-only scan at a time, with interval AFTER completion.
-                // No node mutex and no redb writer transaction are acquired.
-                if tokio::task::spawn_blocking(move || worker.refresh())
-                    .await
-                    .is_err()
-                {
-                    break;
+        if let Some(interval) = table_stats {
+            let sampled = metrics.clone();
+            tokio::spawn(async move {
+                loop {
+                    let worker = sampled.clone();
+                    // A single read-only scan at a time, with interval AFTER completion.
+                    // No node mutex and no redb writer transaction are acquired,
+                    // but freed pages cannot be reused until the scan ends.
+                    if tokio::task::spawn_blocking(move || worker.refresh())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(interval).await;
                 }
-                tokio::time::sleep(interval).await;
-            }
-        });
+            });
+        }
         let router = Router::new()
             .route("/metrics", get(scrape))
             .with_state(metrics.clone());
@@ -280,23 +293,19 @@ impl Metrics {
         Ok(metrics)
     }
 
+    /// One table walk of every database (opt-in, see the module docs).
     fn refresh(&self) {
         for (i, db) in self.databases.iter().enumerate() {
             let started = Instant::now();
             let data = db.store.data_stats();
-            let file = std::fs::metadata(&db.path);
+            let file = FileSize::of(&db.path);
             let mut samples = self.samples.write().unwrap_or_else(|e| e.into_inner());
             let sample = &mut samples[i];
             sample.duration = started.elapsed().as_secs_f64();
-            sample.success = data.is_ok() && file.is_ok();
-            if let (Ok(data), Ok(file)) = (data, file) {
+            sample.success = data.is_ok() && file.is_some();
+            if let (Ok(data), Some(file)) = (data, file) {
                 sample.data = Some(data);
-                sample.apparent = Some(file.len());
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::MetadataExt;
-                    sample.allocated = Some(file.blocks() * 512);
-                }
+                sample.allocated = file.allocated;
                 sample.timestamp = Some(now());
             } else {
                 sample.errors += 1;
@@ -331,7 +340,12 @@ impl Metrics {
             families.timings(db.name, "store", &db.store.operation_timings());
             families.timings(db.name, "backend", &db.store.probe().operation_timings());
             let labels = format!("{{database=\"{}\"}}", db.name);
-            sample.export(&mut families, &labels);
+            if let Some(file) = FileSize::of(&db.path) {
+                file.export(&mut families, &labels);
+            }
+            if self.table_stats {
+                sample.export(&mut families, &labels);
+            }
             let io = db.store.probe().stats();
             let commits = db.store.stats();
             for (name, help, value) in [
@@ -467,8 +481,48 @@ impl Activity {
     }
 }
 
+/// A file's size from one `stat`: cheap enough for every scrape.
+struct FileSize {
+    apparent: u64,
+    allocated: Option<u64>,
+}
+
+impl FileSize {
+    fn of(path: &std::path::Path) -> Option<Self> {
+        let file = std::fs::metadata(path).ok()?;
+        #[cfg(unix)]
+        let allocated = {
+            use std::os::unix::fs::MetadataExt;
+            Some(file.blocks() * 512)
+        };
+        #[cfg(not(unix))]
+        let allocated = None;
+        Some(Self {
+            apparent: file.len(),
+            allocated,
+        })
+    }
+
+    fn export(&self, families: &mut Families, labels: &str) {
+        families.gauge(
+            "db_file_apparent_bytes",
+            "File length including sparse holes; read at scrape time.",
+            labels,
+            self.apparent,
+        );
+        if let Some(allocated) = self.allocated {
+            families.gauge(
+                "db_file_allocated_bytes",
+                "Filesystem allocated bytes (Unix st_blocks times 512); read at scrape time.",
+                labels,
+                allocated,
+            );
+        }
+    }
+}
+
 impl Sample {
-    /// The latest storage sample of the database `labels` name.
+    /// The latest table walk of the database `labels` name.
     fn export(&self, families: &mut Families, labels: &str) {
         families.gauge(
             "db_stats_refresh_success",
@@ -505,16 +559,6 @@ impl Sample {
             .map(|bytes| bytes.saturating_sub(data.stored_bytes));
         for (name, help, value) in [
             (
-                "db_file_apparent_bytes",
-                "File length including sparse holes.",
-                self.apparent,
-            ),
-            (
-                "db_file_allocated_bytes",
-                "Filesystem allocated bytes (Unix st_blocks times 512).",
-                self.allocated,
-            ),
-            (
                 "db_stored_bytes",
                 "Encoded keys and values across redb user tables; includes application indexes \
                  and history, not payload-only bytes.",
@@ -542,8 +586,8 @@ impl Sample {
             ),
             (
                 "db_disk_overhead_bytes",
-                "Allocated filesystem bytes minus encoded table bytes, floored at zero; includes \
-                 free pages and all metadata.",
+                "Allocated filesystem bytes at the walk minus encoded table bytes, floored at \
+                 zero; includes free pages and all metadata.",
                 overhead,
             ),
         ] {
@@ -569,6 +613,10 @@ mod tests {
     use arkiv_db_redb::RedbConfig;
     /// A producer's exporter over two databases in one fresh file.
     fn two_databases() -> (PathBuf, Metrics) {
+        walking_databases(true)
+    }
+
+    fn walking_databases(table_stats: bool) -> (PathBuf, Metrics) {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "rogue-metrics-{}-{}.redb",
@@ -589,6 +637,7 @@ mod tests {
                     store,
                 },
             ],
+            table_stats,
             samples: RwLock::new(vec![Sample::default(), Sample::default()]),
             node: RwLock::new(NodeSample::default()),
             started: Instant::now(),
@@ -669,8 +718,32 @@ mod tests {
             observed: Some(9),
         };
         metrics.refresh();
+        let rendered = metrics.render();
         std::fs::remove_file(&path).unwrap();
-        assert_eq!(shape(&metrics.render()), include_str!("metrics-shape.txt"));
+        if std::env::var_os("ARKIV_BLESS_METRICS_SHAPE").is_some() {
+            std::fs::write(
+                concat!(env!("CARGO_MANIFEST_DIR"), "/src/signed/metrics-shape.txt"),
+                shape(&rendered),
+            )
+            .unwrap();
+        }
+        assert_eq!(shape(&rendered), include_str!("metrics-shape.txt"));
+    }
+
+    #[test]
+    fn default_scrape_reports_file_sizes_without_a_table_walk() {
+        let (path, metrics) = walking_databases(false);
+        let reads = metrics.databases[0].store.probe().stats().read_bytes;
+        let rendered = metrics.render();
+        assert!(rendered.contains("rogue_one_db_file_allocated_bytes{database=\"state\"}"));
+        assert!(rendered.contains("rogue_one_db_file_apparent_bytes{database=\"history\"}"));
+        assert!(!rendered.contains("db_stored_bytes"));
+        assert!(!rendered.contains("db_stats_refresh"));
+        // The scrape read no page of the database.
+        assert_eq!(metrics.databases[0].store.probe().stats().read_bytes, reads);
+        std::fs::remove_file(&path).unwrap();
+        // A missing file drops its gauges instead of failing the scrape.
+        assert!(!metrics.render().contains("db_file_apparent_bytes{"));
     }
 
     #[test]

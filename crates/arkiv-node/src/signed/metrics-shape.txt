@@ -21,7 +21,7 @@ rogue_one_db_commit_not_committed_total{database="history"} _
 # TYPE rogue_one_db_commits_total counter
 rogue_one_db_commits_total{database="state"} _
 rogue_one_db_commits_total{database="history"} _
-# HELP rogue_one_db_disk_overhead_bytes Allocated filesystem bytes minus encoded table bytes, floored at zero; includes free pages and all metadata.
+# HELP rogue_one_db_disk_overhead_bytes Allocated filesystem bytes at the walk minus encoded table bytes, floored at zero; includes free pages and all metadata.
 # TYPE rogue_one_db_disk_overhead_bytes gauge
 rogue_one_db_disk_overhead_bytes{database="state"} _
 rogue_one_db_disk_overhead_bytes{database="history"} _
@@ -29,11 +29,11 @@ rogue_one_db_disk_overhead_bytes{database="history"} _
 # TYPE rogue_one_db_entries gauge
 rogue_one_db_entries{database="state"} _
 rogue_one_db_entries{database="history"} _
-# HELP rogue_one_db_file_allocated_bytes Filesystem allocated bytes (Unix st_blocks times 512).
+# HELP rogue_one_db_file_allocated_bytes Filesystem allocated bytes (Unix st_blocks times 512); read at scrape time.
 # TYPE rogue_one_db_file_allocated_bytes gauge
 rogue_one_db_file_allocated_bytes{database="state"} _
 rogue_one_db_file_allocated_bytes{database="history"} _
-# HELP rogue_one_db_file_apparent_bytes File length including sparse holes.
+# HELP rogue_one_db_file_apparent_bytes File length including sparse holes; read at scrape time.
 # TYPE rogue_one_db_file_apparent_bytes gauge
 rogue_one_db_file_apparent_bytes{database="state"} _
 rogue_one_db_file_apparent_bytes{database="history"} _

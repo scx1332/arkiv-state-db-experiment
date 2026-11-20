@@ -190,7 +190,6 @@ class Soak:
             "--listen", f"127.0.0.1:{port}",
             "--private-listen", f"127.0.0.1:{port + 1}",
             "--metrics-listen", f"127.0.0.1:{port + 2}",
-            "--metrics-interval-secs", "60",
             "--start", "running",
         ] + (["--prebuilt-state", str(self.prebuilt), "--genesis-install", "adopt"] if self.prebuilt else [])  # fmt: skip
 

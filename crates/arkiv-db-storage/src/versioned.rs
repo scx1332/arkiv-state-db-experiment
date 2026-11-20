@@ -38,6 +38,8 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
+use crate::gc::{GcCommit, GcReport, GcState, GcTables, ObjectGraph};
+
 /// The stable identity of one durable database.
 ///
 /// Chosen at random when the database is initialized and stored in its
@@ -756,6 +758,80 @@ pub trait VersionedStore: ObjectReader {
     /// Physical and logical counters since the store was created (see
     /// [`StoreStats`]). Never fails.
     fn stats(&self) -> StoreStats;
+
+    /// The garbage-collection state, or `None` for a store that keeps every
+    /// object (see [`crate::gc`]). A store with garbage collection refuses
+    /// [`commit`](Self::commit), [`stage_objects`](Self::stage_objects) and
+    /// [`relabel`](Self::relabel): every head move goes through
+    /// [`commit_gc`](Self::commit_gc), so no object escapes the counts.
+    fn gc_state(&self) -> Result<Option<GcState>, StorageError> {
+        Ok(None)
+    }
+
+    /// Applies `batch` like [`commit`](Self::commit) and, in the same
+    /// atomic transaction, updates the reference counts and deletes what
+    /// `gc` allows (see [`crate::gc::plan`]). If the counts turn out to be
+    /// inconsistent the batch is committed without collection and the
+    /// store's GC state is marked suspended. On a suspended store this is
+    /// a plain commit.
+    fn commit_gc(
+        &self,
+        _batch: &CommitBatch,
+        _gc: &GcCommit,
+        _graph: &dyn ObjectGraph,
+    ) -> CommitOutcome {
+        CommitOutcome::NotCommitted(StorageError::new(
+            StorageErrorKind::Incompatible,
+            "this store does not collect garbage",
+        ))
+    }
+
+    /// The figures of the last [`commit_gc`](Self::commit_gc) of this
+    /// handle, if any.
+    fn gc_report(&self) -> Option<GcReport> {
+        None
+    }
+
+    /// Turns garbage collection on (or rebuilds its counts) for the store's
+    /// current head, whose roots are `roots`: one scan of every object
+    /// ([`crate::gc::Seeder`]). Objects no root reaches become dead at the
+    /// head's epoch, so snapshots below the head stay readable until the
+    /// caller's horizon passes the head. `spill` is a scratch directory for
+    /// stores too large to count in memory. Run with no other writer.
+    fn gc_enable(
+        &self,
+        _roots: &[(SpaceId, ObjectId)],
+        _graph: &dyn ObjectGraph,
+        _spill: Option<&std::path::Path>,
+    ) -> Result<GcState, StorageError> {
+        Err(StorageError::new(
+            StorageErrorKind::Incompatible,
+            "this store cannot collect garbage",
+        ))
+    }
+
+    /// Every object and GC table, for [`crate::gc::verify`]; `None` without
+    /// garbage collection. Reads the whole store: tests and small stores.
+    fn gc_dump(&self) -> Result<Option<GcDump>, StorageError> {
+        Ok(None)
+    }
+}
+
+/// Everything [`crate::gc::verify`] needs from a store.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GcDump {
+    pub objects: BTreeMap<crate::gc::GcKey, Vec<u8>>,
+    pub tables: GcTables,
+    pub state: GcState,
+}
+
+/// The `Incompatible` refusal of a plain write on a store that collects
+/// garbage.
+pub fn gc_write_refused(what: &str) -> StorageError {
+    StorageError::new(
+        StorageErrorKind::Incompatible,
+        format!("{what} is refused: the store collects garbage, use commit_gc"),
+    )
 }
 
 macro_rules! forward_to_pointee {
@@ -817,6 +893,31 @@ macro_rules! forward_to_pointee {
             }
             fn stats(&self) -> StoreStats {
                 (**self).stats()
+            }
+            fn gc_state(&self) -> Result<Option<GcState>, StorageError> {
+                (**self).gc_state()
+            }
+            fn commit_gc(
+                &self,
+                batch: &CommitBatch,
+                gc: &GcCommit,
+                graph: &dyn ObjectGraph,
+            ) -> CommitOutcome {
+                (**self).commit_gc(batch, gc, graph)
+            }
+            fn gc_report(&self) -> Option<GcReport> {
+                (**self).gc_report()
+            }
+            fn gc_enable(
+                &self,
+                roots: &[(SpaceId, ObjectId)],
+                graph: &dyn ObjectGraph,
+                spill: Option<&std::path::Path>,
+            ) -> Result<GcState, StorageError> {
+                (**self).gc_enable(roots, graph, spill)
+            }
+            fn gc_dump(&self) -> Result<Option<GcDump>, StorageError> {
+                (**self).gc_dump()
             }
         }
     )+};

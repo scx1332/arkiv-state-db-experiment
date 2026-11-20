@@ -448,6 +448,44 @@ fn decode_child(item: &[u8]) -> Result<RawChild<'_>, &'static str> {
     }
 }
 
+/// The references one committed object makes, read from its bytes alone:
+/// the hash of every child stored as its own object and every leaf value,
+/// including those of inline children (which are part of this object).
+///
+/// This is the value-agnostic view garbage collection needs: it does not
+/// check the hash and does not decode values. Fails on bytes that are not a
+/// canonical node.
+pub fn object_references(
+    bytes: &[u8],
+    hashes: &mut Vec<B256>,
+    values: &mut Vec<Vec<u8>>,
+) -> Result<(), &'static str> {
+    fn child(
+        child: RawChild<'_>,
+        hashes: &mut Vec<B256>,
+        values: &mut Vec<Vec<u8>>,
+    ) -> Result<(), &'static str> {
+        match child {
+            RawChild::Empty => Ok(()),
+            RawChild::Hash(hash) => {
+                hashes.push(hash);
+                Ok(())
+            }
+            RawChild::Inline(bytes) => object_references(bytes, hashes, values),
+        }
+    }
+    match decode_raw(bytes)? {
+        RawNode::Leaf { value, .. } => values.push(value.to_vec()),
+        RawNode::Extension { child: link, .. } => child(link, hashes, values)?,
+        RawNode::Branch { children } => {
+            for link in *children {
+                child(link, hashes, values)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Builds a node from a decoded object, decoding inline children and values.
 fn materialize<V: TrieValue>(raw: RawNode<'_>, id: &ObjectId) -> Result<Node<V>, TrieError> {
     Ok(match raw {

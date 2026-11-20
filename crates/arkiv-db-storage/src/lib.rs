@@ -9,6 +9,7 @@
 //! fault-injecting wrapper and the behavioural suite every
 //! [`versioned::VersionedStore`] implementation runs.
 
+pub mod gc;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod versioned;

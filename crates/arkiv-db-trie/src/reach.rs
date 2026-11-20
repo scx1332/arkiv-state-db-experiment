@@ -108,4 +108,63 @@ mod tests {
             .unwrap();
         assert_eq!(again, 0);
     }
+
+    #[test]
+    fn object_references_name_every_stored_child_and_leaf_value_once() {
+        let mut store = MemoryNodeStore::new();
+        let mut map = Map::new();
+        for i in 0u32..300 {
+            // Short values give inline leaves, long ones stored leaves.
+            let value = vec![i as u8; if i % 3 == 0 { 2 } else { 40 }];
+            map = map
+                .insert(&i.to_be_bytes(), value, &store, &mut Probe::new())
+                .unwrap()
+                .0;
+        }
+        let mut staged = Staged::new();
+        map.stage(&mut staged);
+        store.commit(&staged);
+        let root = map.root_hash();
+        let mut hashes = Vec::new();
+        let mut values = Vec::new();
+        let mut ids = BTreeSet::new();
+        map.to_stored()
+            .walk_stored::<_, crate::TrieError>(
+                &store,
+                &mut |id: &ObjectId, _| {
+                    ids.insert(*id);
+                    true
+                },
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+        for id in &ids {
+            let bytes = crate::NodeLoader::<Vec<u8>>::read(&store, id)
+                .unwrap()
+                .unwrap();
+            crate::object_references(&bytes, &mut hashes, &mut values).unwrap();
+        }
+        let referenced: BTreeSet<_> = hashes.iter().copied().collect();
+        // Equal leaves under different branch slots are one object with
+        // several parents: references are a multiset.
+        assert!(referenced.len() < hashes.len());
+        assert!(!referenced.contains(&root));
+        assert_eq!(referenced.len() + 1, ids.len());
+        // Following references from the root with multiplicity finds every
+        // leaf value exactly once per key.
+        fn leaves(store: &MemoryNodeStore, id: &ObjectId) -> usize {
+            let bytes = crate::NodeLoader::<Vec<u8>>::read(store, id)
+                .unwrap()
+                .unwrap();
+            let (mut hashes, mut values) = (Vec::new(), Vec::new());
+            crate::object_references(&bytes, &mut hashes, &mut values).unwrap();
+            values.len()
+                + hashes
+                    .iter()
+                    .map(|child| leaves(store, child))
+                    .sum::<usize>()
+        }
+        assert_eq!(leaves(&store, &root), 300);
+        assert!(crate::object_references(&[0xc0], &mut hashes, &mut values).is_err());
+    }
 }

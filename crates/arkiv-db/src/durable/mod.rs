@@ -12,6 +12,7 @@ mod adopt;
 mod bulk;
 pub(crate) mod cache;
 mod format;
+pub mod gc;
 mod prepare;
 pub mod reachability;
 pub mod retention;
@@ -46,6 +47,16 @@ pub struct Options {
     pub prepare_objects: usize,
     pub prepare_visits: u64,
     pub retention: Retention,
+    /// On a store with garbage collection: dead objects whose references
+    /// each commit releases at least, on top of `gc_release_per_object`
+    /// per staged object.
+    pub gc_release_budget: u64,
+    pub gc_release_per_object: u64,
+    /// Dead objects each commit deletes at least once the horizon allows,
+    /// on top of twice the objects that died in it.
+    pub gc_delete_budget: u64,
+    /// Keep counting but delete nothing (measurement only).
+    pub gc_count_only: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -56,6 +67,10 @@ impl Default for Options {
             prepare_objects: 100_000,
             prepare_visits: 1_000_000,
             retention: Retention::Archive,
+            gc_release_budget: 4096,
+            gc_release_per_object: 4,
+            gc_delete_budget: 4096,
+            gc_count_only: false,
         }
     }
 }
@@ -182,6 +197,10 @@ pub struct DurableStats {
     pub resident_manifests: usize,
     pub pending_payload_bytes: u64,
     pub retention: RetentionStatus,
+    /// The store's garbage collection, if it collects garbage.
+    pub gc: Option<arkiv_db_storage::gc::GcState>,
+    /// The figures of the last garbage-collecting commit of this process.
+    pub gc_report: Option<arkiv_db_storage::gc::GcReport>,
 }
 
 pub struct DurableEngine {
@@ -196,6 +215,8 @@ pub struct DurableEngine {
     last_preparation: PreparationStats,
     simulator: Option<simulator::SimulatorIdentity>,
     retention: Arc<RetentionState>,
+    /// The store collects garbage: commits go through `commit_gc`.
+    gc: bool,
 }
 impl fmt::Debug for DurableEngine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -646,6 +667,13 @@ impl DurableEngine {
                  archive retention cannot be restored, configure a window"
             )));
         }
+        let collects = store.gc_state()?.is_some();
+        if collects && options.retention == Retention::Archive {
+            return Err(incompatible(
+                "the store deletes state history (garbage collection); \
+                 archive retention cannot be restored, configure a window",
+            ));
+        }
         let retention = RetentionState::new(
             durable,
             durable.max(options.retention.floor_at(manifest.sequence)),
@@ -677,6 +705,7 @@ impl DurableEngine {
             last_preparation: PreparationStats::default(),
             simulator,
             retention,
+            gc: collects,
         })
     }
 
@@ -926,7 +955,26 @@ impl DurableEngine {
         if pending.generation != generation {
             return Err(DurableError::StaleGeneration);
         }
-        match self.context.store.commit(&pending.batch) {
+        let outcome = if self.gc {
+            let staged = pending.batch.objects.len() as u64;
+            let commit = arkiv_db_storage::gc::GcCommit {
+                acquire: gc::state_roots(&pending.manifest.state),
+                release: gc::state_roots(&self.manifest.state),
+                horizon: self.gc_horizon(),
+                release_budget: self
+                    .options
+                    .gc_release_budget
+                    .saturating_add(staged.saturating_mul(self.options.gc_release_per_object)),
+                delete_budget: self.options.gc_delete_budget,
+                count_only: self.options.gc_count_only,
+            };
+            self.context
+                .store
+                .commit_gc(&pending.batch, &commit, &gc::EngineGraph)
+        } else {
+            self.context.store.commit(&pending.batch)
+        };
+        match outcome {
             CommitOutcome::Committed => {
                 let p = self.pending.take().expect("prepared checked");
                 self.head = p.snapshot;
@@ -1030,6 +1078,8 @@ impl DurableEngine {
             resident_manifests: 1 + usize::from(self.pending.is_some()),
             pending_payload_bytes: self.pending.as_ref().map_or(0, |p| p.batch.logical_bytes()),
             retention: self.retention_status(),
+            gc: self.context.store.gc_state().ok().flatten(),
+            gc_report: self.context.store.gc_report(),
         }
     }
 }

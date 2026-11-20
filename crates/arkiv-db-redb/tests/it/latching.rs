@@ -299,26 +299,32 @@ fn incompatible_missing_and_foreign_files_are_refused() {
     assert!(created.last_open().initialized);
     drop(created);
 
-    // Another store format version.
-    let other_format = dir.file("format2.redb");
-    drop(RedbStore::create(&other_format, RedbConfig::default()).unwrap());
-    {
-        let db = redb::Database::open(&other_format).unwrap();
-        let txn = db.begin_write().unwrap();
-        {
-            let mut meta = txn
-                .open_table(redb::TableDefinition::<&str, &[u8]>::new("meta"))
-                .unwrap();
-            meta.insert("store/format", 2u32.to_be_bytes().as_slice())
-                .unwrap();
-        }
-        txn.commit().unwrap();
-    }
-    for error in [
-        RedbStore::open(&other_format, RedbConfig::default()).unwrap_err(),
-        RedbStore::create(&other_format, RedbConfig::default()).unwrap_err(),
+    // Another store format version; format 2 (garbage collection) without
+    // its GC state is damage.
+    for (format, kind) in [
+        (3u32, StorageErrorKind::Incompatible),
+        (2, StorageErrorKind::Corrupt),
     ] {
-        assert_eq!(error.kind, StorageErrorKind::Incompatible, "{error}");
+        let other_format = dir.file(&format!("format{format}.redb"));
+        drop(RedbStore::create(&other_format, RedbConfig::default()).unwrap());
+        {
+            let db = redb::Database::open(&other_format).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut meta = txn
+                    .open_table(redb::TableDefinition::<&str, &[u8]>::new("meta"))
+                    .unwrap();
+                meta.insert("store/format", format.to_be_bytes().as_slice())
+                    .unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        for error in [
+            RedbStore::open(&other_format, RedbConfig::default()).unwrap_err(),
+            RedbStore::create(&other_format, RedbConfig::default()).unwrap_err(),
+        ] {
+            assert_eq!(error.kind, kind, "{error}");
+        }
     }
 
     // Not a redb file at all.

@@ -541,4 +541,35 @@ impl<S: VersionedStore> VersionedStore for FaultyStore<S> {
     fn stats(&self) -> StoreStats {
         self.inner.stats()
     }
+
+    fn gc_state(&self) -> Result<Option<crate::gc::GcState>, StorageError> {
+        self.inner.gc_state()
+    }
+
+    /// Faults apply as they do to [`commit`](VersionedStore::commit).
+    fn commit_gc(
+        &self,
+        batch: &CommitBatch,
+        gc: &crate::gc::GcCommit,
+        graph: &dyn crate::gc::ObjectGraph,
+    ) -> CommitOutcome {
+        self.write(|inner| inner.commit_gc(batch, gc, graph))
+    }
+
+    fn gc_report(&self) -> Option<crate::gc::GcReport> {
+        self.inner.gc_report()
+    }
+
+    fn gc_enable(
+        &self,
+        roots: &[(SpaceId, ObjectId)],
+        graph: &dyn crate::gc::ObjectGraph,
+        spill: Option<&std::path::Path>,
+    ) -> Result<crate::gc::GcState, StorageError> {
+        self.inner.gc_enable(roots, graph, spill)
+    }
+
+    fn gc_dump(&self) -> Result<Option<crate::versioned::GcDump>, StorageError> {
+        self.inner.gc_dump()
+    }
 }

@@ -343,6 +343,7 @@ fn durable_options(options: &ArkivOptions) -> Options {
         prepare_objects: 4_000_000,
         prepare_visits: 100_000_000,
         retention: options.retention,
+        ..Options::default()
     }
 }
 

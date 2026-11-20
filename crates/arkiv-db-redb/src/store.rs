@@ -13,11 +13,18 @@ use std::{
 };
 
 use alloy_primitives::keccak256;
-use arkiv_db_storage::versioned::{
-    BackendStats, CommitBatch, CommitOutcome, DatabaseId, Head, Health, ObjectId, ObjectReader,
-    RESERVED_META_PREFIX, Relabel, SpaceId, StatsRecorder, StorageError, StorageErrorKind,
-    StoreStats, Table, VersionedStore, Written, copy_bounded, head_mismatch, object_conflict,
-    record_conflict, relabel_mismatch, validate_objects,
+use arkiv_db_storage::{
+    gc::{
+        self as collect, GC_STATE_KEY, GC_STORE_FORMAT, GcCommit, GcError, GcReport, GcState,
+        ObjectGraph, Seeder, gc_key,
+    },
+    versioned::{
+        BackendStats, CommitBatch, CommitOutcome, DatabaseId, GcDump, Head, Health, ObjectId,
+        ObjectReader, RESERVED_META_PREFIX, Relabel, SpaceId, StatsRecorder, StorageError,
+        StorageErrorKind, StoreStats, Table, VersionedStore, Written, copy_bounded,
+        gc_write_refused, head_mismatch, object_conflict, record_conflict, relabel_mismatch,
+        validate_objects,
+    },
 };
 use redb::{
     Builder, Database, Durability, ReadableDatabase, ReadableTable, ReadableTableMetadata,
@@ -27,6 +34,7 @@ use redb::{
 use crate::{
     counting::{CountingBackend, IoProbe},
     error::{Fault, latches},
+    gc::{self as tables, TxnGc},
     metrics::{OperationTiming, OperationTimingSnapshot},
 };
 
@@ -40,11 +48,11 @@ pub const STORE_FORMAT_VERSION: u32 = 1;
 /// default is 1 GiB.
 pub const DEFAULT_CACHE_SIZE: usize = 8 << 20;
 
-const FORMAT_KEY: &str = "store/format";
+pub(crate) const FORMAT_KEY: &str = "store/format";
 const DATABASE_ID_KEY: &str = "store/database_id";
 const HEAD_KEY: &str = "store/head";
 
-const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
+pub(crate) const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("blocks");
 const MANIFESTS: TableDefinition<u64, &[u8]> = TableDefinition::new("manifests");
 const INCLUSIONS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("inclusions");
@@ -61,7 +69,7 @@ pub(crate) fn object_table_name(space: SpaceId) -> String {
     }
 }
 
-fn object_table(name: &str) -> TableDefinition<'_, &'static [u8; 32], &'static [u8]> {
+pub(crate) fn object_table(name: &str) -> TableDefinition<'_, &'static [u8; 32], &'static [u8]> {
     TableDefinition::new(name)
 }
 
@@ -176,6 +184,8 @@ struct Prepared {
     /// Metadata entries read.
     meta_reads: u32,
     initialized: bool,
+    /// The GC state of a store that collects garbage.
+    gc: Option<GcState>,
 }
 
 /// Checks or creates the store metadata of an opened database ([`prepare`]).
@@ -213,6 +223,12 @@ pub struct RedbStore {
     probe: Arc<IoProbe>,
     repairs: Arc<AtomicU64>,
     last_open: Mutex<OpenReport>,
+    /// The GC state as of the last commit, open or recovery; `None` for a
+    /// store that keeps every object.
+    gc: Mutex<Option<GcState>>,
+    gc_report: Mutex<Option<GcReport>>,
+    /// Wall time spent planning and applying garbage collection.
+    gc_nanos: AtomicU64,
 }
 
 impl std::fmt::Debug for RedbStore {
@@ -232,6 +248,24 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 fn closed() -> StorageError {
     StorageError::new(StorageErrorKind::Closed, "the store has no open database")
+}
+
+/// Compacts the store file at `path` in place with redb's own compaction,
+/// so pages freed by deletions are returned to the file system. Offline:
+/// nothing else may have the file open. Returns the file length before
+/// and after. Compaction moves pages repeatedly and uses two-phase commit;
+/// an interrupted one leaves a file redb repairs on the next open.
+pub fn compact_file(path: &Path) -> Result<(u64, u64), StorageError> {
+    let before = fs::metadata(path).map_err(|e| Fault::from(e).0)?.len();
+    let mut db = Database::open(path).map_err(|e| Fault::from(e).0)?;
+    while db
+        .compact()
+        .map_err(|e| StorageError::new(StorageErrorKind::Io, format!("redb compaction: {e}")))?
+    {
+    }
+    drop(db);
+    let after = fs::metadata(path).map_err(|e| Fault::from(e).0)?.len();
+    Ok((before, after))
 }
 
 /// The temporary file [`RedbStore::create`] builds a new store in: the
@@ -310,7 +344,8 @@ impl RedbStore {
     fn open_with(opener: Opener, mode: OpenMode, config: RedbConfig) -> Result<Self, StorageError> {
         let probe = IoProbe::new();
         let repairs = Arc::new(AtomicU64::new(0));
-        let (db, database_id, report) = open_database(&opener, mode, &config, &probe, &repairs)?;
+        let (db, database_id, report, gc) =
+            open_database(&opener, mode, &config, &probe, &repairs)?;
         Ok(Self {
             opener,
             config,
@@ -327,6 +362,9 @@ impl RedbStore {
             probe,
             repairs,
             last_open: Mutex::new(report),
+            gc: Mutex::new(gc),
+            gc_report: Mutex::new(None),
+            gc_nanos: AtomicU64::new(0),
         })
     }
 
@@ -369,6 +407,17 @@ impl RedbStore {
             }
             Ok(totals)
         })
+    }
+
+    /// Whether the store collects garbage.
+    fn collects(&self) -> bool {
+        lock(&self.gc).is_some()
+    }
+
+    /// Wall time spent in garbage-collecting commits (planning, applying
+    /// and their retries), since the store was opened.
+    pub fn gc_seconds(&self) -> f64 {
+        self.gc_nanos.load(Ordering::Relaxed) as f64 / 1e9
     }
 
     /// How many times the database handle has been replaced by `recover`.
@@ -918,7 +967,7 @@ fn open_database(
     config: &RedbConfig,
     probe: &Arc<IoProbe>,
     repairs: &Arc<AtomicU64>,
-) -> Result<(Database, DatabaseId, OpenReport), StorageError> {
+) -> Result<(Database, DatabaseId, OpenReport, Option<GcState>), StorageError> {
     let started = Instant::now();
     let before = probe.stats();
     let repairs_before = repairs.load(Ordering::SeqCst);
@@ -937,7 +986,7 @@ fn open_database(
         backend: probe.stats().since(&before),
         meta_reads: prepared.meta_reads,
     };
-    Ok((db, prepared.id, report))
+    Ok((db, prepared.id, report, prepared.gc))
 }
 
 /// Reads and checks the store metadata, or initializes an empty database in
@@ -951,13 +1000,26 @@ fn prepare(db: &Database, mode: OpenMode, config: &RedbConfig) -> Result<Prepare
                 // from guards; malformed lengths never allocate a copy.
                 let format = meta.get(FORMAT_KEY)?;
                 let id = meta.get(DATABASE_ID_KEY)?;
+                let (id, collects) = check_meta(
+                    format.as_ref().map(|value| value.value()),
+                    id.as_ref().map(|value| value.value()),
+                )?;
+                let gc = if collects {
+                    let state = meta.get(GC_STATE_KEY)?.ok_or_else(|| {
+                        Fault::new(
+                            StorageErrorKind::Corrupt,
+                            "a garbage-collecting store without its GC state",
+                        )
+                    })?;
+                    Some(GcState::decode(state.value())?)
+                } else {
+                    None
+                };
                 return Ok(Prepared {
-                    id: check_meta(
-                        format.as_ref().map(|value| value.value()),
-                        id.as_ref().map(|value| value.value()),
-                    )?,
-                    meta_reads: 2,
+                    id,
+                    meta_reads: 2 + u32::from(collects),
                     initialized: false,
+                    gc,
                 });
             }
             Err(redb::TableError::TableDoesNotExist(_)) => {}
@@ -990,17 +1052,22 @@ fn prepare(db: &Database, mode: OpenMode, config: &RedbConfig) -> Result<Prepare
         id,
         meta_reads: 0,
         initialized: true,
+        gc: None,
     })
 }
 
-fn check_meta(format: Option<&[u8]>, id: Option<&[u8]>) -> Result<DatabaseId, Fault> {
+/// The database id, and whether the store collects garbage (format
+/// [`GC_STORE_FORMAT`]).
+fn check_meta(format: Option<&[u8]>, id: Option<&[u8]>) -> Result<(DatabaseId, bool), Fault> {
     let format = format
         .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
         .map(u32::from_be_bytes);
-    if format != Some(STORE_FORMAT_VERSION) {
+    if format != Some(STORE_FORMAT_VERSION) && format != Some(GC_STORE_FORMAT) {
         return Err(Fault::new(
             StorageErrorKind::Incompatible,
-            format!("store format {format:?}, expected {STORE_FORMAT_VERSION}"),
+            format!(
+                "store format {format:?}, expected {STORE_FORMAT_VERSION} or {GC_STORE_FORMAT}"
+            ),
         ));
     }
     let id = id
@@ -1011,7 +1078,7 @@ fn check_meta(format: Option<&[u8]>, id: Option<&[u8]>) -> Result<DatabaseId, Fa
                 "database id missing or malformed",
             )
         })?;
-    Ok(DatabaseId(id))
+    Ok((DatabaseId(id), format == Some(GC_STORE_FORMAT)))
 }
 
 impl ObjectReader for RedbStore {
@@ -1128,7 +1195,13 @@ impl VersionedStore for RedbStore {
 
     fn commit(&self, batch: &CommitBatch) -> CommitOutcome {
         let mut timing = self.timings[3].start();
-        let outcome = self.transact(|| batch.validate(), |txn| stage_batch(txn, batch));
+        let outcome = self.transact(
+            || match self.collects() {
+                true => Err(gc_write_refused("a plain commit")),
+                false => batch.validate(),
+            },
+            |txn| stage_batch(txn, batch),
+        );
         if matches!(outcome, CommitOutcome::Committed) {
             timing.success();
         }
@@ -1137,14 +1210,23 @@ impl VersionedStore for RedbStore {
 
     fn stage_objects(&self, objects: &[(SpaceId, ObjectId, Vec<u8>)]) -> CommitOutcome {
         self.transact(
-            || validate_objects(objects),
+            || match self.collects() {
+                true => Err(gc_write_refused("object staging")),
+                false => validate_objects(objects),
+            },
             |txn| stage(txn, None, objects, &[], None),
         )
     }
 
     fn relabel(&self, relabel: &Relabel) -> CommitOutcome {
         let mut timing = self.timings[3].start();
-        let outcome = self.transact(|| relabel.validate(), |txn| stage_relabel(txn, relabel));
+        let outcome = self.transact(
+            || match self.collects() {
+                true => Err(gc_write_refused("relabelling")),
+                false => relabel.validate(),
+            },
+            |txn| stage_relabel(txn, relabel),
+        );
         if matches!(outcome, CommitOutcome::Committed) {
             timing.success();
         }
@@ -1174,9 +1256,9 @@ impl VersionedStore for RedbStore {
             &self.probe,
             &self.repairs,
         )
-        .and_then(|(db, id, report)| {
+        .and_then(|(db, id, report, gc)| {
             if id == self.database_id {
-                Ok((db, report))
+                Ok((db, report, gc))
             } else {
                 Err(StorageError::new(
                     StorageErrorKind::Incompatible,
@@ -1188,10 +1270,11 @@ impl VersionedStore for RedbStore {
             }
         });
         match reopened {
-            Ok((db, report)) => {
+            Ok((db, report, gc)) => {
                 slot.db = Some(db);
                 slot.epoch += 1;
                 *lock(&self.last_open) = report;
+                *lock(&self.gc) = gc;
                 self.set_failure(None);
             }
             Err(error) => {
@@ -1209,6 +1292,233 @@ impl VersionedStore for RedbStore {
     fn stats(&self) -> StoreStats {
         self.stats.snapshot(Some(self.probe.stats()))
     }
+
+    fn gc_state(&self) -> Result<Option<GcState>, StorageError> {
+        Ok(*lock(&self.gc))
+    }
+
+    fn commit_gc(
+        &self,
+        batch: &CommitBatch,
+        gc: &GcCommit,
+        graph: &dyn ObjectGraph,
+    ) -> CommitOutcome {
+        let mut timing = self.timings[3].start();
+        let _writer = lock(&self.writer);
+        let started = Instant::now();
+        let invariant = std::cell::Cell::new(None::<String>);
+        let planned = std::cell::Cell::new(None::<(GcState, GcReport)>);
+        let mut outcome = self.transact_locked(
+            || batch.validate(),
+            |txn| stage_gc(txn, batch, gc, graph, &invariant, &planned),
+        );
+        if let Some(reason) = invariant.take() {
+            // The counts are wrong: commit without collection, suspended,
+            // so production continues and an operator rebuilds them.
+            eprintln!("garbage collection suspended: {reason}");
+            outcome = self.transact_locked(
+                || batch.validate(),
+                |txn| {
+                    let written = stage_batch(txn, batch)?;
+                    let mut state = tables::read_state(txn)?.ok_or_else(|| {
+                        Fault::new(
+                            StorageErrorKind::Incompatible,
+                            "the store does not collect garbage",
+                        )
+                    })?;
+                    state.suspended = true;
+                    tables::write_state(txn, &state)?;
+                    planned.set(Some((state, GcReport::default())));
+                    Ok(written)
+                },
+            );
+        }
+        self.gc_nanos.fetch_add(
+            started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+            Ordering::Relaxed,
+        );
+        if outcome.is_ok() {
+            if let Some((state, report)) = planned.take() {
+                *lock(&self.gc) = Some(state);
+                *lock(&self.gc_report) = Some(report);
+            }
+            timing.success();
+        }
+        self.stats.write(outcome)
+    }
+
+    fn gc_report(&self) -> Option<GcReport> {
+        *lock(&self.gc_report)
+    }
+
+    fn gc_enable(
+        &self,
+        roots: &[(SpaceId, ObjectId)],
+        graph: &dyn ObjectGraph,
+        spill: Option<&Path>,
+    ) -> Result<GcState, StorageError> {
+        let _writer = lock(&self.writer);
+        let state = self.with_db(|db| {
+            let quick_repair = self.config.quick_repair;
+            // A rebuild starts from a plain store, so an interrupted one
+            // leaves a plain store, never stale counts.
+            let previous = {
+                let mut txn = db.begin_write()?;
+                txn.set_durability(Durability::Immediate)?;
+                txn.set_quick_repair(quick_repair);
+                let previous = tables::read_state(&txn)?;
+                tables::clear(&txn)?;
+                txn.commit()?;
+                previous
+            };
+            *lock(&self.gc) = None;
+            let read = db.begin_read()?;
+            let head = {
+                let meta = read.open_table(META)?;
+                let head = meta.get(HEAD_KEY)?;
+                head.map(|value| Head::decode(value.value())).transpose()?
+            }
+            .ok_or_else(|| {
+                Fault::new(
+                    StorageErrorKind::Incompatible,
+                    "garbage collection needs a head",
+                )
+            })?;
+            let mut seeder = Seeder::new(graph, roots, spill)?;
+            for space in tables::object_spaces(&read)? {
+                let name = object_table_name(space);
+                let table = read.open_table(object_table(&name))?;
+                for entry in table.iter()? {
+                    let (id, bytes) = entry?;
+                    seeder
+                        .object(space, id.value(), bytes.value())
+                        .map_err(seed_fault)?;
+                }
+            }
+            drop(read);
+            let epoch = previous.map_or(1, |state| state.epoch + 1);
+            let mut writer = tables::SeedWriter::new(db, quick_repair);
+            let state = seeder.finish(&mut writer, epoch).map_err(seed_fault)?;
+            writer.flush()?;
+            let mut txn = db.begin_write()?;
+            txn.set_durability(Durability::Immediate)?;
+            txn.set_quick_repair(quick_repair);
+            {
+                let mut epochs = txn.open_table(tables::GC_EPOCHS)?;
+                epochs.insert(head.height, epoch)?;
+                // The other tables exist from here on even when empty.
+                txn.open_table(tables::GC_SHARED)?;
+                txn.open_table(tables::GC_DEAD)?;
+                txn.open_table(tables::GC_PHANTOM)?;
+                txn.open_table(tables::GC_QUEUE)?;
+                txn.open_table(tables::GC_RELEASE)?;
+                txn.open_table(tables::GC_EPOCH_COUNTS)?;
+            }
+            tables::write_state(&txn, &state)?;
+            txn.commit()?;
+            Ok(state)
+        })?;
+        *lock(&self.gc) = Some(state);
+        Ok(state)
+    }
+
+    fn gc_dump(&self) -> Result<Option<GcDump>, StorageError> {
+        let Some(state) = *lock(&self.gc) else {
+            return Ok(None);
+        };
+        self.with_db(|db| {
+            let read = db.begin_read()?;
+            let mut objects = std::collections::BTreeMap::new();
+            for space in tables::object_spaces(&read)? {
+                let name = object_table_name(space);
+                let table = read.open_table(object_table(&name))?;
+                for entry in table.iter()? {
+                    let (id, bytes) = entry?;
+                    objects.insert(gc_key(space, id.value()), bytes.value().to_vec());
+                }
+            }
+            let tables = tables::dump_tables(&read)?;
+            let state = {
+                let meta = read.open_table(META)?;
+                let found = meta.get(GC_STATE_KEY)?;
+                match found {
+                    Some(bytes) => GcState::decode(bytes.value())?,
+                    None => state,
+                }
+            };
+            Ok(Some(GcDump {
+                objects,
+                tables,
+                state,
+            }))
+        })
+    }
+}
+
+/// An invariant failure while seeding means the store's objects do not
+/// form the graph: damage.
+fn seed_fault(error: GcError) -> Fault {
+    match error {
+        GcError::Storage(error) => Fault(error),
+        GcError::Invariant(detail) => {
+            Fault::new(StorageErrorKind::Corrupt, format!("gc seeding: {detail}"))
+        }
+    }
+}
+
+/// Stages a garbage-collecting commit in `txn`: the head check, records and
+/// head as [`stage`] does, then the planned GC changes and the new state.
+/// An invariant failure is reported through `invariant` and aborts.
+fn stage_gc(
+    txn: &WriteTransaction,
+    batch: &CommitBatch,
+    gc: &GcCommit,
+    graph: &dyn ObjectGraph,
+    invariant: &std::cell::Cell<Option<String>>,
+    planned: &std::cell::Cell<Option<(GcState, GcReport)>>,
+) -> Result<Written, Fault> {
+    let state = tables::read_state(txn)?.ok_or_else(|| {
+        Fault::new(
+            StorageErrorKind::Incompatible,
+            "this store does not collect garbage",
+        )
+    })?;
+    if state.suspended {
+        let written = stage_batch(txn, batch)?;
+        planned.set(Some((state, GcReport::default())));
+        return Ok(written);
+    }
+    let mut written = stage(
+        txn,
+        batch.expected_head,
+        &[],
+        &batch.records,
+        Some(batch.new_head),
+    )?;
+    let mut view = TxnGc::open(txn)?;
+    let plan = match collect::plan(
+        &mut view,
+        graph,
+        &state,
+        &batch.objects,
+        gc,
+        batch.new_head.height,
+    ) {
+        Ok(plan) => plan,
+        Err(GcError::Storage(error)) => return Err(error.into()),
+        Err(GcError::Invariant(reason)) => {
+            invariant.set(Some(reason.clone()));
+            return Err(Fault::new(StorageErrorKind::Corrupt, reason));
+        }
+    };
+    plan.apply(&mut view)?;
+    drop(view);
+    tables::write_state(txn, &plan.state)?;
+    for (space, _, bytes) in &plan.inserts {
+        written.objects.push((*space, bytes.len()));
+    }
+    planned.set(Some((plan.state, plan.report)));
+    Ok(written)
 }
 
 #[cfg(test)]

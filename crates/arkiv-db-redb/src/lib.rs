@@ -67,6 +67,7 @@
 
 mod counting;
 mod error;
+mod gc;
 mod metrics;
 mod store;
 #[cfg(any(test, feature = "testing"))]
@@ -76,5 +77,5 @@ pub use counting::{CountingBackend, IoProbe};
 pub use metrics::{DURATION_BUCKETS_NANOSECONDS, OperationTimingSnapshot};
 pub use store::{
     DEFAULT_CACHE_SIZE, DataStats, LayoutStats, OpenReport, RedbConfig, RedbStore,
-    STORE_FORMAT_VERSION, TableLayout, initialization_path,
+    STORE_FORMAT_VERSION, TableLayout, compact_file, initialization_path,
 };

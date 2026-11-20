@@ -15,6 +15,7 @@ mod cell_limits;
 mod codec;
 mod durable;
 mod durable_failures;
+mod durable_gc;
 mod durable_retention;
 mod eq_proofs;
 mod golem_types;

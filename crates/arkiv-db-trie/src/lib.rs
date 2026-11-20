@@ -97,7 +97,7 @@ pub use interval::{
 };
 pub use loader::{MemoryNodeStore, MemoryOnly, NodeLoader};
 pub use map::{MerkleMap, Probe};
-pub use node::{Link, NodeBox, NodeKind, ObjectId};
+pub use node::{Link, NodeBox, NodeKind, ObjectId, object_references};
 pub use proof::{
     PathChild, PathNode, PathSource, PathTerminal, ProofError, ProofIter, VerifiedPath,
     inspect_path, walk,

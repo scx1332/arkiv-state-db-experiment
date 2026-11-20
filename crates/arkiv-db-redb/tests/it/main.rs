@@ -17,6 +17,7 @@ mod durability;
 mod engine_crashes;
 mod engine_history;
 mod engine_process;
+mod gc;
 mod history;
 mod initialization;
 mod isolation;

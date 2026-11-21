@@ -265,6 +265,31 @@ pub(crate) fn read_block(
     })
 }
 
+/// The height and host payload of a stored node record (`Blocks[h]`),
+/// checked against its seal but not against its manifest: offline
+/// migrations of a stopped node's file.
+pub fn decode_block_record(bytes: &[u8]) -> Result<(u64, Vec<u8>), DurableError> {
+    let body = unseal(
+        bytes,
+        BLOCK_MAX_BYTES,
+        b"ARKSIMB1",
+        "arkiv/simulator-node-record/v1",
+    )?;
+    let decoded = (|| -> Result<_, DecodeError> {
+        let mut d = Decoder::new(&body[8..]);
+        let height = d.u64()?;
+        let _id = d.array::<32>()?;
+        let _root = d.array::<32>()?;
+        let payload = d.bytes()?;
+        Ok((height, payload.to_vec(), d.remaining()))
+    })()
+    .map_err(|e| corrupt(format!("malformed simulator block: {e}")))?;
+    if decoded.2 != 0 {
+        return Err(corrupt("simulator block trailing bytes"));
+    }
+    Ok((decoded.0, decoded.1))
+}
+
 /// The storage profile a durable store was published under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StorageProfile {
@@ -357,6 +382,7 @@ impl DurableEngine {
         if height > self.head().sequence() {
             return Err(EngineError::UnknownSnapshot(SnapshotId::from_sequence(height)).into());
         }
+        self.check_record(height)?;
         let manifest = read_manifest(self.context.store.as_ref(), &self.genesis, height)?;
         read_block(self.context.store.as_ref(), &manifest)
     }
@@ -399,6 +425,10 @@ impl DurableEngine {
         }
         // A readback of an uncertain future batch never exposes its inclusion.
         if decoded.0 > self.head().sequence() {
+            return Ok(None);
+        }
+        // An expired inclusion is gone, whether or not its row is deleted.
+        if self.records.expired(decoded.0) {
             return Ok(None);
         }
         let manifest = read_manifest(self.context.store.as_ref(), &self.genesis, decoded.0)?;

@@ -266,7 +266,9 @@ pub(super) fn fee_history(host: &Host, args: &[Value]) -> Result<Value> {
     let count = uint(first(args)?)?.min(1024);
     let end = at(host, args.get(1))?;
     let count = count.min(end + 1);
-    let start = end + 1 - count;
+    // Blocks below the record floor expired: the history starts above it.
+    let start = (end + 1 - count).max(host.record_floor()).min(end);
+    let count = end + 1 - start;
     let percentiles = reward_percentiles(args.get(2))?;
     let block_budget = host.genesis.genesis.params.block_budget as f64;
     let ratios = (start..=end)

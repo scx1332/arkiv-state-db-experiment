@@ -355,8 +355,9 @@ impl MemoryVersionedStore {
     /// Checks the whole batch against the current state, then applies it.
     fn apply(&self, batch: &CommitBatch) -> Result<Written, StorageError> {
         batch.validate()?;
-        self.write().put(
+        self.write().put_removing(
             batch.expected_head,
+            &Removals::of(batch),
             &batch.objects,
             &batch.records,
             Some(batch.new_head),
@@ -372,6 +373,10 @@ impl MemoryVersionedStore {
         graph: &dyn ObjectGraph,
     ) -> Result<Written, StorageError> {
         batch.validate()?;
+        if !batch.remove_objects.is_empty() {
+            return Err(gc_write_refused("an object removal"));
+        }
+        let removals = Removals::of(batch);
         let mut guard = self.write();
         let state = &mut *guard;
         let Some((tables, gc_state)) = state.gc.as_mut() else {
@@ -390,8 +395,9 @@ impl MemoryVersionedStore {
                 gc: None,
                 gc_report: None,
             };
-            let result = plain.put(
+            let result = plain.put_removing(
                 batch.expected_head,
+                &removals,
                 &batch.objects,
                 &batch.records,
                 Some(batch.new_head),
@@ -407,6 +413,7 @@ impl MemoryVersionedStore {
         for (table, key, value) in &batch.records {
             if let Some(existing) = state.records.get(&(*table, key.clone()))
                 && existing != value
+                && !removals.removes_record(*table, key)
             {
                 return Err(record_conflict(*table, key));
             }
@@ -434,8 +441,9 @@ impl MemoryVersionedStore {
                 let (tables, gc_state) = state.gc.take().expect("checked");
                 let mut suspended = gc_state;
                 suspended.suspended = true;
-                let result = state.put(
+                let result = state.put_removing(
                     batch.expected_head,
+                    &removals,
                     &batch.objects,
                     &batch.records,
                     Some(batch.new_head),
@@ -454,6 +462,7 @@ impl MemoryVersionedStore {
         })?;
         *gc_state = plan.state;
         state.gc_report = Some(plan.report);
+        written.removed = state.remove(&removals);
         for (table, key, value) in &batch.records {
             if let std::collections::btree_map::Entry::Vacant(slot) =
                 state.records.entry((*table, key.clone()))
@@ -515,12 +524,65 @@ impl MemoryVersionedStore {
     }
 }
 
+/// The removals of a batch.
+struct Removals<'a> {
+    records: &'a [(Table, Vec<u8>)],
+    objects: &'a [(SpaceId, ObjectId)],
+}
+
+impl<'a> Removals<'a> {
+    const NONE: Removals<'static> = Removals {
+        records: &[],
+        objects: &[],
+    };
+
+    fn of(batch: &'a CommitBatch) -> Self {
+        Self {
+            records: &batch.remove_records,
+            objects: &batch.remove_objects,
+        }
+    }
+
+    fn removes_record(&self, table: Table, key: &[u8]) -> bool {
+        self.records
+            .iter()
+            .any(|(of, removed)| *of == table && removed == key)
+    }
+}
+
 impl MemoryState {
+    /// Removes `removals`; returns how many were present.
+    fn remove(&mut self, removals: &Removals<'_>) -> u64 {
+        let mut removed = 0;
+        for (table, key) in removals.records {
+            removed += u64::from(self.records.remove(&(*table, key.clone())).is_some());
+        }
+        for (space, id) in removals.objects {
+            if let Some(objects) = self.objects.get_mut(space) {
+                removed += u64::from(objects.remove(id).is_some());
+            }
+        }
+        removed
+    }
+
     /// Checks the entries against `expected_head` and the stored values,
     /// then stores the new ones and sets `new_head` if there is one.
     fn put(
         &mut self,
         expected_head: Option<Head>,
+        objects: &[(SpaceId, ObjectId, Vec<u8>)],
+        records: &[(Table, Vec<u8>, Vec<u8>)],
+        new_head: Option<Head>,
+    ) -> Result<Written, StorageError> {
+        self.put_removing(expected_head, &Removals::NONE, objects, records, new_head)
+    }
+
+    /// [`Self::put`] after removing `removals` (checked against the state
+    /// as it will be once they are gone).
+    fn put_removing(
+        &mut self,
+        expected_head: Option<Head>,
+        removals: &Removals<'_>,
         objects: &[(SpaceId, ObjectId, Vec<u8>)],
         records: &[(Table, Vec<u8>, Vec<u8>)],
         new_head: Option<Head>,
@@ -538,12 +600,16 @@ impl MemoryState {
         for (table, key, value) in records {
             if let Some(existing) = self.records.get(&(*table, key.clone()))
                 && existing != value
+                && !removals.removes_record(*table, key)
             {
                 return Err(record_conflict(*table, key));
             }
         }
         // Nothing below can fail: the entries apply completely.
-        let mut written = Written::default();
+        let mut written = Written {
+            removed: self.remove(removals),
+            ..Written::default()
+        };
         for (space, id, bytes) in objects {
             let stored = self.objects.entry(*space).or_default();
             if let std::collections::hash_map::Entry::Vacant(slot) = stored.entry(*id) {

@@ -2,6 +2,12 @@
 //!
 //! This store has its own profile and storage sequence, independent of chain
 //! height. Callers publish engine references only after `persist` succeeds.
+//!
+//! Each block body persisted with [`History::persist_block`] also gets a
+//! height index row (`Blocks[height] = body reference ‖ entry sequence ‖
+//! certificate`), so a block can be served by height after the node's own
+//! per-height records expired, and so bodies can be pruned by height
+//! ([`History::prune_below`]). A prune is its own history entry (tag 4).
 
 use super::{ErrorCode, Result, protocol::SignedHeader};
 use alloy_primitives::keccak256;
@@ -21,6 +27,28 @@ const CONFLICT_KEY: &[u8] = b"signed-history/conflict";
 const CONFLICT_CAP: usize = 1024;
 const CERTIFICATE_LEN: usize = 4 + 32 + 156 + 65;
 const ENTRY_CAP: usize = 1 + 8 + 32;
+const PRUNED_KEY: &[u8] = b"signed-history/pruned";
+/// Present when every persisted block body has its height index row: in
+/// stores created with the index, and after [`crate::signed::migrate`].
+pub const INDEXED_KEY: &[u8] = b"signed-history/height-index";
+const INDEX_CAP: usize = 36 + 8 + CERTIFICATE_LEN;
+
+/// What the height index holds for one block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexedBlock {
+    pub body: BodyRef,
+    /// The history entry that persisted the body.
+    pub entry: u64,
+    pub certificate: SignedHeader,
+}
+
+/// How far [`History::prune_below`] has deleted: heights `1..height` and
+/// entries `1..entry`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HistoryPruned {
+    pub height: u64,
+    pub entry: u64,
+}
 
 /// Hash of the complete stored frame and length of its unframed body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +103,7 @@ impl History {
         batch
             .put_record(Table::Meta, PROFILE_KEY, PROFILE)
             .put_record(Table::Meta, ID_KEY, identity)
+            .put_record(Table::Meta, INDEXED_KEY, vec![1])
             .put_record(Table::Manifests, 0u64.to_be_bytes(), vec![0]);
         match store.commit(&batch) {
             CommitOutcome::Committed => {}
@@ -124,6 +153,11 @@ impl History {
                 })?;
                 history.read(&reference)?;
             }
+            [4, bytes @ ..] if head.height > 0 => {
+                let _: (u64, u64) = decode_exact(bytes).map_err(|e| {
+                    ErrorCode::StorageCorrupt.caused_by(format_args!("history head: {e}"))
+                })?;
+            }
             [3, bytes @ ..] if head.height > 0 => {
                 let (height, hash): (u64, B256) = decode_exact(bytes).map_err(|e| {
                     ErrorCode::StorageCorrupt.caused_by(format_args!("history head: {e}"))
@@ -150,6 +184,18 @@ impl History {
     /// Idempotently persists the exact framed bytes. Different candidates at
     /// the same chain height never compete for a storage key.
     pub fn persist(&mut self, bytes: &[u8]) -> Result<BodyRef> {
+        self.persist_inner(bytes, None)
+    }
+
+    /// [`Self::persist`] for the body of the block `certificate` names,
+    /// with its height index row. A later candidate at the same height
+    /// replaces the row (the earlier one never published).
+    pub fn persist_block(&mut self, certificate: &SignedHeader, bytes: &[u8]) -> Result<BodyRef> {
+        // The row's layout is [`index_row`]'s.
+        self.persist_inner(bytes, Some(certificate))
+    }
+
+    fn persist_inner(&mut self, bytes: &[u8], block: Option<&SignedHeader>) -> Result<BodyRef> {
         self.ready()?;
         let (reference, frame) = self.frame(bytes)?;
         if self.store.head()? != Some(self.head) {
@@ -180,6 +226,13 @@ impl History {
         batch
             .put_object(SpaceId::Host, reference.id.0, frame)
             .put_record(Table::Manifests, sequence.to_be_bytes(), entry);
+        if let Some(certificate) = block {
+            let height = certificate.header.height.to_be_bytes();
+            let row = index_row(&reference, sequence, certificate);
+            batch
+                .remove_record(Table::Blocks, height.to_vec())
+                .put_record(Table::Blocks, height.to_vec(), row);
+        }
         self.pending = Some(Pending { reference, batch });
         self.commit_pending()
     }
@@ -225,6 +278,9 @@ impl History {
             return Err(ErrorCode::StorageCorrupt.into());
         }
         for (table, key, value) in &pending.batch.records {
+            if pending.batch.removes_record(*table, key) {
+                continue;
+            }
             if self
                 .store
                 .read_record_bounded(*table, key, value.len())?
@@ -253,6 +309,19 @@ impl History {
     /// happened before this adapter could construct its pending batch. The
     /// recovered store must still have exactly the acknowledged head.
     pub fn retry_exact(&mut self, bytes: &[u8]) -> Result<BodyRef> {
+        self.retry_exact_inner(bytes, None)
+    }
+
+    /// [`Self::retry_exact`] for [`Self::persist_block`].
+    pub fn retry_exact_block(
+        &mut self,
+        certificate: &SignedHeader,
+        bytes: &[u8],
+    ) -> Result<BodyRef> {
+        self.retry_exact_inner(bytes, Some(certificate))
+    }
+
+    fn retry_exact_inner(&mut self, bytes: &[u8], block: Option<&SignedHeader>) -> Result<BodyRef> {
         if self.frozen {
             return Err(ErrorCode::ChainConflict.into());
         }
@@ -279,7 +348,7 @@ impl History {
             self.frozen = true;
             return Err(ErrorCode::StorageCorrupt.into());
         }
-        self.persist(bytes)
+        self.persist_inner(bytes, block)
     }
 
     /// Retains the first authenticated certificate seen at a chain height,
@@ -358,6 +427,139 @@ impl History {
             CommitOutcome::NotCommitted(_) => Err(ErrorCode::StorageUnavailable.into()),
             CommitOutcome::Indeterminate(_) => Err(ErrorCode::CommitUncertain.into()),
         }
+    }
+
+    /// The height index row of `height`, if the body of that height was
+    /// persisted with [`Self::persist_block`] and not pruned.
+    pub fn indexed(&self, height: u64) -> Result<Option<IndexedBlock>> {
+        let Some(row) =
+            self.store
+                .read_record_bounded(Table::Blocks, &height.to_be_bytes(), INDEX_CAP)?
+        else {
+            return Ok(None);
+        };
+        let corrupt =
+            || ErrorCode::StorageCorrupt.caused_by(format_args!("history index {height}"));
+        if row.len() < 44 {
+            return Err(corrupt());
+        }
+        let body: BodyRef = decode_exact(&row[..36]).map_err(|_| corrupt())?;
+        let entry = u64::from_be_bytes(row[36..44].try_into().expect("8 bytes"));
+        let certificate: SignedHeader = decode_exact(&row[44..]).map_err(|_| corrupt())?;
+        if certificate.genesis_hash != self.genesis_hash || certificate.header.height != height {
+            return Err(corrupt());
+        }
+        Ok(Some(IndexedBlock {
+            body,
+            entry,
+            certificate,
+        }))
+    }
+
+    /// How far bodies are pruned (see [`Self::prune_below`]).
+    pub fn pruned(&self) -> Result<HistoryPruned> {
+        let Some(bytes) = self
+            .store
+            .read_record_bounded(Table::Meta, PRUNED_KEY, 16)?
+        else {
+            return Ok(HistoryPruned::default());
+        };
+        if bytes.len() != 16 {
+            return Err(ErrorCode::StorageCorrupt.into());
+        }
+        Ok(HistoryPruned {
+            height: u64::from_be_bytes(bytes[..8].try_into().expect("8 bytes")),
+            entry: u64::from_be_bytes(bytes[8..].try_into().expect("8 bytes")),
+        })
+    }
+
+    /// Deletes the bodies, index rows and observed headers of heights below
+    /// `floor` (height zero is kept), at least `budget` heights and a
+    /// sixteenth of the backlog per call, with the history entries up to
+    /// the last pruned body's. The caller passes a floor the node's own
+    /// durable records already expired: nothing published still names
+    /// these bodies. Returns the new position.
+    pub fn prune_below(&mut self, floor: u64, budget: u64) -> Result<HistoryPruned> {
+        self.ready()?;
+        let mut pruned = self.pruned()?;
+        let start = pruned.height.max(1);
+        if floor <= start {
+            return Ok(pruned);
+        }
+        let backlog = floor - start;
+        let count = arkiv_db::durable::records::deletion_count(backlog, budget);
+        let sequence = self
+            .head
+            .height
+            .checked_add(1)
+            .ok_or(ErrorCode::CapacityReached)?;
+        let mut entry = vec![4];
+        let mut batch = CommitBatch::new(Some(self.head), Head::default());
+        let mut last_entry = None;
+        for height in start..start + count {
+            let key = height.to_be_bytes();
+            if let Some(indexed) = self.indexed(height)? {
+                batch
+                    .remove_object(SpaceId::Host, indexed.body.id.0)
+                    .remove_record(Table::Blocks, key.to_vec());
+                last_entry = Some(indexed.entry);
+            }
+            batch.remove_record(Table::Inclusions, key.to_vec());
+        }
+        pruned.height = start + count;
+        if let Some(last) = last_entry {
+            // Every entry up to the last pruned body's, which is below the
+            // head entry: the bodies of the retained heights came later.
+            let first = pruned.entry.max(1);
+            if last >= self.head.height {
+                return Err(ErrorCode::StorageCorrupt.into());
+            }
+            for number in first..=last {
+                batch.remove_record(Table::Manifests, number.to_be_bytes().to_vec());
+            }
+            pruned.entry = pruned.entry.max(last + 1);
+        }
+        let mut position = pruned.height.to_be_bytes().to_vec();
+        position.extend_from_slice(&pruned.entry.to_be_bytes());
+        entry.extend_from_slice(&encode(&(pruned.height, pruned.entry)));
+        let next = entry_head(self.genesis_hash, sequence, &entry);
+        batch.new_head = next;
+        batch
+            .remove_record(Table::Meta, PRUNED_KEY.to_vec())
+            .put_record(Table::Meta, PRUNED_KEY, position)
+            .put_record(Table::Manifests, sequence.to_be_bytes(), entry);
+        match self.store.commit(&batch) {
+            CommitOutcome::Committed => {
+                self.head = next;
+                Ok(pruned)
+            }
+            CommitOutcome::NotCommitted(_) => Err(ErrorCode::StorageUnavailable.into()),
+            CommitOutcome::Indeterminate(_) => {
+                // Settle which head is durable so later bodies can persist.
+                match self.store.recover() {
+                    Ok(Some(head)) if head == next => {
+                        self.head = next;
+                        Ok(pruned)
+                    }
+                    Ok(Some(head)) if head == self.head => {
+                        Err(ErrorCode::StorageUnavailable.into())
+                    }
+                    _ => {
+                        self.frozen = true;
+                        Err(ErrorCode::CommitUncertain.into())
+                    }
+                }
+            }
+        }
+    }
+
+    /// The body of the block at `height`, read through the height index.
+    pub fn read_height(&self, height: u64) -> Result<Option<(IndexedBlock, Vec<u8>)>> {
+        let Some(indexed) = self.indexed(height)? else {
+            return Ok(None);
+        };
+        let bytes = self.read(&indexed.body)?;
+        Ok(Some((indexed, bytes)))
     }
 
     pub fn read(&self, reference: &BodyRef) -> Result<Vec<u8>> {
@@ -453,6 +655,22 @@ impl History {
             return Err(ErrorCode::StorageCorrupt.into());
         }
         Ok(&frame[FRAME_OVERHEAD..])
+    }
+}
+
+/// A height index row: body reference ‖ entry sequence ‖ certificate.
+pub fn index_row(body: &BodyRef, entry: u64, certificate: &SignedHeader) -> Vec<u8> {
+    let mut row = encode(body);
+    row.extend_from_slice(&entry.to_be_bytes());
+    row.extend_from_slice(&encode(certificate));
+    row
+}
+
+/// The body reference of a history entry that persisted a body.
+pub fn entry_body(entry: &[u8]) -> Option<BodyRef> {
+    match entry {
+        [1, bytes @ ..] => decode_exact(bytes).ok(),
+        _ => None,
     }
 }
 

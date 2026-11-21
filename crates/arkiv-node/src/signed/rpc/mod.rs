@@ -39,30 +39,61 @@ pub struct RpcState {
     indexed: Option<u64>,
     transactions: BTreeMap<String, (u64, usize)>,
     blocks: BTreeMap<String, u64>,
+    /// What each indexed height added, so expired heights leave the index.
+    heights: BTreeMap<u64, (String, Vec<String>)>,
     filters: BTreeMap<u64, Filter>,
     next_filter: u64,
 }
 
+/// Brings the hash index up to the head: the retained blocks only. Heights
+/// whose records expired leave it, so a lookup of an expired block or
+/// transaction hash finds nothing (`null`), and the index holds at most the
+/// record window.
 fn index(host: &Host, state: &mut RpcState) -> Result<()> {
-    let start = state.indexed.map_or(0, |n| n + 1);
-    for h in start..=host.head.height {
+    while let Some(entry) = state.heights.first_entry() {
+        if !host.record_expired(*entry.key()) {
+            break;
+        }
+        let (block, transactions) = entry.remove();
+        state.blocks.remove(&block);
+        for hash in transactions {
+            state.transactions.remove(&hash);
+        }
+    }
+    let mut next = state.indexed.map_or(0, |n| n + 1);
+    while next <= host.head.height {
+        let h = next;
+        if host.record_expired(h) {
+            // Expired heights are skipped, not read.
+            next = host.record_floor();
+            state.indexed = Some(next - 1);
+            continue;
+        }
+        next += 1;
         let b = host.shared_block(h)?;
         if state.transactions.len() + b.inputs.txs.len() > INDEX_CAP
             || state.blocks.len() >= INDEX_CAP
         {
             return Err(ErrorCode::RpcIndexCapacity.into());
         }
-        state.blocks.insert(hex(b.hash().as_slice()), h);
+        let block = hex(b.hash().as_slice());
+        state.blocks.insert(block.clone(), h);
+        let mut transactions = Vec::with_capacity(b.inputs.txs.len());
         for (i, t) in b.inputs.txs.iter().enumerate() {
-            state.transactions.insert(hex(t.hash().as_slice()), (h, i));
+            let hash = hex(t.hash().as_slice());
+            state.transactions.insert(hash.clone(), (h, i));
+            transactions.push(hash);
         }
+        state.heights.insert(h, (block, transactions));
         state.indexed = Some(h);
     }
     Ok(())
 }
 
-/// Rebuild the derived lookup index before accepting public requests. Source
-/// blocks remain authoritative; this cache contains no separately trusted state.
+/// Rebuild the derived lookup index before accepting public requests, from
+/// the retained blocks only (bounded by the record window, not by the
+/// chain). Source blocks remain authoritative; this cache contains no
+/// separately trusted state.
 pub(super) fn initial_state(node: &Node) -> Result<RpcState> {
     let mut state = RpcState::default();
     if let Node::Full(host) = node {

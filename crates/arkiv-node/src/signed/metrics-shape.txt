@@ -415,6 +415,12 @@ rogue_one_state_lowest_pin_height _
 # HELP rogue_one_state_pinned_handles Open snapshot handles.
 # TYPE rogue_one_state_pinned_handles gauge
 rogue_one_state_pinned_handles _
+# HELP rogue_one_state_record_backlog_heights Expired heights whose records are not deleted yet.
+# TYPE rogue_one_state_record_backlog_heights gauge
+rogue_one_state_record_backlog_heights _
+# HELP rogue_one_state_record_floor Lowest height (above 0) whose per-height records (feed, block, inclusions) are kept.
+# TYPE rogue_one_state_record_floor gauge
+rogue_one_state_record_floor _
 # HELP rogue_one_uptime_seconds Exporter uptime in seconds.
 # TYPE rogue_one_uptime_seconds gauge
 rogue_one_uptime_seconds _

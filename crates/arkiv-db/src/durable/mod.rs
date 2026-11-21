@@ -15,6 +15,7 @@ mod format;
 pub mod gc;
 mod prepare;
 pub mod reachability;
+pub mod records;
 pub mod retention;
 pub mod simulator;
 mod streaming;
@@ -57,6 +58,20 @@ pub struct Options {
     pub gc_delete_budget: u64,
     /// Keep counting but delete nothing (measurement only).
     pub gc_count_only: bool,
+    /// Simulator profile with a retention window: expire per-height
+    /// records (blocks, manifests, index entries, inclusions, floor
+    /// records) below the record floor, inside block commits (see
+    /// [`records`]). The floor never moves back once records expired.
+    pub prune_records: bool,
+    /// Simulator profile: the host refuses an identity included in the
+    /// last `k` heights, so inclusions of those heights are kept, and an
+    /// older inclusion of the same identity is replaced by a new block.
+    /// `None`: every inclusion is kept and none is replaced (the unsigned
+    /// simulator's rule).
+    pub inclusion_window: Option<u64>,
+    /// Heights whose expired records each commit deletes at least, on top
+    /// of a sixteenth of the backlog.
+    pub record_delete_budget: u64,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -71,6 +86,9 @@ impl Default for Options {
             gc_release_per_object: 4,
             gc_delete_budget: 4096,
             gc_count_only: false,
+            prune_records: false,
+            inclusion_window: None,
+            record_delete_budget: 64,
         }
     }
 }
@@ -185,6 +203,8 @@ struct Prepared {
     generation: u64,
     /// The state floor this publication records.
     floor: u64,
+    /// The record floor this publication records.
+    records: records::RecordFloor,
 }
 
 /// Noncanonical resident-state and preparation counters; backend/caller
@@ -201,6 +221,8 @@ pub struct DurableStats {
     pub gc: Option<arkiv_db_storage::gc::GcState>,
     /// The figures of the last garbage-collecting commit of this process.
     pub gc_report: Option<arkiv_db_storage::gc::GcReport>,
+    /// The record floor and deletion cursor of the durable head.
+    pub records: records::RecordFloor,
 }
 
 pub struct DurableEngine {
@@ -217,6 +239,8 @@ pub struct DurableEngine {
     retention: Arc<RetentionState>,
     /// The store collects garbage: commits go through `commit_gc`.
     gc: bool,
+    /// The record floor of the durable head.
+    records: records::RecordFloor,
 }
 impl fmt::Debug for DurableEngine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -257,6 +281,10 @@ fn records_absent(
     present: &'static str,
 ) -> Result<(), DurableError> {
     for (table, key, bytes) in &batch.records {
+        // A record the batch replaces is present before it applies.
+        if batch.removes_record(*table, key) {
+            continue;
+        }
         if store
             .read_record_bounded(*table, key, bytes.len())?
             .is_some()
@@ -667,6 +695,7 @@ impl DurableEngine {
                  archive retention cannot be restored, configure a window"
             )));
         }
+        let records = records::read_record_floor(store.as_ref(), manifest.sequence)?;
         let collects = store.gc_state()?.is_some();
         if collects && options.retention == Retention::Archive {
             return Err(incompatible(
@@ -706,6 +735,7 @@ impl DurableEngine {
             simulator,
             retention,
             gc: collects,
+            records,
         })
     }
 
@@ -916,6 +946,7 @@ impl DurableEngine {
         if let Some(packet) = packet {
             packet.append(&mut batch, &manifest)?;
         }
+        let records = self.expire_records(&mut batch, sequence, floor, packet)?;
         let staging = prepare::Staging::collect(
             &candidate.state,
             &self.options,
@@ -941,6 +972,7 @@ impl DurableEngine {
             info,
             generation,
             floor,
+            records,
         })
     }
 
@@ -980,6 +1012,7 @@ impl DurableEngine {
                 self.head = p.snapshot;
                 self.manifest = p.manifest;
                 self.retention.committed(p.floor);
+                self.records = p.records;
                 self.state = WriterState::Ready;
                 Ok(Publication::Committed(p.info))
             }
@@ -1080,6 +1113,7 @@ impl DurableEngine {
             retention: self.retention_status(),
             gc: self.context.store.gc_state().ok().flatten(),
             gc_report: self.context.store.gc_report(),
+            records: self.records,
         }
     }
 }

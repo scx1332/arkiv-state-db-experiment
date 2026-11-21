@@ -80,6 +80,15 @@ impl Node {
             Self::Light { light, .. } => light.header(height),
         }
     }
+
+    /// [`Self::certificate`] for chain sync: a full node also answers
+    /// heights whose records expired while it keeps their bodies.
+    pub fn chain_certificate(&self, height: u64) -> Result<SignedHeader> {
+        match self {
+            Self::Full(h) => h.chain_certificate(height),
+            Self::Light { light, .. } => light.header(height),
+        }
+    }
 }
 
 pub struct Runtime {
@@ -495,10 +504,10 @@ pub fn status(node: &Node) -> Json {
         ),
         Node::Light { light, .. } => ("light", light.health, false),
     };
-    let body_retention = if matches!(node, Node::Light { .. }) {
-        "headers-only"
-    } else {
-        "all"
+    let body_retention = match node {
+        Node::Light { .. } => "headers-only",
+        Node::Full(h) if h.prunes_bodies() => "window",
+        Node::Full(_) => "all",
     };
     let mut value = json!({
         "apiVersion": 1,
@@ -524,14 +533,20 @@ pub fn status(node: &Node) -> Json {
     });
     // State retention of this node (a light node keeps no state: null).
     let retention = match node {
-        Node::Full(h) => crate::retention::status(&h.engine),
+        Node::Full(h) => {
+            let mut fields = crate::retention::status(&h.engine);
+            fields["bodyFloor"] = json!(h.history_pruned().map(|p| p.height.to_string()).ok());
+            fields
+        }
         Node::Light { .. } => {
             json!({
                 "stateRetention": null,
                 "stateRetentionWindow": null,
                 "stateFloor": null,
                 "receiptFloor": null,
+                "recordFloor": null,
                 "stateGc": null,
+                "bodyFloor": null,
             })
         }
     };
@@ -575,7 +590,7 @@ fn read(node: &Node, path: &str, q: &ReadQuery) -> Result<Json> {
         return Ok(json!(GenesisResponse {
             identity: node.identity().clone(),
             genesis_bytes: pack(node.genesis()),
-            certificate_bytes: pack(&node.certificate(0)?)
+            certificate_bytes: pack(&node.chain_certificate(0)?)
         }));
     }
     if path == "prefill" {
@@ -600,11 +615,17 @@ fn read(node: &Node, path: &str, q: &ReadQuery) -> Result<Json> {
                 return Err(ErrorCode::BlockNotSynced.into());
             }
             if q.after_hash.as_deref().map(hash).transpose()?
-                != Some(node.certificate(n)?.header.hash())
+                != Some(node.chain_certificate(n)?.header.hash())
             {
                 return Err(ErrorCode::ChainConflict.into());
             }
             n.checked_add(1).ok_or(ErrorCode::CapacityReached)?
+        } else if path == "feed/blocks"
+            && let Node::Full(h) = node
+            && h.record_floor() > 1
+        {
+            // A new feed reader starts at the oldest block it can read.
+            h.record_floor()
         } else {
             0
         };
@@ -614,7 +635,7 @@ fn read(node: &Node, path: &str, q: &ReadQuery) -> Result<Json> {
             .min(start.saturating_add(limit as u64 - 1));
         if path == "headers" {
             let certificates = (start..=end)
-                .map(|h| node.certificate(h).map(|c| pack(&c)))
+                .map(|h| node.chain_certificate(h).map(|c| pack(&c)))
                 .collect::<Result<Vec<_>>>()?;
             return Ok(json!(Headers {
                 identity: node.identity().clone(),
@@ -1204,7 +1225,7 @@ async fn private(
                 return Err(ErrorCode::UnsupportedNodeRole.into());
             };
             if let Some(height) = path.strip_prefix("replication/blocks/") {
-                return Ok(json!({"blockBytes":pack(&h.block(number(height)?)?)}));
+                return Ok(json!({"blockBytes":pack(&h.replication_block(number(height)?)?)}));
             }
             if path == "control" {
                 match control.as_ref().map(|c| c.action.as_str()) {

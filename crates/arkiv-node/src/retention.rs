@@ -13,8 +13,16 @@
 //!   Block 0 has no logs. A receipt refusal reports the block height and the
 //!   receipt floor.
 //!
-//! Headers, bodies, feed records, inclusions and the hash index are retained
-//! in full and never refused.
+//! - per-height records (the feed, the block and its body reference, the
+//!   request inclusions, the transaction and block hash index) of a node
+//!   with a window expire with the state: they need `h >= recordFloor` (or
+//!   `h = 0`, the anchor that never expires), where `recordFloor <=
+//!   stateFloor` (see `arkiv_db::durable::records`). A refusal reports the
+//!   height and the record floor. An archive node keeps them all.
+//!
+//! Block bodies in `history.redb` are a separate choice (`--body-retention`):
+//! kept by default, so followers and light clients can still start from
+//! genesis, or expired with the records.
 //!
 //! Garbage collection (`arkiv_db::durable::gc`) is a property of the state
 //! file: [`collect_new_state`] turns it on when a node with a retention
@@ -77,6 +85,7 @@ pub fn status(engine: &DurableEngine) -> Json {
         "stateRetentionWindow": retention.window().map(|w| w.to_string()),
         "stateFloor": state_floor(engine).to_string(),
         "receiptFloor": receipt_floor(engine).to_string(),
+        "recordFloor": engine.record_floor().floor.to_string(),
         "stateGc": gc_mode(engine),
     })
 }

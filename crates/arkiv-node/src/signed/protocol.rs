@@ -36,6 +36,12 @@ pub const BODY_CAP: u32 = 1024 * 1024;
 /// and body framing, even for tightened profiles.
 pub const OUTCOME_RESERVE: u32 = 64 * 1024;
 pub const MAX_TXS: u32 = 16;
+/// Heights a request identity stays unique for: a block may not include an
+/// identity that one of the previous `REQUEST_IDENTITY_WINDOW` blocks
+/// included. Older inclusions no longer block it (nodes expire them with
+/// their history); the transaction itself can never repeat, because its
+/// nonce is consumed when it is included.
+pub const REQUEST_IDENTITY_WINDOW: u64 = 256;
 /// The most records a signed chain may let expire at one height
 /// (`ChainParams::expiry_per_block`). It equals the most operations of a
 /// block, so the creates of one block can share one lifetime without ever

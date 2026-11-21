@@ -5,7 +5,10 @@ use super::{
     crypto::Signer,
     history::{BodyRef, History},
     pool::{DropReason, Pool},
-    protocol::{SignedBlock, SignedGenesis, SignedHeader, SignedInputs, SignedTx, ValidTx},
+    protocol::{
+        REQUEST_IDENTITY_WINDOW, SignedBlock, SignedGenesis, SignedHeader, SignedInputs, SignedTx,
+        ValidTx,
+    },
 };
 use crate::health::Health;
 use crate::{
@@ -38,6 +41,22 @@ pub struct HeaderRecord {
 }
 
 impl HeaderRecord {
+    /// The certificate and body reference at the start of a stored record,
+    /// without the feed or any authentication: offline migrations.
+    pub fn parts(bytes: &[u8]) -> Result<(SignedHeader, BodyRef)> {
+        let parse = || -> std::result::Result<(SignedHeader, BodyRef), DecodeError> {
+            let mut d = Decoder::new(bytes);
+            if d.array::<8>()? != *b"ARKSGNR1" {
+                return Err(DecodeError::Invalid {
+                    kind: "SignedRecord",
+                    reason: "version",
+                });
+            }
+            Ok((d.get()?, d.get()?))
+        };
+        parse().map_err(|_| ErrorCode::StorageCorrupt.into())
+    }
+
     pub fn bytes(&self) -> Result<Vec<u8>> {
         let mut e = Encoder::new();
         e.fixed(b"ARKSGNR1");
@@ -115,6 +134,16 @@ fn engine_genesis(identity: &SimulatorIdentity, genesis: &SignedGenesis) -> Engi
     }
 }
 
+/// The engine options of a signed node: per-height records expire with the
+/// state window (archive keeps them), and an inclusion older than the
+/// request identity window may be replaced by a new block (see
+/// [`REQUEST_IDENTITY_WINDOW`]).
+fn signed_options(mut options: Options) -> Options {
+    options.inclusion_window = Some(REQUEST_IDENTITY_WINDOW);
+    options.prune_records = options.retention.window().is_some();
+    options
+}
+
 fn identity(stored: &SimulatorIdentity, genesis: &SignedGenesis) -> Identity {
     Identity {
         source_id: crate::simulator::host::uuid(&stored.source_id),
@@ -160,7 +189,14 @@ pub struct Host {
     /// recovery per transaction, every digest) on each poll starves
     /// production. A stored block never changes.
     blocks: RefCell<BTreeMap<u64, std::sync::Arc<SignedBlock>>>,
+    /// Bodies expire from `history.redb` with the node's records (see
+    /// [`Self::prune_bodies`]); otherwise they are kept for followers.
+    prune_bodies: bool,
 }
+
+/// Heights of bodies [`Host`] deletes at least per block, on top of a
+/// sixteenth of the backlog, once bodies expire.
+const BODY_DELETE_BUDGET: u64 = 64;
 
 /// Heights whose certificates a [`Host`] keeps authenticated.
 const CERTIFICATE_CACHE: usize = 256;
@@ -226,7 +262,7 @@ impl Launch {
         };
         let record = HeaderRecord {
             certificate: self.certificate.clone(),
-            body: self.history.persist(&encode(&block))?,
+            body: self.history.persist_block(&block.header, &encode(&block))?,
             feed: FeedBlock::new(&identity, &genesis.header(), Default::default())?,
         };
         let packet = SimulatorPacket {
@@ -273,6 +309,7 @@ impl Host {
             packet,
         } = launch.genesis_record()?;
         let engine_genesis = engine_genesis(&durable, &launch.genesis);
+        let options = signed_options(options);
         let initialization = match (&prefill, candidate) {
             (Prefill::Staged { engine, .. }, _) => engine.initialize_simulator_from_staged(
                 store,
@@ -343,7 +380,50 @@ impl Host {
             block_executions: 0,
             certificates: Default::default(),
             blocks: Default::default(),
+            prune_bodies: false,
         })
+    }
+
+    /// Let block bodies (and the history entries, height index rows and
+    /// observed headers of their heights) expire from `history.redb` with
+    /// the node's own per-height records. A node that does so can no longer
+    /// serve the expired blocks or headers to followers and light clients
+    /// that start from genesis. Off by default.
+    pub fn prune_bodies(&mut self, on: bool) -> Result<()> {
+        self.prune_bodies = on;
+        self.expire_bodies()
+    }
+
+    pub fn prunes_bodies(&self) -> bool {
+        self.prune_bodies
+    }
+
+    /// The lowest height (above zero) whose node records (feed, block,
+    /// inclusions) are kept; zero when none expired.
+    pub fn record_floor(&self) -> u64 {
+        self.engine.record_floor().floor
+    }
+
+    /// Whether the node records of `height` expired.
+    pub fn record_expired(&self, height: u64) -> bool {
+        self.engine.record_floor().expired(height)
+    }
+
+    /// How far `history.redb` bodies are deleted.
+    pub fn history_pruned(&self) -> Result<super::history::HistoryPruned> {
+        self.history.pruned()
+    }
+
+    /// Deletes bodies below the record floor, when bodies expire.
+    fn expire_bodies(&mut self) -> Result<()> {
+        if !self.prune_bodies {
+            return Ok(());
+        }
+        // The certificate just below the floor stays: a reader that is
+        // exactly at the floor checks its parent hash against it.
+        let floor = self.engine.record_floor().floor.saturating_sub(1);
+        self.history.prune_below(floor, BODY_DELETE_BUDGET)?;
+        Ok(())
     }
 
     /// Serves the small canonical prefill stream to followers.
@@ -398,7 +478,7 @@ impl Host {
         } = launch.genesis_record()?;
         let outcome = staged.adopt_staged_simulator(
             engine_genesis(&durable, &launch.genesis),
-            options,
+            signed_options(options),
             durable,
             packet,
             threads,
@@ -446,7 +526,7 @@ impl Host {
         let engine = DurableEngine::open_simulator(
             store,
             engine_genesis(&expected, genesis),
-            options,
+            signed_options(options),
             expected,
         )?;
         let stored = engine.simulator_block(0)?;
@@ -484,7 +564,7 @@ impl Host {
         let engine = DurableEngine::open_simulator(
             store,
             engine_genesis(&durable, &genesis),
-            options,
+            signed_options(options),
             durable,
         )?;
         let stored = engine.simulator_block(engine.head().sequence())?;
@@ -538,6 +618,9 @@ impl Host {
     }
 
     pub fn certificate(&self, height: u64) -> Result<SignedHeader> {
+        if self.record_expired(height) {
+            return Err(self.records_pruned(height));
+        }
         if height <= self.head.height
             && let Some(certificate) = self.certificates.borrow().get(&height)
         {
@@ -563,6 +646,9 @@ impl Host {
     /// [`Self::block`] without the copy: the authenticated block, shared
     /// with the cache.
     pub fn shared_block(&self, height: u64) -> Result<std::sync::Arc<SignedBlock>> {
+        if self.record_expired(height) {
+            return Err(self.records_pruned(height));
+        }
         if height <= self.head.height
             && let Some(block) = self.blocks.borrow().get(&height)
         {
@@ -592,6 +678,55 @@ impl Host {
             return Err(ErrorCode::StorageCorrupt.into());
         }
         Ok(block)
+    }
+
+    /// The certificate of `height` for chain sync (headers, followers,
+    /// equivocation checks): from the node records inside the window, and
+    /// from the `history.redb` height index below it while bodies are
+    /// kept. `HistoryPruned` once the body expired too.
+    pub fn chain_certificate(&self, height: u64) -> Result<SignedHeader> {
+        if !self.record_expired(height) {
+            return self.certificate(height);
+        }
+        let indexed = self
+            .history
+            .indexed(height)?
+            .ok_or_else(|| self.records_pruned(height))?;
+        indexed
+            .certificate
+            .authenticate(&self.genesis)
+            .map_err(|_| ErrorCode::StorageCorrupt)?;
+        Ok(indexed.certificate)
+    }
+
+    /// The block of `height` for replication: [`Self::block`] inside the
+    /// window, and the kept body (authenticated against its indexed
+    /// certificate) below it.
+    pub fn replication_block(&self, height: u64) -> Result<SignedBlock> {
+        if !self.record_expired(height) {
+            return self.block(height);
+        }
+        let (indexed, bytes) = self
+            .history
+            .read_height(height)?
+            .ok_or_else(|| self.records_pruned(height))?;
+        let block: SignedBlock = decode_exact(&bytes).map_err(|e| {
+            ErrorCode::StorageCorrupt.caused_by(format_args!("block {height}: {e}"))
+        })?;
+        block.authenticate(&self.genesis)?;
+        if encode(&block) != bytes
+            || block.header != indexed.certificate
+            || block.header.header.height != height
+            || block.header.header.outcomes_digest != block.outcomes.digest()
+            || block.header.header.inputs_digest != block.inputs.digest()
+        {
+            return Err(ErrorCode::StorageCorrupt.into());
+        }
+        Ok(block)
+    }
+
+    fn records_pruned(&self, height: u64) -> Error {
+        Error::pruned(height, self.record_floor())
     }
 
     pub fn committed_nonce(&self, actor: OwnerId) -> Result<u64> {
@@ -655,6 +790,18 @@ impl Host {
             .simulator_inclusion(&encode(identity))?
             .map(|b| decode_exact(&b).map_err(|_| Error::from(ErrorCode::StorageCorrupt)))
             .transpose()
+    }
+
+    /// The inclusion of `identity` that blocks it from the block at
+    /// `height`: one of the previous [`REQUEST_IDENTITY_WINDOW`] blocks.
+    fn recent_inclusion(
+        &self,
+        identity: &RequestIdentity,
+        height: u64,
+    ) -> Result<Option<(Inclusion, u64)>> {
+        Ok(self
+            .inclusion(identity)?
+            .filter(|(found, _)| found.height.saturating_add(REQUEST_IDENTITY_WINDOW) >= height))
     }
 
     pub fn request_status(&self, actor: OwnerId, request_id: [u8; 32]) -> Result<Json> {
@@ -742,7 +889,10 @@ impl Host {
         self.accepting()?;
         let tx = tx.into_inner();
         let identity = tx.identity();
-        if let Some((found, _)) = self.inclusion(&identity)? {
+        let next = self.head.height.saturating_add(1);
+        if let Some((found, _)) = self.inclusion(&identity)?
+            && (found.digest == tx.hash() || self.recent_inclusion(&identity, next)?.is_some())
+        {
             if found.digest != tx.hash() {
                 return Err(ErrorCode::RequestConflict.into());
             }
@@ -861,14 +1011,14 @@ impl Host {
         }
         let height = block.header.header.height;
         if height <= self.head.height {
-            let prior = self.certificate(height)?;
+            let prior = self.chain_certificate(height)?;
             if prior.header != block.header.header {
                 self.health = Health::ChainConflict;
                 let evidence = encode(&(prior, block.header));
                 self.history.freeze_conflict(&evidence)?;
                 return Err(ErrorCode::ChainConflict.into());
             }
-            let known = self.shared_block(height)?;
+            let known = self.replication_block(height)?;
             if known.inputs != block.inputs || known.outcomes != block.outcomes {
                 return Err(ErrorCode::ChainConflict.into());
             }
@@ -905,8 +1055,13 @@ impl Host {
             self.observe_pair(&previous, certificate)?;
         }
         if certificate.header.height <= self.head.height {
-            let prior = self.certificate(certificate.header.height)?;
-            self.observe_pair(&prior, certificate)?;
+            // Below the window with expired bodies there is nothing left to
+            // compare with.
+            match self.chain_certificate(certificate.header.height) {
+                Ok(prior) => self.observe_pair(&prior, certificate)?,
+                Err(e) if e.code == ErrorCode::HistoryPruned => {}
+                Err(e) => return Err(e),
+            }
         }
         Ok(())
     }
@@ -948,7 +1103,7 @@ impl Host {
         inputs.validate(&self.genesis, height)?;
         let mut next = BTreeMap::new();
         for tx in &inputs.txs {
-            if self.inclusion(&tx.identity())?.is_some() {
+            if self.recent_inclusion(&tx.identity(), height)?.is_some() {
                 return Err(ErrorCode::RequestConflict.into());
             }
             let nonce = match next.get(&tx.tx.actor) {
@@ -1126,10 +1281,11 @@ impl Host {
         }
         let pending = self.pending.as_mut().ok_or(ErrorCode::InvalidRequest)?;
         if !pending.history_saved {
+            let certificate = &pending.record.certificate;
             let result = if retry {
-                self.history.retry_exact(&pending.bytes)
+                self.history.retry_exact_block(certificate, &pending.bytes)
             } else {
-                self.history.persist(&pending.bytes)
+                self.history.persist_block(certificate, &pending.bytes)
             };
             match result {
                 Ok(reference) if reference == pending.record.body => pending.history_saved = true,
@@ -1184,6 +1340,14 @@ impl Host {
                 } else {
                     Health::Following
                 };
+                // The block is published; a failed body deletion is
+                // retried with the next block.
+                if let Err(error) = self.expire_bodies() {
+                    eprintln!(
+                        "{}",
+                        json!({"event": "history_prune_failed", "error": error.diagnostic()})
+                    );
+                }
                 Ok(pending.record.certificate)
             }
             Publication::NotCommitted(_) => {

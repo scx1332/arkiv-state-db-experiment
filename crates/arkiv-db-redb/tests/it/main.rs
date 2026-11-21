@@ -23,6 +23,7 @@ mod initialization;
 mod isolation;
 mod latching;
 mod reconciliation;
+mod records;
 mod recovery;
 mod relabel;
 mod streaming_import;

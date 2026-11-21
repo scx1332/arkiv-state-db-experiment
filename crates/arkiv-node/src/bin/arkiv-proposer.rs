@@ -696,6 +696,16 @@ fn state_command() -> Result<()> {
     if sub == "migrate" {
         return migrate_state(&run_dir, &flags);
     }
+    if sub == "migrate-records" {
+        let state = RedbStore::open(&path, RedbConfig::default())?;
+        let history = RedbStore::open(run_dir.join("history.redb"), RedbConfig::default())?;
+        let started = std::time::Instant::now();
+        let report = arkiv_node::signed::migrate::migrate_records(&state, &history)?;
+        let mut out = serde_json::json!(report);
+        out["seconds"] = serde_json::json!(started.elapsed().as_secs_f64());
+        println!("{out}");
+        return Ok(());
+    }
     if flags.contains_key("--state-retention") {
         return Err(ErrorCode::InvalidRequest.into());
     }
@@ -764,12 +774,31 @@ fn state_command() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "state gc-enable|gc-status|gc-verify|table-stats|compact --run-dir DIR | \
-                 state migrate --run-dir DIR --state-retention N"
+                "state gc-enable|gc-status|gc-verify|table-stats|compact|migrate-records \
+                 --run-dir DIR | state migrate --run-dir DIR --state-retention N"
             );
             return Err(ErrorCode::InvalidRequest.into());
         }
     }
+    Ok(())
+}
+
+/// Writes the indexes that record expiry needs into files written before
+/// it (`arkiv_node::signed::migrate`), once, before the node opens them.
+fn migrate_records_if_needed(state: &RedbStore, history: &RedbStore) -> Result<()> {
+    if state.head()?.is_none() || !arkiv_node::signed::migrate::needs_migration(history)? {
+        return Ok(());
+    }
+    let started = std::time::Instant::now();
+    let report = arkiv_node::signed::migrate::migrate_records(state, history)?;
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "event": "records_migrated",
+            "report": report,
+            "seconds": started.elapsed().as_secs_f64(),
+        })
+    );
     Ok(())
 }
 
@@ -871,7 +900,11 @@ async fn run() -> Result<()> {
         "submit" => submit(&args.only(&[&["--transaction-file", "--peer"]])?).await?,
         "producer" => node(&command, &args.only(&[NODE_FLAGS, PRODUCER_FLAGS])?).await?,
         "full" => {
-            let flags = [NODE_FLAGS, FOLLOWER_FLAGS, &["--state-retention"]];
+            let flags = [
+                NODE_FLAGS,
+                FOLLOWER_FLAGS,
+                &["--state-retention", "--body-retention"],
+            ];
             node(&command, &args.only(&flags)?).await?
         }
         "light" => node(&command, &args.only(&[NODE_FLAGS, FOLLOWER_FLAGS])?).await?,
@@ -912,6 +945,7 @@ const PRODUCER_FLAGS: &[&str] = &[
     "--genesis-install",
     "--prebuilt-state",
     "--state-retention",
+    "--body-retention",
 ];
 const FOLLOWER_FLAGS: &[&str] = &[
     "--peer",
@@ -935,13 +969,15 @@ fn help() {
         "arkiv-proposer producer --run-dir DIR --key-file FILE [--listen 127.0.0.1:9500] ",
         "[--private-listen 127.0.0.1:9501] [--start paused|running] [--source-id UUID] ",
         "[--chain-id 9001] [--block-period-ms 1000] [--state-retention archive|N (256)] ",
+        "[--body-retention archive|window (archive)] ",
         "[--read-concurrency 4] [--read-deadline-secs 30] [--read-max-groups N] ",
         "[--read-max-literals N] (--allocations-file FILE | --bundle BUNDLE ",
         "[--prebuilt-state DIR])\n",
         "arkiv-proposer full|light --run-dir DIR --peer URL --genesis-hash 0xHEX ",
         "--proposer 0xADDRESS --chain-id N --source-id UUID --run-id HEX32 ",
         "[--replication-peer URL] [--bundle BUNDLE] [--state-retention archive|N (full ",
-        "only, 256)] [--read-concurrency 4] [--read-deadline-secs 30] [--read-max-groups N] ",
+        "only, 256)] [--body-retention archive|window (full only, archive)] ",
+        "[--read-concurrency 4] [--read-deadline-secs 30] [--read-max-groups N] ",
         "[--read-max-literals N]\n",
         "arkiv-proposer sign --key-file FILE --genesis-file FILE --tx-file FILE --nonce N ",
         "--out FILE\n",
@@ -952,7 +988,8 @@ fn help() {
         "--request-id 0xHEX64 --to 0xADDRESS --amount-wei DECIMAL --out FILE [--gas-limit ",
         "21000]\n",
         "arkiv-proposer submit --peer URL --transaction-file FILE\n",
-        "arkiv-proposer state gc-enable|gc-status|gc-verify|table-stats|compact --run-dir DIR ",
+        "arkiv-proposer state gc-enable|gc-status|gc-verify|table-stats|compact|migrate-records ",
+        "--run-dir DIR ",
         "(node stopped)\n",
         "arkiv-proposer state migrate --run-dir DIR --state-retention N (node stopped)\n",
         "Optional private Prometheus exporter: --metrics-listen 127.0.0.1:9600 ",
@@ -979,6 +1016,17 @@ fn help() {
         "from the floor up (or open reader) reaches are deleted inside block commits, so ",
         "the file stays bounded. An older state file keeps everything until `state ",
         "gc-enable` counts it offline. ",
+        "A window node also expires its per-height records with the state (feeds, ",
+        "blocks, receipts, request inclusions, transaction and block hash lookups): ",
+        "below the record floor they answer HistoryPruned (hash lookups: null), and ",
+        "restart reads only the retained blocks. A request identity stays unique for ",
+        "256 blocks; nonces keep a transaction from ever repeating. ",
+        "--body-retention archive (default) keeps every block body and its ",
+        "certificate in history.redb, so followers and light clients can still start ",
+        "from genesis; window deletes them with the records, which bounds history.redb ",
+        "but leaves new followers without a source (no snapshot sync yet). Files from ",
+        "before record expiry are indexed once at start (or with `state ",
+        "migrate-records`). ",
         "Entity queries and counts, proofs and the state tree explorer run outside the ",
         "node lock against a pinned snapshot: at most --read-concurrency (1-64) at once, ",
         "others refused with ServerBusy (HTTP 429), each stopped after ",
@@ -1147,6 +1195,9 @@ struct NodeEnv<'a> {
     path: &'a Path,
     bundle: Option<(SignedGenesis, PathBuf)>,
     options: Options,
+    /// `--body-retention window`: bodies expire from `history.redb` with
+    /// the node's records.
+    prune_bodies: bool,
     store: &'a dyn Fn(&Path, bool) -> Result<Arc<RedbStore>>,
     peer: Option<String>,
     replication: Option<String>,
@@ -1234,6 +1285,12 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
         Some(value) => value.parse().map_err(|_| ErrorCode::InvalidRequest)?,
         None => default_retention(&path, command)?,
     };
+    let prune_bodies = match args.get("--body-retention").map(String::as_str) {
+        None | Some("archive") => false,
+        // Bodies can only expire below a record floor, which needs a window.
+        Some("window") if retention.window().is_some() => true,
+        Some(_) => return Err(ErrorCode::InvalidRequest.into()),
+    };
     let options = Options {
         retention,
         // Measurement switch: count but never delete (soak step "count-only").
@@ -1264,6 +1321,7 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
         path: &path,
         bundle,
         options,
+        prune_bodies,
         store: &store,
         peer,
         replication,
@@ -1421,12 +1479,14 @@ fn producer_node(env: &NodeEnv<'_>, adopt: bool) -> Result<Node> {
     };
     let state = store(&path.join("node.redb"), streaming_import)?;
     let history_store = store(&path.join("history.redb"), false)?;
+    migrate_records_if_needed(&state, &history_store)?;
     let mut host = if state.head()?.is_some() {
         reopen_producer(env, state, history_store, signer)?
     } else {
         launch_producer(env, state, history_store, signer, adopt)?
     };
     arkiv_node::retention::collect_new_state(&mut host.engine, path)?;
+    host.prune_bodies(env.prune_bodies)?;
     match args.get_or("--start", "paused").as_str() {
         "paused" => {}
         "running" => {
@@ -1679,6 +1739,7 @@ async fn follower_node(env: &NodeEnv<'_>, light: bool) -> Result<Node> {
         };
         let state = store(&path.join("node.redb"), streaming(&genesis))?;
         let hs = store(&path.join("history.redb"), false)?;
+        migrate_records_if_needed(&state, &hs)?;
         let history = if hs.head()?.is_some() {
             History::open(hs, genesis.hash())?
         } else {
@@ -1701,6 +1762,7 @@ async fn follower_node(env: &NodeEnv<'_>, light: bool) -> Result<Node> {
             return Err(ErrorCode::IdentityMismatch.into());
         }
         arkiv_node::retention::collect_new_state(&mut host.engine, path)?;
+        host.prune_bodies(env.prune_bodies)?;
         host.paused = false;
         host.health = Health::Following;
         Ok(Node::Full(Box::new(host)))

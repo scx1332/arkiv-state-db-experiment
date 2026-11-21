@@ -7,6 +7,7 @@ pub mod ethereum;
 pub mod history;
 pub mod host;
 pub mod light;
+pub mod migrate;
 pub mod pool;
 pub mod protocol;
 pub mod reads;

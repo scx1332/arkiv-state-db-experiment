@@ -60,6 +60,10 @@ struct RetentionSample {
     horizon: u64,
     lowest_pin: Option<u64>,
     pinned_handles: usize,
+    /// The record floor and the heights below it whose records are still
+    /// stored.
+    record_floor: u64,
+    record_backlog: u64,
 }
 
 #[derive(Default)]
@@ -272,6 +276,8 @@ impl Metrics {
                                 horizon: h.engine.gc_horizon(),
                                 lowest_pin: status.lowest_pinned,
                                 pinned_handles: status.pinned_handles,
+                                record_floor: h.engine.record_floor().floor,
+                                record_backlog: h.engine.record_floor().backlog(),
                             });
                         }
                         Node::Light { light, .. } => {
@@ -504,6 +510,19 @@ impl NodeSample {
                 "Open snapshot handles.",
                 "",
                 r.pinned_handles,
+            );
+            families.gauge(
+                "state_record_floor",
+                "Lowest height (above 0) whose per-height records (feed, block, inclusions) \
+                 are kept.",
+                "",
+                r.record_floor,
+            );
+            families.gauge(
+                "state_record_backlog_heights",
+                "Expired heights whose records are not deleted yet.",
+                "",
+                r.record_backlog,
             );
         }
     }
@@ -922,6 +941,8 @@ mod tests {
                 horizon: 2,
                 lowest_pin: Some(4),
                 pinned_handles: 2,
+                record_floor: 2,
+                record_backlog: 1,
             }),
         };
         metrics.refresh();

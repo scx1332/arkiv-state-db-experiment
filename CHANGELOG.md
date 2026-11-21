@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Per-height records expire with the state window
+
+- **Protocol: a request identity is unique for 256 blocks**
+  (`REQUEST_IDENTITY_WINDOW`), not forever. A block may not include an
+  identity one of the previous 256 blocks included; an older identity may be
+  used again. Nonces still make every transaction single-use. Older binaries
+  would refuse such a block.
+- A window node expires block records, feeds, receipts, inclusions, the hash
+  index and floor records below `recordFloor` (status, metrics), inside
+  block commits. They answer `HistoryPruned`; hash lookups answer `null`.
+  Restart reads only the kept blocks.
+- `--body-retention archive|window` (default `archive`): bodies in
+  `history.redb` are kept for followers and light clients that start from
+  genesis, or deleted with the records.
+- Files from before are indexed once at start (`state migrate-records`).
+- `CommitBatch` carries record and object removals.
+
 ### Stricter requests and typed errors
 
 - **A y-parity above 1 is `InvalidEthereumTransaction`**; it was reported as

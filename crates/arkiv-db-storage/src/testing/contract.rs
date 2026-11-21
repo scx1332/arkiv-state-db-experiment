@@ -97,6 +97,7 @@ macro_rules! versioned_store_contract {
             recover_is_idempotent,
             stage_objects_is_headless_and_refuses_a_published_store,
             relabel_replaces_exactly_the_retired_records,
+            removals_expire_records_and_objects_atomically,
         );
     };
     (@cases $factory:expr; $($case:ident),* $(,)?) => {
@@ -414,6 +415,106 @@ pub fn records_are_insert_only(factory: &dyn StoreFactory) {
         record(store, Table::Inclusions, b"actor/2"),
         Some(b"height 1".to_vec())
     );
+}
+
+/// A batch's removals apply before its insertions, atomically with them
+/// and the head: records of every table and objects leave, an absent entry
+/// is a no-op, a removed record can be inserted again with other bytes in
+/// the same batch, and a refused batch removes nothing. They survive a
+/// reopen.
+pub fn removals_expire_records_and_objects_atomically(factory: &dyn StoreFactory) {
+    let test = factory.create();
+    let store = test.store;
+    let mut parent = None;
+    let mut objects = Vec::new();
+    for height in 0..3 {
+        let mut batch = block_batch(factory, parent, height, 2);
+        batch.put_record(
+            Table::Inclusions,
+            format!("identity/{height}").into_bytes(),
+            format!("included at {height}").into_bytes(),
+        );
+        batch.put_record(
+            Table::Meta,
+            format!("engine/at/{height}"),
+            height.to_be_bytes().to_vec(),
+        );
+        objects.push(batch.objects[0].clone());
+        committed(store.commit(&batch));
+        parent = Some(head(height, 1));
+    }
+    let removed_object = objects[1].clone();
+    let mut expire = CommitBatch::new(parent, head(3, 1));
+    expire
+        .remove_record(Table::Blocks, height_key(1).to_vec())
+        .remove_record(Table::Manifests, height_key(1).to_vec())
+        .remove_record(Table::BlockIndex, head(1, 1).hash.to_vec())
+        .remove_record(Table::Inclusions, b"identity/1".to_vec())
+        .remove_record(Table::Meta, b"engine/at/1".to_vec())
+        // Absent entries are no-ops.
+        .remove_record(Table::Blocks, height_key(77).to_vec())
+        .remove_object(SpaceId::Namespace(1), [9; 32])
+        .remove_object(removed_object.0, removed_object.1)
+        // Replaced within the batch.
+        .remove_record(Table::Inclusions, b"identity/2".to_vec())
+        .put_record(
+            Table::Inclusions,
+            b"identity/2".to_vec(),
+            b"included again at 3".to_vec(),
+        )
+        .put_record(Table::Blocks, height_key(3), b"block 3".to_vec());
+
+    // A refused batch (stale head) removes nothing.
+    let mut stale = expire.clone();
+    stale.expected_head = Some(head(1, 1));
+    not_committed(store.commit(&stale), StorageErrorKind::HeadMismatch);
+    assert_eq!(
+        record(store.as_ref(), Table::Blocks, &height_key(1)),
+        Some(b"block 1".to_vec())
+    );
+    // An object both put and removed is malformed.
+    let mut both = expire.clone();
+    both.put_object(removed_object.0, removed_object.1, removed_object.2.clone());
+    not_committed(store.commit(&both), StorageErrorKind::Incompatible);
+    // So is the removal of a store-owned metadata record.
+    let mut reserved = expire.clone();
+    reserved.remove_record(Table::Meta, b"store/head".to_vec());
+    not_committed(store.commit(&reserved), StorageErrorKind::Incompatible);
+
+    let before = store.stats().removed;
+    committed(store.commit(&expire));
+    assert_eq!(store.stats().removed - before, 7);
+    let check = |store: &dyn VersionedStore| {
+        assert_eq!(store.head().unwrap(), Some(head(3, 1)));
+        for (table, key) in [
+            (Table::Blocks, height_key(1).to_vec()),
+            (Table::Manifests, height_key(1).to_vec()),
+            (Table::BlockIndex, head(1, 1).hash.to_vec()),
+            (Table::Inclusions, b"identity/1".to_vec()),
+            (Table::Meta, b"engine/at/1".to_vec()),
+        ] {
+            assert_eq!(record(store, table, &key), None, "{table:?}");
+        }
+        assert_eq!(read(store, removed_object.0, &removed_object.1), None);
+        assert_eq!(
+            read(store, objects[0].0, &objects[0].1),
+            Some(objects[0].2.clone())
+        );
+        assert_eq!(
+            record(store, Table::Inclusions, b"identity/2"),
+            Some(b"included again at 3".to_vec())
+        );
+        for height in [0, 2] {
+            assert!(record(store, Table::Blocks, &height_key(height)).is_some());
+            assert!(record(store, Table::BlockIndex, &head(height, 1).hash).is_some());
+        }
+    };
+    check(store.as_ref());
+    if let Some(reopen) = test.reopen {
+        drop(store);
+        let store = reopen();
+        check(store.as_ref());
+    }
 }
 
 /// Identical duplicates inside a batch are idempotent; conflicting ones reject

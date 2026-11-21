@@ -9,7 +9,8 @@
 //!   objects of one namespace never share a B-tree with another namespace's.
 //! - **Records** in five fixed [`Table`]s (metadata, blocks, manifests,
 //!   inclusion identities, block index), insert-only under
-//!   [`VersionedStore::commit`].
+//!   [`VersionedStore::commit`] except for explicit removals named by the
+//!   batch ([`CommitBatch::remove_records`]), which expire history.
 //! - **One durable head** ([`Head`]), moved by a compare-and-set together
 //!   with every object and record of the same [`CommitBatch`], atomically.
 //! - **Three commit outcomes** ([`CommitOutcome`]): committed and durable,
@@ -292,6 +293,13 @@ impl Table {
 /// Duplicates inside a batch follow the same rules as duplicates against
 /// committed state: identical entries are idempotent, different bytes under
 /// the same object id or record key are a conflict.
+///
+/// A batch may also remove records and objects (history expiry). Removals
+/// apply before insertions, in the same atomic transaction: removing an
+/// absent entry is a no-op, and a record both removed and inserted is
+/// replaced. An object may not be both removed and put. A store with
+/// garbage collection refuses object removals: its objects belong to the
+/// collector.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CommitBatch {
     /// The head this batch builds on; `None` for the first commit.
@@ -302,6 +310,10 @@ pub struct CommitBatch {
     pub objects: Vec<(SpaceId, ObjectId, Vec<u8>)>,
     /// Records to insert.
     pub records: Vec<(Table, Vec<u8>, Vec<u8>)>,
+    /// Records to remove before the insertions.
+    pub remove_records: Vec<(Table, Vec<u8>)>,
+    /// Objects to remove before the insertions.
+    pub remove_objects: Vec<(SpaceId, ObjectId)>,
 }
 
 impl CommitBatch {
@@ -312,7 +324,28 @@ impl CommitBatch {
             new_head,
             objects: Vec::new(),
             records: Vec::new(),
+            remove_records: Vec::new(),
+            remove_objects: Vec::new(),
         }
+    }
+
+    /// Adds a record removal and returns the batch for chaining.
+    pub fn remove_record(&mut self, table: Table, key: impl Into<Vec<u8>>) -> &mut Self {
+        self.remove_records.push((table, key.into()));
+        self
+    }
+
+    /// Adds an object removal and returns the batch for chaining.
+    pub fn remove_object(&mut self, space: SpaceId, id: ObjectId) -> &mut Self {
+        self.remove_objects.push((space, id));
+        self
+    }
+
+    /// Whether the batch removes `(table, key)`.
+    pub fn removes_record(&self, table: Table, key: &[u8]) -> bool {
+        self.remove_records
+            .iter()
+            .any(|(of, removed)| *of == table && removed == key)
     }
 
     /// Adds an object and returns the batch for chaining.
@@ -367,6 +400,28 @@ impl CommitBatch {
             ));
         }
         validate_objects(&self.objects)?;
+        for (table, key) in &self.remove_records {
+            if *table == Table::Meta && key.starts_with(RESERVED_META_PREFIX.as_bytes()) {
+                return Err(StorageError::new(
+                    StorageErrorKind::Incompatible,
+                    "meta record removal uses the store's reserved prefix",
+                ));
+            }
+        }
+        if !self.remove_objects.is_empty() {
+            let removed: std::collections::BTreeSet<_> = self.remove_objects.iter().collect();
+            if let Some((space, id, _)) = self
+                .objects
+                .iter()
+                .find(|(space, id, _)| removed.contains(&(*space, *id)))
+            {
+                return Err(StorageError::new(
+                    StorageErrorKind::Incompatible,
+                    format!("object {} is both put and removed", hex_prefix(id))
+                        + &format!(" in {space:?}"),
+                ));
+            }
+        }
         let mut records: BTreeMap<(Table, &[u8]), &[u8]> = BTreeMap::new();
         for (table, key, value) in &self.records {
             table.check_record(key, value)?;
@@ -676,7 +731,9 @@ pub trait ObjectReader: Send + Sync {
 ///   bytes again are idempotent, different bytes are `Conflict` and the whole
 ///   batch is `NotCommitted`.
 /// - Records are insert-only: an identical record is idempotent, a different
-///   value is `Conflict`. Only [`relabel`](Self::relabel) removes records.
+///   value is `Conflict`. Records and objects leave only through a batch's
+///   explicit removals ([`CommitBatch::remove_records`],
+///   [`CommitBatch::remove_objects`]) or [`relabel`](Self::relabel).
 /// - [`stage_objects`](Self::stage_objects) puts objects into a store that
 ///   has no head yet, outside any commit.
 /// - The head changes only by compare-and-set; a mismatch is
@@ -1050,6 +1107,8 @@ pub struct StoreStats {
     pub head_reads: u64,
     /// Records newly stored by committed batches.
     pub records_written: u64,
+    /// Records and objects removed by committed batches (history expiry).
+    pub removed: u64,
     /// Commits that returned `Committed`.
     pub committed: u64,
     /// Commits that returned `NotCommitted`.
@@ -1098,6 +1157,7 @@ impl StoreStats {
                 .saturating_sub(earlier.record_read_bytes),
             head_reads: self.head_reads.saturating_sub(earlier.head_reads),
             records_written: self.records_written.saturating_sub(earlier.records_written),
+            removed: self.removed.saturating_sub(earlier.removed),
             committed: self.committed.saturating_sub(earlier.committed),
             not_committed: self.not_committed.saturating_sub(earlier.not_committed),
             indeterminate: self.indeterminate.saturating_sub(earlier.indeterminate),
@@ -1116,6 +1176,8 @@ impl StoreStats {
 pub struct Written {
     pub objects: Vec<(SpaceId, usize)>,
     pub records: u64,
+    /// Records and objects the write removed (present before it).
+    pub removed: u64,
 }
 
 /// Shared bookkeeping for [`StoreStats`], for store implementations.
@@ -1181,6 +1243,7 @@ impl StatsRecorder {
         };
         stats.committed += 1;
         stats.records_written += written.records;
+        stats.removed += written.removed;
         for (space, len) in written.objects {
             let entry = stats.spaces.entry(space).or_default();
             entry.objects_written += 1;

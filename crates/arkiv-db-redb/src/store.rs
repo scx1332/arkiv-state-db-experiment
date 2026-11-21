@@ -440,6 +440,96 @@ impl RedbStore {
         })
     }
 
+    /// Visits every record of `table` in key order, in one read
+    /// transaction, until `visit` returns `false`. Keys have the shape of
+    /// [`Table::check_record`] (heights big-endian, `BlockIndex` values as 8
+    /// bytes). Offline migrations only: the read transaction pins every page
+    /// freed while it runs.
+    pub fn for_each_record(
+        &self,
+        table: Table,
+        mut visit: impl FnMut(&[u8], &[u8]) -> Result<bool, StorageError>,
+    ) -> Result<(), StorageError> {
+        self.with_db(|db| {
+            let read = db.begin_read()?;
+            match table {
+                Table::Meta => {
+                    for entry in read.open_table(META)?.iter()? {
+                        let (key, value) = entry?;
+                        if !visit(key.value().as_bytes(), value.value())? {
+                            break;
+                        }
+                    }
+                }
+                Table::Blocks | Table::Manifests => {
+                    let records = read.open_table(if table == Table::Blocks {
+                        BLOCKS
+                    } else {
+                        MANIFESTS
+                    })?;
+                    for entry in records.iter()? {
+                        let (key, value) = entry?;
+                        if !visit(&key.value().to_be_bytes(), value.value())? {
+                            break;
+                        }
+                    }
+                }
+                Table::Inclusions => {
+                    for entry in read.open_table(INCLUSIONS)?.iter()? {
+                        let (key, value) = entry?;
+                        if !visit(key.value(), value.value())? {
+                            break;
+                        }
+                    }
+                }
+                Table::BlockIndex => {
+                    for entry in read.open_table(BLOCK_INDEX)?.iter()? {
+                        let (key, value) = entry?;
+                        if !visit(key.value(), &value.value().to_be_bytes())? {
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Inserts `records` (insert-only rules) without moving the head or
+    /// touching garbage-collection state: offline migrations of a stopped
+    /// node only, for records no published head depends on yet.
+    pub fn insert_records_offline(
+        &self,
+        records: &[(Table, Vec<u8>, Vec<u8>)],
+    ) -> Result<u64, StorageError> {
+        self.rewrite_records_offline(&[], records)
+    }
+
+    /// [`Self::insert_records_offline`] after removing `remove`, in one
+    /// transaction. Returns the records inserted.
+    pub fn rewrite_records_offline(
+        &self,
+        remove: &[(Table, Vec<u8>)],
+        records: &[(Table, Vec<u8>, Vec<u8>)],
+    ) -> Result<u64, StorageError> {
+        let head = self.head()?;
+        let mut check = CommitBatch::new(None, Head::default());
+        check.records = records.to_vec();
+        check.remove_records = remove.to_vec();
+        let inserted = std::cell::Cell::new(0);
+        match self.transact(
+            || check.validate(),
+            |txn| {
+                let written = stage_removing(txn, head, &[], remove, &[], records, None)?;
+                inserted.set(written.records);
+                Ok(written)
+            },
+        ) {
+            CommitOutcome::Committed => Ok(inserted.get()),
+            CommitOutcome::NotCommitted(error) | CommitOutcome::Indeterminate(error) => Err(error),
+        }
+    }
+
     /// How many times the database handle has been replaced by `recover`.
     pub fn epoch(&self) -> u64 {
         self.slot
@@ -619,6 +709,20 @@ fn stage(
     records: &[(Table, Vec<u8>, Vec<u8>)],
     new_head: Option<Head>,
 ) -> Result<Written, Fault> {
+    stage_removing(txn, expected_head, &[], &[], objects, records, new_head)
+}
+
+/// [`stage`] after removing `remove_objects` and `remove_records` (history
+/// expiry), in the same transaction.
+fn stage_removing(
+    txn: &WriteTransaction,
+    expected_head: Option<Head>,
+    remove_objects: &[(SpaceId, ObjectId)],
+    remove_records: &[(Table, Vec<u8>)],
+    objects: &[(SpaceId, ObjectId, Vec<u8>)],
+    records: &[(Table, Vec<u8>, Vec<u8>)],
+    new_head: Option<Head>,
+) -> Result<Written, Fault> {
     let mut meta = txn.open_table(META)?;
     let current = match meta.get(HEAD_KEY)? {
         Some(guard) => Some(Head::decode(guard.value())?),
@@ -626,6 +730,49 @@ fn stage(
     };
     if current != expected_head {
         return Err(head_mismatch(expected_head, current).into());
+    }
+    let mut removed = 0u64;
+    if !remove_objects.is_empty() {
+        let mut by_space: BTreeMap<SpaceId, Vec<&ObjectId>> = BTreeMap::new();
+        for (space, id) in remove_objects {
+            by_space.entry(*space).or_default().push(id);
+        }
+        for (space, ids) in by_space {
+            let name = object_table_name(space);
+            let mut table = txn.open_table(object_table(&name))?;
+            for id in ids {
+                removed += u64::from(table.remove(id)?.is_some());
+            }
+        }
+    }
+    for (table, key) in remove_records {
+        // A key that cannot have the table's shape is absent by
+        // construction.
+        removed += u64::from(match table {
+            Table::Meta => match std::str::from_utf8(key) {
+                Ok(name) => meta.remove(name)?.is_some(),
+                Err(_) => false,
+            },
+            Table::Blocks | Table::Manifests => match <[u8; 8]>::try_from(key.as_slice()) {
+                Ok(height) => txn
+                    .open_table(if *table == Table::Blocks {
+                        BLOCKS
+                    } else {
+                        MANIFESTS
+                    })?
+                    .remove(u64::from_be_bytes(height))?
+                    .is_some(),
+                Err(_) => false,
+            },
+            Table::Inclusions => txn
+                .open_table(INCLUSIONS)?
+                .remove(key.as_slice())?
+                .is_some(),
+            Table::BlockIndex => match <&[u8; 32]>::try_from(key.as_slice()) {
+                Ok(hash) => txn.open_table(BLOCK_INDEX)?.remove(hash)?.is_some(),
+                Err(_) => false,
+            },
+        });
     }
 
     let mut by_space: BTreeMap<SpaceId, Vec<(&ObjectId, &[u8])>> = BTreeMap::new();
@@ -708,6 +855,7 @@ fn stage(
     if let Some(head) = new_head {
         meta.insert(HEAD_KEY, head.encode().as_slice())?;
     }
+    written.removed = removed;
     Ok(written)
 }
 
@@ -799,9 +947,11 @@ fn stage_relabel(txn: &WriteTransaction, relabel: &Relabel) -> Result<Written, F
 }
 
 fn stage_batch(txn: &WriteTransaction, batch: &CommitBatch) -> Result<Written, Fault> {
-    stage(
+    stage_removing(
         txn,
         batch.expected_head,
+        &batch.remove_objects,
+        &batch.remove_records,
         &batch.objects,
         &batch.records,
         Some(batch.new_head),
@@ -1328,30 +1478,30 @@ impl VersionedStore for RedbStore {
         let started = Instant::now();
         let invariant = std::cell::Cell::new(None::<String>);
         let planned = std::cell::Cell::new(None::<(GcState, GcReport)>);
-        let mut outcome = self.transact_locked(
-            || batch.validate(),
-            |txn| stage_gc(txn, batch, gc, graph, &invariant, &planned),
-        );
+        let validate = || match batch.remove_objects.is_empty() {
+            true => batch.validate(),
+            false => Err(gc_write_refused("an object removal")),
+        };
+        let mut outcome = self.transact_locked(validate, |txn| {
+            stage_gc(txn, batch, gc, graph, &invariant, &planned)
+        });
         if let Some(reason) = invariant.take() {
             // The counts are wrong: commit without collection, suspended,
             // so production continues and an operator rebuilds them.
             eprintln!("garbage collection suspended: {reason}");
-            outcome = self.transact_locked(
-                || batch.validate(),
-                |txn| {
-                    let written = stage_batch(txn, batch)?;
-                    let mut state = tables::read_state(txn)?.ok_or_else(|| {
-                        Fault::new(
-                            StorageErrorKind::Incompatible,
-                            "the store does not collect garbage",
-                        )
-                    })?;
-                    state.suspended = true;
-                    tables::write_state(txn, &state)?;
-                    planned.set(Some((state, GcReport::default())));
-                    Ok(written)
-                },
-            );
+            outcome = self.transact_locked(validate, |txn| {
+                let written = stage_batch(txn, batch)?;
+                let mut state = tables::read_state(txn)?.ok_or_else(|| {
+                    Fault::new(
+                        StorageErrorKind::Incompatible,
+                        "the store does not collect garbage",
+                    )
+                })?;
+                state.suspended = true;
+                tables::write_state(txn, &state)?;
+                planned.set(Some((state, GcReport::default())));
+                Ok(written)
+            });
         }
         self.gc_nanos.fetch_add(
             started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
@@ -1508,9 +1658,11 @@ fn stage_gc(
         planned.set(Some((state, GcReport::default())));
         return Ok(written);
     }
-    let mut written = stage(
+    let mut written = stage_removing(
         txn,
         batch.expected_head,
+        &[],
+        &batch.remove_records,
         &[],
         &batch.records,
         Some(batch.new_head),

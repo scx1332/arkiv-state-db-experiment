@@ -70,6 +70,10 @@ engine, without the node lock if it is busy):
   died before the epoch this height was committed in are deleted.
 - `state_lowest_pin_height`, `state_pinned_handles`: open snapshot handles. A
   pin that stays low holds deletion back.
+- `state_record_floor`: the lowest height (above 0) whose per-height records
+  (feed, block, request inclusions) are kept; `state_record_backlog_heights`:
+  expired heights whose records commits have not deleted yet (it drains by
+  at least a sixteenth per block after a migration).
 
 A `node.redb` with garbage collection (`database="state"`) also exports, from
 the GC state the store keeps in each commit:

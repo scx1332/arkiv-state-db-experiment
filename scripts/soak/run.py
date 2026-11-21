@@ -4,7 +4,7 @@
     scripts/soak/run.py --work DIR [--quick] [--growth-min 60] [--churn-min 40]
         [--readers-min 15] [--block-ms 250] [--port 18700] [--drop-caches]
         [--bundle DIR --prebuilt-state DIR --sourcify-keys FILE --mutate-min 60]
-        [--state-retention archive|N] [--patch-min 0]
+        [--state-retention archive|N] [--body-retention archive|window] [--patch-min 0]
 
 By default the node starts from an empty genesis. With --bundle it starts from
 a built genesis bundle instead (the Sourcify prefill, say), installing
@@ -197,7 +197,7 @@ class Soak:
             "--metrics-listen", f"127.0.0.1:{port + 2}",
             "--start", "running",
             "--state-retention", self.args.state_retention,
-        ] + (["--prebuilt-state", str(self.prebuilt), "--genesis-install", "adopt"] if self.prebuilt else [])  # fmt: skip
+        ] + (["--body-retention", self.args.body_retention] if self.args.body_retention else []) + (["--prebuilt-state", str(self.prebuilt), "--genesis-install", "adopt"] if self.prebuilt else [])  # fmt: skip
 
     def genesis(self):
         if self.args.bundle:
@@ -432,6 +432,7 @@ def main():
     parser.add_argument("--min-free-gb", type=int, default=100)
     parser.add_argument("--drop-caches", action="store_true", help="drop the page cache before the restart (needs sudo)")
     parser.add_argument("--state-retention", default="256", help="the producer's --state-retention: archive or a window N (the node default, 256)")
+    parser.add_argument("--body-retention", help="the producer's --body-retention: archive (the node default) or window")
     parser.add_argument("--patch-min", type=float, default=0, help="minutes of patching the cohort before growth")
     args = parser.parse_args()
     if args.quick:

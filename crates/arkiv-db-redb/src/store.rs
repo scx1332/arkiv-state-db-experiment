@@ -250,24 +250,6 @@ fn closed() -> StorageError {
     StorageError::new(StorageErrorKind::Closed, "the store has no open database")
 }
 
-/// Compacts the store file at `path` in place with redb's own compaction,
-/// so pages freed by deletions are returned to the file system. Offline:
-/// nothing else may have the file open. Returns the file length before
-/// and after. Compaction moves pages repeatedly and uses two-phase commit;
-/// an interrupted one leaves a file redb repairs on the next open.
-pub fn compact_file(path: &Path) -> Result<(u64, u64), StorageError> {
-    let before = fs::metadata(path).map_err(|e| Fault::from(e).0)?.len();
-    let mut db = Database::open(path).map_err(|e| Fault::from(e).0)?;
-    while db
-        .compact()
-        .map_err(|e| StorageError::new(StorageErrorKind::Io, format!("redb compaction: {e}")))?
-    {
-    }
-    drop(db);
-    let after = fs::metadata(path).map_err(|e| Fault::from(e).0)?.len();
-    Ok((before, after))
-}
-
 /// The temporary file [`RedbStore::create`] builds a new store in: the
 /// store's path with `.init` appended to its file name.
 ///

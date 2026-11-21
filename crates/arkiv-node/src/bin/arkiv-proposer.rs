@@ -709,16 +709,6 @@ fn state_command() -> Result<()> {
     if flags.contains_key("--state-retention") {
         return Err(ErrorCode::InvalidRequest.into());
     }
-    if sub == "compact" {
-        let started = std::time::Instant::now();
-        let (before, after) = arkiv_db_redb::compact_file(&path)?;
-        println!(
-            "{}",
-            serde_json::json!({"fileBytesBefore": before, "fileBytesAfter": after,
-                "seconds": started.elapsed().as_secs_f64()})
-        );
-        return Ok(());
-    }
     // Opening takes the file lock: refused while a node runs on it.
     let store = Arc::new(RedbStore::open(&path, RedbConfig::default())?);
     let report = |state: &arkiv_db_storage::gc::GcState| {
@@ -774,7 +764,7 @@ fn state_command() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "state gc-enable|gc-status|gc-verify|table-stats|compact|migrate-records \
+                "state gc-enable|gc-status|gc-verify|table-stats|migrate-records \
                  --run-dir DIR | state migrate --run-dir DIR --state-retention N"
             );
             return Err(ErrorCode::InvalidRequest.into());
@@ -988,7 +978,7 @@ fn help() {
         "--request-id 0xHEX64 --to 0xADDRESS --amount-wei DECIMAL --out FILE [--gas-limit ",
         "21000]\n",
         "arkiv-proposer submit --peer URL --transaction-file FILE\n",
-        "arkiv-proposer state gc-enable|gc-status|gc-verify|table-stats|compact|migrate-records ",
+        "arkiv-proposer state gc-enable|gc-status|gc-verify|table-stats|migrate-records ",
         "--run-dir DIR ",
         "(node stopped)\n",
         "arkiv-proposer state migrate --run-dir DIR --state-retention N (node stopped)\n",

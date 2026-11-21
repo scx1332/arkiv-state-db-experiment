@@ -174,7 +174,8 @@ reference.
   not shrink), `state migrate --state-retention N` (copy-migrate, below),
   `state gc-status`, `state gc-verify` (every invariant; reads the store
   into memory, small states only), `state table-stats` (per-table bytes, a
-  walk) and `state compact` (redb compaction).
+  walk). A `state compact` command (redb compaction) existed briefly and
+  was removed: see `docs/benchmarks/2026-11-21-compaction.md`.
 - Status gains `stateGc` (`on`, `suspended`, `off`). Metrics are listed in
   [metrics](../metrics.md#state-pruning); none walks the database.
 - `ARKIV_STATE_GC_COUNT_ONLY=1` counts and releases but deletes nothing
@@ -277,7 +278,7 @@ archive file took 2.2 s (2,056 MiB to 1,028 MiB).
 - *(Done 2026-11-21.)* The insert-only floor records
   (`engine/state-floor/<height>`, one per commit, about 50 bytes) also grow
   with the chain.
-- Copy-migration and `state compact` are not timed on large files.
+- Copy-migration is not timed on large files.
 - The simulator binary does not collect.
 - `gc-verify` holds the whole store in memory; a streaming verifier for
   large files is not written.
@@ -409,11 +410,10 @@ the marker `signed-history/height-index` runs
 scan of `inclusions` writes the lists, one scan of `blocks` and of the
 history entries writes the index rows; no head moves, nothing existing
 changes, and it is idempotent. The first commit then raises `R` to the
-window and the backlog drains in the following commits; `state compact`
-returns the freed pages to the filesystem. Measured on a copy of the
+window and the backlog drains in the following commits; later writes
+reuse the freed pages. Measured on a copy of the
 2026-11-20 pruned patch soak (2,913 blocks): migration 5.6 s; the backlog
-of 2,657 heights was gone within about 20 blocks; `node.redb` compacted
-from 880 MiB to 7.6 MiB. The Sourcify file (12,604 blocks) was not touched:
+of 2,657 heights was gone within about 20 blocks. The Sourcify file (12,604 blocks) was not touched:
 another experiment uses it.
 
 ### Measured
@@ -464,8 +464,8 @@ the same 12-minute patch load as the 2026-11-20 soak:
 - Not run on the Sourcify state (its run directory is in use by another
   experiment): migration time on 12,604 blocks of 92 KB records is not
   measured, nor the drain on a state larger than RAM.
-- `state compact` compacts `node.redb` only; `history.redb` reuses its freed
-  pages but does not shrink.
+- Neither file shrinks after expiry: freed pages are reused by later
+  writes, not returned to the filesystem.
 - A paused node does not raise its floor until it commits, so its first
   restart after migration still reads every block.
 

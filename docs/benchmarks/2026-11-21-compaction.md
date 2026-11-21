@@ -71,6 +71,12 @@ from offset 300,000, about 210,000 patches each at 115–120 patches/s.
 - `state compact` (redb's `compact`) relocates pages towards the start of
   the file. Whether it also merges half-full pages was not tested.
 
+## Decision
+
+Compaction was dropped (2026-11-22). The gain is one-off and churn takes it
+back, so `state compact` was removed from the node. Packing at the genesis
+build stays a possible later optimisation.
+
 ## Not done
 
 - Packing in `genesis stream-build` itself.

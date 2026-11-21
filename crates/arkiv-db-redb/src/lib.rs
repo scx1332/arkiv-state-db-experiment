@@ -79,5 +79,5 @@ pub use metrics::{DURATION_BUCKETS_NANOSECONDS, OperationTimingSnapshot};
 pub use migrate::{CopyReport, copy_reachable};
 pub use store::{
     DEFAULT_CACHE_SIZE, DataStats, LayoutStats, OpenReport, RedbConfig, RedbStore,
-    STORE_FORMAT_VERSION, TableLayout, compact_file, initialization_path,
+    STORE_FORMAT_VERSION, TableLayout, initialization_path,
 };

@@ -1,9 +1,10 @@
 # Proposal: prune state to the latest 256 blocks
 
-Status: implemented for trie objects (2026-11-20), including copy-migration;
-`Blocks` records, bodies and restart are not pruned yet. See
-[Implementation](#implementation-2026-11-20) for what was built, the measured
-result and what is left. The design text below was written against commit
+Status: implemented for trie objects (2026-11-20), including copy-migration,
+and for per-height records, bodies (opt-in) and restart (2026-11-21). See
+[Implementation](#implementation-2026-11-20) and
+[Per-height records](#per-height-records-2026-11-21) for what was built, the
+measured result and what is left. The design text below was written against commit
 `e77cf27`, and every `file:line` in it refers to that commit. It refines
 phase 2 of [state history pruning](../pruning-design.md), which is still the
 reference for the retention floor, pins and API errors (phases 0 and 1).
@@ -263,7 +264,8 @@ archive file took 2.2 s (2,056 MiB to 1,028 MiB).
 - Nothing has run on the Sourcify state yet: seeding time and spill size
   at adoption, commit cost on a state larger than RAM, and the size of
   `gc_shared` there are not measured.
-- **`Blocks` records are the next thing to prune for a bounded file.**
+- *(Done 2026-11-21, see [Per-height records](#per-height-records-2026-11-21).)*
+  **`Blocks` records are the next thing to prune for a bounded file.**
   `node.redb` keeps, for every height, the certificate, the body reference
   and the feed JSON (about 180 KiB per block in the soak above), and
   `history.redb` keeps every body. The feed is a stored log, which the
@@ -272,12 +274,200 @@ archive file took 2.2 s (2,056 MiB to 1,028 MiB).
   answer from the feed endpoints. Certificates and bodies are still needed
   by light clients and follower replication from genesis, and restart
   rebuilds its hash index from every block: item 5 of the plan.
-- The insert-only floor records (`engine/state-floor/<height>`, one per
-  commit, about 50 bytes) also grow with the chain.
+- *(Done 2026-11-21.)* The insert-only floor records
+  (`engine/state-floor/<height>`, one per commit, about 50 bytes) also grow
+  with the chain.
 - Copy-migration and `state compact` are not timed on large files.
 - The simulator binary does not collect.
 - `gc-verify` holds the whole store in memory; a streaming verifier for
   large files is not written.
+
+## Per-height records (2026-11-21)
+
+With trie objects bounded, the file still grew with the chain: the `blocks`
+table (certificate, body reference and feed JSON: about 180 KiB per block
+in the patch soak, 92 KB of pages per block on Sourcify), the block bodies
+in `history.redb`, and smaller rows per height. This section expires them
+with the same window. The code is the reference:
+`crates/arkiv-db/src/durable/records.rs` (engine),
+`crates/arkiv-node/src/signed/history.rs` (bodies),
+`crates/arkiv-node/src/signed/migrate.rs` (old files).
+
+### Every per-height record and what reads it
+
+| Record | Bytes per block (patch soak) | Read by | Decision |
+| --- | ---: | --- | --- |
+| `node.redb` `blocks[h]`: certificate, body reference, feed JSON | about 180 KiB with 128 patches | feed endpoints, `Host::record/certificate/block`, request status, receipts and logs, restart | **expires** with the window |
+| `manifests[h]` | about 500 B | snapshots (`read_manifest`), open (head and height 0) | **expires**; height 0 stays (open reads it) |
+| `block_index[id(h)]` | 40 B | the parent check of `read_manifest` | **expires**, one height later than its manifest (the lowest kept manifest checks its parent's entry) |
+| `inclusions[identity]` | about 375 B per transaction | duplicate check (admission and block validity), request status | **expires** after the identity window (below) |
+| `engine/state-floor/<h>`, new `engine/record-floor/<h>` | about 50 B each | open (head only) | **expire** |
+| new `engine/inclusions-at/<h>` | 62 B per transaction | deletion of height `h` | **expires**: the index that finds a height's inclusion rows |
+| `history.redb` body (object), entry (`manifests[seq]`), observed header (`inclusions[h]`) | about 125 KiB with 128 patches | replication to followers, `headers` for light clients and followers, restart | **expire only with `--body-retention window`** (below) |
+| new `history.redb` `blocks[h]` = body reference ‖ entry ‖ certificate | about 300 B | blocks and headers below the record window; body deletion by height | kept while bodies are kept |
+| in-memory hash index (`rpc::RpcState`) | — | `eth_getTransactionByHash`, `…Receipt`, `eth_getBlockByHash` | holds the kept blocks only; rebuilt from them |
+| height 0 (manifest, block index, block record, body) | — | open, `/genesis`, followers | **kept**: the anchor |
+
+### The record floor
+
+`R(S) = max(R(S-1), min(stateFloor(S), S + 1 - k))`, where `k` is the
+request identity window. `R ≤ stateFloor`, and with the default window
+(256 ≥ k - 1) `R = stateFloor`: a block's record expires with the state its
+receipts are rebuilt from. A smaller window keeps records for `k` heights,
+so the next block's identity check still finds every inclusion it needs. Below `R` (height 0 aside) a block, its feed, its certificate, its
+transactions and receipts answer `HistoryPruned` (HTTP 410, JSON-RPC
+`-32006`, `data.floor = R`); hash lookups (`eth_getTransactionByHash`,
+`eth_getTransactionReceipt`, `eth_getBlockByHash`) answer `null` because an
+unknown hash cannot be told from an expired one; request status answers
+`unknown`. `eth_feeHistory` starts at `R` at the oldest, and a feed reader
+without a cursor starts at `R`. Status reports `recordFloor` (and
+`bodyFloor`); metrics `state_record_floor` and
+`state_record_backlog_heights`.
+
+The floor is logical first: from the commit that raises it, nothing below
+it is served, whether or not its bytes are deleted. Deletion happens in the
+block's own commit, in the same atomic batch, from a cursor kept beside the
+floor (`engine/record-floor/<S> = R ‖ cursor`, one record per commit, read
+at open for the head only). Each commit deletes at least
+`record_delete_budget + 1` heights (64 + 1 by default) and at least a
+sixteenth of the backlog, so the backlog shrinks even while `R` rises a
+height per block and a migrated file drains geometrically. The store
+contract gained explicit removals in `CommitBatch` (records of every table,
+and objects for stores without garbage collection), applied before the
+batch's insertions; a record removed and inserted in one batch is replaced.
+Archive nodes never raise the floor.
+
+### Duplicate transactions without every inclusion
+
+A transaction can never be included twice: it carries a nonce, and the
+nonce rule (`tx.nonce == committed nonce`) consumes it. That alone is
+complete replay protection and needs no history. The inclusion index adds
+idempotency of the request identity `(actor, request_id)`: a client that
+re-signs the same request with a new nonce is answered with the first
+inclusion. Keeping that forever is what made inclusions unbounded, and it
+was a block validity rule (`execute_publish` refused any included identity),
+so it cannot depend on what one node kept.
+
+Decision: the rule becomes **a block may not include an identity that one of
+the previous `REQUEST_IDENTITY_WINDOW` = 256 blocks included**
+(`signed/protocol.rs`), on every node, archive included. It only relaxes
+the old rule, so every existing chain stays valid; a node of an older
+binary would refuse a block that repeats an identity older than 256 blocks.
+Inclusions are kept for those 256 heights (`k` in the floor above), and a
+new inclusion of an older identity replaces its row in the same batch
+(deleting the old height later leaves a row whose stored height differs).
+Admission answers an identity included within the window as before
+(`included` for the same transaction, `RequestConflict` for another); an
+older one is admitted again; the same signed transaction is refused with
+`NonceTooLow` once its inclusion expired.
+
+### Restart
+
+`rpc::initial_state` rebuilt the hash index from every block from genesis
+(25 s at 2,913 blocks, about 8.6 ms per block). It now reads the kept
+blocks only, and evicts heights as the floor passes them, so restart time
+and the index are bounded by the window. Opening reads the head's records,
+manifest 0 and the head block, as before. A node that is not producing
+(paused) keeps its floor until its next commit.
+
+### Followers, light clients and bodies (`--body-retention`)
+
+Followers replicate from genesis (`/headers`, then
+`/replication/blocks/<h>`), and light clients append headers from
+genesis. With bodies gone, neither could start. The choice, per the brief:
+**bodies are kept by default** (`--body-retention archive`, status
+`bodyRetention: all`), and `--body-retention window` deletes them with the
+records. No snapshot sync is built.
+
+- With bodies kept, `history.redb` gets a height index row per block (body
+  reference, entry number, certificate). Below `R`, `/headers`,
+  `/replication/blocks/<h>` and the equivocation checks read the
+  certificate and body through it (`Host::chain_certificate`,
+  `Host::replication_block`), so followers and light clients start from
+  genesis exactly as before; everything a user reads (feeds, blocks,
+  receipts, lookups) still expires at `R`. `node.redb` is bounded;
+  `history.redb` grows by the bodies (about 125 KiB per block at 128
+  patches) plus 300 B of index.
+- With `--body-retention window`, after each commit the host deletes, in
+  its own `history.redb` commit (entry tag 4), the bodies, index rows,
+  observed headers and history entries of heights below `R - 1` (the
+  certificate just below `R` stays for a reader at the floor), with the
+  same budget rule. Both files are bounded. A follower or light client that
+  starts from genesis, or falls more than the window behind, is refused with
+  `HistoryPruned` until snapshot sync exists.
+- Light clients keep their own header catalog (`headers.redb`) and do not
+  prune it (about 600 B per block); they verify proofs only inside the
+  state window anyway.
+
+### Migration of existing files
+
+A file written before this work has no inclusion lists and no history
+height index. On start, a producer or full node whose `history.redb` lacks
+the marker `signed-history/height-index` runs
+`signed::migrate::migrate_records` before opening (also
+`arkiv-proposer state migrate-records --run-dir DIR`, node stopped): one
+scan of `inclusions` writes the lists, one scan of `blocks` and of the
+history entries writes the index rows; no head moves, nothing existing
+changes, and it is idempotent. The first commit then raises `R` to the
+window and the backlog drains in the following commits; `state compact`
+returns the freed pages to the filesystem. Measured on a copy of the
+2026-11-20 pruned patch soak (2,913 blocks): migration 5.6 s; the backlog
+of 2,657 heights was gone within about 20 blocks; `node.redb` compacted
+from 880 MiB to 7.6 MiB. The Sourcify file (12,604 blocks) was not touched:
+another experiment uses it.
+
+### Measured
+
+[2026-11-21 record expiry soak](../benchmarks/2026-11-21-record-expiry-soak.md),
+the same 12-minute patch load as the 2026-11-20 soak:
+
+| | Before (2026-11-20 pruned) | Window, bodies kept | Window, `--body-retention window` |
+| --- | ---: | ---: | ---: |
+| `node.redb` at head ≈ 2,900 | 788 MiB, +0.25 MiB per block | 131 MiB, flat after head ≈ 300 | 132 MiB, flat |
+| `history.redb` | 362 MiB, +125 KiB per block | 363 MiB, +125 KiB per block | 36.5 MiB, flat |
+| `blocks` table | 2,914 rows, 724 MiB | 258 rows, 54 MiB | 258 rows, 54 MiB |
+| Ready after restart | 24.4 s | 2.37 s | 2.32 s |
+| State commit, mean | 23.7 ms | about 26 ms | about 25 ms |
+
+### Tests
+
+- `arkiv-db-storage` contract (memory, redb file, redb crash disk, faulty):
+  removals of every table and of objects, replacement in one batch,
+  refused batches remove nothing, reopen.
+- `arkiv-db-redb` `it/records.rs`: the window boundary formula, every
+  expired height answers `HistoryPruned` and is deleted below the cursor,
+  inclusions answer within the identity window only, a repeated identity
+  conflicts inside the window and replaces the row after it (and the later
+  deletion of the old height keeps it), archive keeps everything, a
+  300-height backlog drains, and a record-expiring GC commit cut at every
+  mutating disk call (durable, unsynced and torn images) reopens at the old
+  or the new head with matching floors, records and GC counts.
+- `arkiv-node` `tests/signed_record_expiry.rs`: feeds, blocks, certificates,
+  JSON-RPC and REST below the floor; `NonceTooLow` for the expired
+  transaction, the identity reusable after the window and `RequestConflict`
+  inside it; window and archive followers replaying the chain from genesis
+  through kept bodies; restart rebuilding the index from the window; body
+  expiry and reopen of a history whose head is a prune entry; the migration
+  of a stripped old file, its idempotence and the drained backlog.
+
+### Not done
+
+- **Snapshot sync.** A node with `--body-retention window` cannot serve a
+  follower or light client that starts from genesis or falls more than the
+  window behind. Needed: start a follower from a recent state (stream the
+  head's objects with its certificate, verify the root), and start a light
+  client from a recent certificate instead of genesis.
+- Light clients' own `headers.redb` keeps every header (about 600 B per
+  block).
+- Followers run older than this binary refuse a block that repeats an
+  identity older than 256 blocks; the identity window is a protocol change.
+- Not run on the Sourcify state (its run directory is in use by another
+  experiment): migration time on 12,604 blocks of 92 KB records is not
+  measured, nor the drain on a state larger than RAM.
+- `state compact` compacts `node.redb` only; `history.redb` reuses its freed
+  pages but does not shrink.
+- A paused node does not raise its floor until it commits, so its first
+  restart after migration still reads every block.
 
 ## The problem, measured
 
@@ -852,7 +1042,8 @@ block, mostly feed JSON) should move to `history.redb` or shrink. Then
    growth seen. **Done** (`018eec7`); the Sourcify rerun is not.
 1. Bound restart: rebuild the transaction and block hash index from the
    window's bodies only, once bodies are pruned; until then, keep the
-   current full rebuild.
+   current full rebuild. **Done** (2026-11-21): the index holds the kept
+   blocks whether or not bodies are kept.
 2. Add the GC extension to the store contract, with counts in count-only
    mode, the verifier and metrics (soak step 2). **Done**; count-only is
    `ARKIV_STATE_GC_COUNT_ONLY=1`.
@@ -861,7 +1052,11 @@ block, mostly feed JSON) should move to `history.redb` or shrink. Then
 4. Write copy-migrate (soak step 6). Then switch the producer and full
    default to 256. **Done**, small files only.
 5. Snapshot sync, then body retention with the same window, so that
-   blocks, receipts and the hash index disappear with the state.
+   blocks, receipts and the hash index disappear with the state. **Partly
+   done** (2026-11-21): blocks, receipts, inclusions and the hash index
+   expire with the state; bodies expire with `--body-retention window`.
+   Snapshot sync is not built, so a node that expires bodies cannot serve
+   a follower or light client starting from genesis.
 6. Later: rewind and the genesis minimum.
 
 ## 6. Open questions and risks

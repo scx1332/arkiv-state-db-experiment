@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.4 — 2026-11-22
+
+Alpha pre-release. Block timestamps follow the wall clock, and the node
+ships as an attested, scanned container image. **Breaking:** older nodes and
+light clients require the timestamp to equal the schedule
+(`start + height × period`) and refuse blocks from a 0.1.0-alpha.4 producer
+once its chain has stopped for longer than a block period; upgrade followers
+first. Stores and chains from 0.1.0-alpha.3 open unchanged.
+
 ### Block timestamps follow the wall clock
 
 - The producer stamps each block with the wall clock, at least one block

@@ -11,6 +11,9 @@
 - The `Image` workflow builds it beside CI, starts a producer in it as a
   smoke test and publishes `ghcr.io/scx1332/arkiv-node`: `main` and
   `sha-<short>` from main, `X.Y.Z[-pre]` and `latest` from release tags.
+- Each published image carries a build provenance attestation (Sigstore,
+  stored on GitHub and pushed to the registry): `gh attestation verify
+  oci://ghcr.io/scx1332/arkiv-node:TAG --repo scx1332/arkiv-state-db-experiment`.
 
 ## 0.1.0-alpha.3 — 2026-11-22
 

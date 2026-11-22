@@ -5,7 +5,8 @@ name: Image
 # commit. Pull requests build and smoke-test without publishing.
 #
 # Tags: vX.Y.Z[-pre] releases publish X.Y.Z[-pre]; main publishes `main` and
-# `sha-<short>`. `latest` follows the newest release tag.
+# `sha-<short>`. `latest` follows the newest release tag. Every published
+# image gets a build provenance attestation (GitHub and the registry).
 
 on:
   push:
@@ -21,6 +22,10 @@ concurrency:
 permissions:
   contents: read
   packages: write
+  # Build provenance attestation: a Sigstore-signed statement, made with this
+  # workflow's OIDC identity, of which commit and workflow run built the image.
+  id-token: write
+  attestations: write
 
 jobs:
   image:
@@ -80,6 +85,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish
+        id: push
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
         with:
@@ -88,3 +94,12 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
+
+      # Verify: gh attestation verify oci://ghcr.io/<owner>/arkiv-node:TAG --repo <owner>/arkiv-state-db-experiment
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/arkiv-node
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

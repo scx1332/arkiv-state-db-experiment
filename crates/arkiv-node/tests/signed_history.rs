@@ -38,7 +38,7 @@ fn next(genesis: &SignedGenesis, signer: &Signer, parent: &SignedHeader, tag: u8
     let mut header = parent.header;
     header.height += 1;
     header.parent_hash = parent.header.hash();
-    header.timestamp_ms = genesis.timestamp(header.height).unwrap();
+    header.timestamp_ms = genesis.earliest_timestamp(header.height).unwrap();
     header.inputs_digest = B256::repeat_byte(tag);
     SignedHeader::sign(genesis, header, signer).unwrap()
 }
@@ -463,8 +463,9 @@ fn light_rejects_invalid_signature_parent_time_and_gap_without_freezing() {
         "InvalidHeader"
     );
     assert_eq!(invalid_parent_light.head, root.header);
+    // Before the schedule floor (start + height × period).
     let mut bad_time = first.clone();
-    bad_time.header.timestamp_ms += 1;
+    bad_time.header.timestamp_ms -= 1;
     bad_time.signature = signer.sign_digest(bad_time.intent_digest()).unwrap();
     assert_eq!(
         message(light.append(std::slice::from_ref(&bad_time), &bad_time)),
@@ -577,7 +578,7 @@ fn future_sampled_certificates_are_durable_evidence_but_not_accepted_headers() {
     let root = certificate(&genesis, &signer);
     let mut future = root.header;
     future.height = 10;
-    future.timestamp_ms = genesis.timestamp(10).unwrap();
+    future.timestamp_ms = genesis.earliest_timestamp(10).unwrap();
     future.inputs_digest = B256::repeat_byte(1);
     let sampled = SignedHeader::sign(&genesis, future, &signer).unwrap();
     let mut light = Light::create(store.clone(), genesis.clone(), root.clone()).unwrap();

@@ -1355,3 +1355,67 @@ fn expiry_sweep_timing() {
     }
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn block_timestamps_follow_the_wall_clock_and_followers_check_their_spacing() {
+    // Genesis start 1,000 ms, block period 100 ms.
+    let g = genesis();
+    let mut producer = memory(true);
+    // A clock before the schedule: the floor, start + height × period.
+    producer.set_clock(|| 0);
+    producer.produce().unwrap();
+    assert_eq!(producer.head.timestamp_ms, g.earliest_timestamp(1).unwrap());
+    assert_eq!(producer.head.timestamp_ms, 1_100);
+    // After downtime: the block takes the wall clock, not the schedule.
+    producer.set_clock(|| 5_000_000);
+    producer.produce().unwrap();
+    assert_eq!(producer.head.timestamp_ms, 5_000_000);
+    // A clock behind the parent: one period after the parent.
+    producer.set_clock(|| 4_000_000);
+    producer.produce().unwrap();
+    assert_eq!(producer.head.timestamp_ms, 5_000_100);
+
+    let mut full = memory(false);
+    let mut light = Light::create(
+        Arc::new(MemoryVersionedStore::new()),
+        genesis(),
+        producer.certificate(0).unwrap(),
+    )
+    .unwrap();
+    for height in 1..=2 {
+        let block = producer.block(height).unwrap();
+        full.import(block.clone()).unwrap();
+        light
+            .append(std::slice::from_ref(&block.header), &block.header)
+            .unwrap();
+    }
+    // Block 3 restamped closer than one period to its parent, but well
+    // after the floor and authentically signed: refused by both. (A
+    // separate follower: having seen this authentic header, `full` would
+    // treat the real block 3 as equivocation.)
+    let original = producer.block(3).unwrap();
+    let mut early = original.clone();
+    early.header.header.timestamp_ms = 5_000_099;
+    recertify(&mut early);
+    let mut other = memory(false);
+    for height in 1..=2 {
+        other.import(producer.block(height).unwrap()).unwrap();
+    }
+    assert_eq!(message(other.import(early.clone())), "InvalidHeader");
+    assert_eq!(other.head.height, 2);
+    assert_eq!(
+        message(light.append(std::slice::from_ref(&early.header), &early.header)),
+        "InvalidHeader"
+    );
+    // Before the floor a header is refused even without its parent (signing
+    // authenticates the result, so it cannot even be signed).
+    let mut floor = original.header.header;
+    floor.timestamp_ms = g.earliest_timestamp(3).unwrap() - 1;
+    assert_eq!(
+        message(SignedHeader::sign(&g, floor, &signer(1))),
+        "InvalidHeader"
+    );
+    // The block as produced imports.
+    full.import(original.clone()).unwrap();
+    assert_eq!(full.head, producer.head);
+}

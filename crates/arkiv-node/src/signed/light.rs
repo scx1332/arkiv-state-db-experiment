@@ -304,6 +304,7 @@ impl Light {
             }
             crate::validate::check_header(&spec, &current, h)
                 .map_err(|_| ErrorCode::InvalidHeader)?;
+            self.genesis.check_successor_timestamp(&current, h)?;
             current = *h;
             accepted.push(certificate.clone());
         }
@@ -492,7 +493,9 @@ fn catalog_head(genesis: B256, sequence: u64, header: &crate::Header, observed: 
 fn authenticate(genesis: &SignedGenesis, certificate: &SignedHeader) -> Result<()> {
     certificate.authenticate(genesis)?;
     let h = certificate.header;
-    if h.chain_id != genesis.genesis.chain_id || h.timestamp_ms != genesis.timestamp(h.height)? {
+    if h.chain_id != genesis.genesis.chain_id
+        || h.timestamp_ms < genesis.earliest_timestamp(h.height)?
+    {
         return Err(ErrorCode::InvalidHeader.into());
     }
     Ok(())

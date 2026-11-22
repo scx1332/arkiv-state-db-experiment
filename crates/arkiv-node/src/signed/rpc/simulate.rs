@@ -104,7 +104,7 @@ pub(super) fn simulation(host: &Host, call: &Value, mode: Simulation) -> Result<
         spec: &spec,
         parent: &host.head,
         height,
-        timestamp_ms: host.genesis.timestamp(height)?,
+        timestamp_ms: host.genesis.next_timestamp(&host.head, host.now_ms())?,
     };
     let accounts = Some(&host.genesis.accounts);
     let outcome = match mode {

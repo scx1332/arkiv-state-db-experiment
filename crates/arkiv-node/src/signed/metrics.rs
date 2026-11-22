@@ -234,6 +234,37 @@ const OPERATION_DURATION_HELP: &str =
 const OPERATION_ERRORS: &str = "db_operation_errors_total";
 const OPERATION_ERRORS_HELP: &str = "Failed operation calls including indeterminate commits.";
 
+/// One node sample, or `None` when the node lock is busy (never waits).
+fn sample_node(rt: &Shared) -> Option<NodeSample> {
+    let node = rt.node.try_lock().ok()?;
+    let head = node.head();
+    let mut sample = NodeSample {
+        head: Some((head.height, head.timestamp_ms as f64 / 1000.)),
+        timestamp: Some(now()),
+        ..NodeSample::default()
+    };
+    match &*node {
+        Node::Full(h) => {
+            sample.pool = Some((h.pool.len(), h.pool.bytes()));
+            sample.paused = Some(h.paused);
+            let status = h.engine.retention_status();
+            sample.retention = Some(RetentionSample {
+                floor: status.floor,
+                durable_floor: status.durable_floor,
+                horizon: h.engine.gc_horizon(),
+                lowest_pin: status.lowest_pinned,
+                pinned_handles: status.pinned_handles,
+                record_floor: h.engine.record_floor().floor,
+                record_backlog: h.engine.record_floor().backlog(),
+            });
+        }
+        Node::Light { light, .. } => {
+            sample.observed = Some(light.observed);
+        }
+    }
+    Some(sample)
+}
+
 impl Metrics {
     pub async fn start(
         rt: Shared,
@@ -258,34 +289,14 @@ impl Metrics {
         tokio::spawn(async move {
             loop {
                 // Cheap metadata only; never wait behind production or proofs.
-                if let Ok(node) = rt.node.try_lock() {
-                    let head = node.head();
-                    let mut sample = NodeSample {
-                        head: Some((head.height, head.timestamp_ms as f64 / 1000.)),
-                        timestamp: Some(now()),
-                        ..NodeSample::default()
-                    };
-                    match &*node {
-                        Node::Full(h) => {
-                            sample.pool = Some((h.pool.len(), h.pool.bytes()));
-                            sample.paused = Some(h.paused);
-                            let status = h.engine.retention_status();
-                            sample.retention = Some(RetentionSample {
-                                floor: status.floor,
-                                durable_floor: status.durable_floor,
-                                horizon: h.engine.gc_horizon(),
-                                lowest_pin: status.lowest_pinned,
-                                pinned_handles: status.pinned_handles,
-                                record_floor: h.engine.record_floor().floor,
-                                record_backlog: h.engine.record_floor().backlog(),
-                            });
-                        }
-                        Node::Light { light, .. } => {
-                            sample.observed = Some(light.observed);
-                        }
-                    }
-                    *sampled.node.write().unwrap_or_else(|e| e.into_inner()) = sample;
-                }
+                // A busy producer holds the lock most of the time, so retry
+                // briefly instead of skipping the whole second: one try a
+                // second left the sample frozen at its first value.
+                let Some(sample) = sample_node(&rt) else {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                };
+                *sampled.node.write().unwrap_or_else(|e| e.into_inner()) = sample;
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         });

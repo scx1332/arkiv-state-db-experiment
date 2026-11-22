@@ -994,7 +994,7 @@ fn the_producer_defers_what_would_cross_the_storage_cap_and_followers_check_it()
         chain_id: 9200,
         height: 4,
         parent_hash: f.head.hash(),
-        timestamp_ms: g.timestamp(4).unwrap(),
+        timestamp_ms: g.next_timestamp(&f.head, 0).unwrap(),
         inputs_digest: inputs.digest(),
         outcomes_digest: outcomes.digest(),
         state_root: f.head.state_root,

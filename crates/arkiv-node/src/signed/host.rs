@@ -192,6 +192,16 @@ pub struct Host {
     /// Bodies expire from `history.redb` with the node's records (see
     /// [`Self::prune_bodies`]); otherwise they are kept for followers.
     prune_bodies: bool,
+    /// Wall clock in Unix milliseconds for the timestamps this host stamps
+    /// ([`SignedGenesis::next_timestamp`]); replaceable in tests.
+    clock: fn() -> u64,
+}
+
+/// The system clock in Unix milliseconds (0 before 1970).
+pub fn system_clock_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Heights of bodies [`Host`] deletes at least per block, on top of a
@@ -381,7 +391,18 @@ impl Host {
             certificates: Default::default(),
             blocks: Default::default(),
             prune_bodies: false,
+            clock: system_clock_ms,
         })
+    }
+
+    /// Replaces the wall clock the producer stamps blocks with (Unix ms).
+    pub fn set_clock(&mut self, clock: fn() -> u64) {
+        self.clock = clock;
+    }
+
+    /// The host's wall clock in Unix milliseconds.
+    pub fn now_ms(&self) -> u64 {
+        (self.clock)()
     }
 
     /// Let block bodies (and the history entries, height index rows and
@@ -1141,7 +1162,14 @@ impl Host {
             captured = Some(metadata::capture(branch, executed, outcomes, expired)?);
             Ok(())
         };
-        let timestamp = self.genesis.timestamp(height)?;
+        let timestamp = match expected {
+            Some(block) => {
+                self.genesis
+                    .check_successor_timestamp(&self.head, &block.header.header)?;
+                block.header.header.timestamp_ms
+            }
+            None => self.genesis.next_timestamp(&self.head, (self.clock)())?,
+        };
         self.block_executions += 1;
         // A block received is executed as given; a block produced leaves
         // out the candidates it cannot include.

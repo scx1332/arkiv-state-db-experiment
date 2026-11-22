@@ -75,9 +75,24 @@ period. Block execution and storage time do not extend the next interval;
 transient lock contention retries the same slot, and slow blocks catch up missed
 slots after recovery. Pausing discards elapsed scheduler slots. Restarting starts
 a fresh schedule: it does not automatically produce blocks for downtime.
-Timestamps remain deterministic (`genesis start + height × block period`), so an
-operator aligning an existing chain after downtime must explicitly pause, step
-the missing blocks, and resume. This retains the signed genesis and history.
+
+Block timestamps follow the wall clock. The producer stamps a block with
+`max(now, parent timestamp + block period, genesis start + height × block
+period)`, so after downtime the chain clock jumps to the present instead of
+staying behind for good. Every node and light client checks:
+
+- a header alone: its timestamp is not before `genesis start + height × block
+  period` (the schedule floor);
+- a block or header after its parent: its timestamp is at least the parent's
+  plus one block period.
+
+A chain that never stopped is valid under both rules, so older chains whose
+timestamps followed the schedule exactly still verify. Execution never reads
+the timestamp; rent and expiry count blocks, so time a chain spends stopped
+does not age its entities. No upper bound is checked against followers'
+clocks: the single proposer is trusted for time as for everything else.
+(Until 2026-11-22 the timestamp was exactly the schedule floor, and a chain
+that stopped stayed behind the wall clock by its downtime.)
 
 Without a genesis prefill, the first block contains exactly one proposer-signed
 nonce-zero transaction creating the `entities` namespace. External admission returns

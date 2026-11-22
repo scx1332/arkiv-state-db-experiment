@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Block timestamps follow the wall clock
+
+- The producer stamps each block with the wall clock, at least one block
+  period after its parent and never before `genesis start + height × block
+  period`. Before, the timestamp was exactly that floor, so a chain that had
+  stopped stayed behind real time by all its downtime (a node restarted
+  after 9 hours of rebuilds reported blocks 9 hours old).
+- Nodes and light clients accept a header whose timestamp is at or after the
+  floor and, where the parent is known, at least one period after it. Chains
+  stamped the old way still verify. Gas estimates simulate the next block
+  with the same rule. Details: `docs/signed-proposer-v1.md`.
+- `SignedGenesis::timestamp` is now `earliest_timestamp`; `next_timestamp`
+  and `check_successor_timestamp` are new. `Host::set_clock` replaces the
+  producer's clock in tests.
+
+### Metrics
+
+- The node sample (head height and timestamp, pool, retention) no longer
+  freezes on a busy producer: the sampler retried the node lock once a
+  second and, with 250 ms blocks, almost never got it. It now retries every
+  20 ms.
+
 ### Security checks
 
 - `security.yml` (on push to main, on PRs, weekly), ported from

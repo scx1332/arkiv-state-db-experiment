@@ -1506,6 +1506,8 @@ fn offset_pages_at_a_pinned_block_stay_stable_while_the_head_changes() {
 #[test]
 fn timing_uses_numeric_height_and_observed_whole_seconds() {
     let mut host = fixture_with_period(1_500);
+    // A clock before the schedule: blocks carry the floor, start + height × period.
+    host.set_clock(|| 0);
     let timing = |host: &Host| {
         dispatch(host, "arkiv_getBlockTiming", &json!([]))
             .unwrap()

@@ -234,7 +234,7 @@ impl SignedGenesis {
                 .map_err(|_| ErrorCode::InvalidPrefillGenesis)?;
         }
         ChainSpec::new(self.genesis.clone()).map_err(|_| ErrorCode::InvalidSignedGenesis)?;
-        self.timestamp(1)?;
+        self.earliest_timestamp(1)?;
         Ok(())
     }
 
@@ -260,11 +260,45 @@ impl SignedGenesis {
         self.header().hash()
     }
 
-    pub fn timestamp(&self, height: u64) -> Result<u64> {
+    /// The earliest timestamp a block at `height` may carry: the genesis
+    /// start plus `height` block periods. A chain that never stopped stamps
+    /// its blocks close to this; after downtime they are later.
+    pub fn earliest_timestamp(&self, height: u64) -> Result<u64> {
         height
             .checked_mul(self.block_period_ms)
             .and_then(|n| self.genesis.timestamp_ms.checked_add(n))
             .ok_or(Error::from(ErrorCode::TimestampOverflow))
+    }
+
+    /// The timestamp the producer stamps on the block after `parent`: the
+    /// wall clock `now_ms`, but at least one block period after the parent
+    /// (so time never runs backwards or faster than blocks) and never
+    /// earlier than [`Self::earliest_timestamp`]. After downtime the chain
+    /// clock therefore jumps to the present instead of staying behind.
+    pub fn next_timestamp(&self, parent: &Header, now_ms: u64) -> Result<u64> {
+        let height = parent
+            .height
+            .checked_add(1)
+            .ok_or(ErrorCode::TimestampOverflow)?;
+        let spaced = parent
+            .timestamp_ms
+            .checked_add(self.block_period_ms)
+            .ok_or(ErrorCode::TimestampOverflow)?;
+        Ok(now_ms.max(spaced).max(self.earliest_timestamp(height)?))
+    }
+
+    /// Checks the timestamp of `header`, the block after `parent`: at least
+    /// one block period after the parent's (which also keeps it at or after
+    /// [`Self::earliest_timestamp`], by induction from the genesis).
+    pub fn check_successor_timestamp(&self, parent: &Header, header: &Header) -> Result<()> {
+        let spaced = parent
+            .timestamp_ms
+            .checked_add(self.block_period_ms)
+            .ok_or(ErrorCode::TimestampOverflow)?;
+        if header.timestamp_ms < spaced {
+            return Err(ErrorCode::InvalidHeader.into());
+        }
+        Ok(())
     }
 }
 
@@ -598,7 +632,9 @@ impl SignedHeader {
         if self.genesis_hash != genesis.hash() || self.header.chain_id != genesis.genesis.chain_id {
             return Err(ErrorCode::IdentityMismatch.into());
         }
-        if self.header.timestamp_ms != genesis.timestamp(self.header.height)?
+        // A header alone shows only the floor; spacing from the parent is
+        // checked where the parent is known (`check_successor_timestamp`).
+        if self.header.timestamp_ms < genesis.earliest_timestamp(self.header.height)?
             || (self.header.height == 0 && self.header != genesis.header())
         {
             return Err(ErrorCode::InvalidHeader.into());

@@ -529,7 +529,7 @@ fn bootstrap_and_unsigned_admin_rules_fail_closed() {
     let mut bad = g.clone();
     bad.genesis.timestamp_ms = u64::MAX;
     assert!(bad.validate().is_err());
-    assert!(g.timestamp(u64::MAX).is_err());
+    assert!(g.earliest_timestamp(u64::MAX).is_err());
 }
 
 #[test]

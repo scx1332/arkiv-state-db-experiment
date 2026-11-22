@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.3 — 2026-11-22
+
+Alpha pre-release. Disk use is bounded by a 256-block window: old state,
+indices and per-height records are deleted, not only refused. **Breaking:**
+
+- A store that collects garbage is store format 2; older binaries refuse it.
+- A request identity is unique for 256 blocks, not forever (below). Nodes
+  on older binaries would refuse a block that reuses an older identity.
+- `--metrics-interval-secs` is replaced by `--metrics-table-stats-secs`.
+
+### State is pruned to a 256-block window
+
+- `--state-retention` defaults to 256 for producer and full roles on new or
+  adopted state. A file that has always been an archive stays one unless it
+  is migrated (`state migrate --run-dir DIR --state-retention N`).
+- Trie objects (entity data and indices) are reference-counted from the
+  head and deleted inside the block commit once no retained snapshot or
+  open reader can reach them. Per-block budgets are floors, so the backlog
+  cannot keep growing.
+- Nothing that feeds roots, receipts or charges reads garbage-collection
+  rows.
+- Status shows `stateGc`; `state_gc_*` metrics need no walk. Offline:
+  `state gc-enable | gc-status | gc-verify | table-stats`.
+- On the 16.8-million-entity Sourcify state, `node.redb` grew 3 GiB over
+  12,000 blocks, against 544 GiB in 76 minutes before
+  (`docs/benchmarks/2026-11-20-sourcify-pruned-soak.md`).
+
+### Metrics no longer walk the database
+
+- The exporter's periodic table walk held one redb read transaction for
+  tens of minutes on a large state, so no freed page could be reused; it
+  pinned 536 GiB of a 650 GiB file. File sizes now come from `stat`; the
+  walk is opt-in with `--metrics-table-stats-secs N`.
+
 ### Per-height records expire with the state window
 
 - **Protocol: a request identity is unique for 256 blocks**

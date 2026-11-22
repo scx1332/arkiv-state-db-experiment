@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.5 — 2026-11-22
+
+Alpha pre-release.
+
+### Clean stop on SIGTERM and SIGINT
+
+- The node stops on SIGTERM or SIGINT once no block is in flight: it waits
+  for the node lock, under which every block commits durably, and exits 0
+  (logged as `{"event":"shutdown",...}`). Before, it had no signal handlers:
+  as PID 1 in a container it ignored SIGTERM, so `docker stop` and Kubernetes
+  waited out the whole grace period and then killed it.
+- New dependency: `signal-hook-registry` (tokio's `signal` feature).
+
 ## 0.1.0-alpha.4 — 2026-11-22
 
 Alpha pre-release. Block timestamps follow the wall clock, and the node

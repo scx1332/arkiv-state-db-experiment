@@ -25,7 +25,7 @@ sha2 = "0.10"
 base64 = "0.22"
 rustix = { version = "1", features = ["fs"] }
 axum = { version = "0.8", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 getrandom = "0.3"
 

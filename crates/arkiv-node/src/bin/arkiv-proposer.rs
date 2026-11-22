@@ -1418,9 +1418,48 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
         .map_err(unavailable(Path::new(&listen)))?;
+    exit_on_signal(rt.clone());
     Ok(axum::serve(listener, runtime::public_router(rt))
         .await
         .map_err(unavailable(Path::new(&listen)))?)
+}
+
+/// Exits on SIGTERM or SIGINT (`docker stop`, Kubernetes, Ctrl-C) once no
+/// block is in flight: production and import commit under the node lock, and
+/// every commit is durable, so holding the lock is a clean stopping point.
+/// Without a handler a node running as PID 1 in a container ignores SIGTERM
+/// and is killed only when the stop grace period ends.
+fn exit_on_signal(rt: runtime::Shared) {
+    #[cfg(unix)]
+    tokio::spawn(async move {
+        use tokio::signal::unix::{SignalKind, signal};
+        let (Ok(mut term), Ok(mut int)) = (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) else {
+            eprintln!("signal handlers unavailable; stop the node with SIGKILL");
+            return;
+        };
+        let name = tokio::select! {
+            _ = term.recv() => "SIGTERM",
+            _ = int.recv() => "SIGINT",
+        };
+        eprintln!(
+            "{}",
+            serde_json::json!({"event": "shutdown", "signal": name})
+        );
+        let _ = tokio::task::spawn_blocking(move || {
+            let _node = rt.write_node();
+            eprintln!(
+                "{}",
+                serde_json::json!({"event": "shutdown", "result": "stopped"})
+            );
+            std::process::exit(0);
+        })
+        .await;
+    });
+    #[cfg(not(unix))]
+    let _ = rt;
 }
 
 /// The genesis retained in the run directory by an earlier start, if any.

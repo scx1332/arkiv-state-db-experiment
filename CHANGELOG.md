@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Container image
+
+- `Dockerfile` builds the node (`arkiv-proposer`) into a `debian:bookworm-slim`
+  image that runs as uid 10001 with its state under `/data`, for Docker and
+  Kubernetes. Ports: 9500 (API and JSON-RPC), 9501 (private), 9600
+  (metrics); the binary still binds 127.0.0.1 unless told otherwise.
+- The `Image` workflow builds it beside CI, starts a producer in it as a
+  smoke test and publishes `ghcr.io/scx1332/arkiv-node`: `main` and
+  `sha-<short>` from main, `X.Y.Z[-pre]` and `latest` from release tags.
+
 ## 0.1.0-alpha.3 — 2026-11-22
 
 Alpha pre-release. Disk use is bounded by a 256-block window: old state,

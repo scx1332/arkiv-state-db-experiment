@@ -1,0 +1,90 @@
+name: Image
+
+# Builds the node image (Dockerfile) and publishes it to GitHub Container
+# Registry: ghcr.io/<owner>/arkiv-node. Runs beside CI, which tests the same
+# commit. Pull requests build and smoke-test without publishing.
+#
+# Tags: vX.Y.Z[-pre] releases publish X.Y.Z[-pre]; main publishes `main` and
+# `sha-<short>`. `latest` follows the newest release tag.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    name: build, smoke, publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/arkiv-node
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=ref,event=branch
+            type=sha,format=short
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: arkiv-node:ci
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke
+        run: |
+          docker run --rm arkiv-node:ci --version
+          # A producer from a fresh allocations genesis must come up and make blocks.
+          docker run --rm --entrypoint sh arkiv-node:ci -c '
+            set -e
+            addr=$(arkiv-proposer keygen --out /data/k)
+            echo "{\"$addr\": \"1000000000000000000000\"}" > /data/alloc.json
+            ARKIV_PROPOSER_TOKEN=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d " \n") \
+              arkiv-proposer producer --run-dir /data/run --key-file /data/k --allocations-file /data/alloc.json \
+              --start running --block-period-ms 250 > /data/log 2>&1 &
+            for i in $(seq 60); do
+              h=$(curl -fsS http://127.0.0.1:9500/signed/v1/status 2>/dev/null | sed -n "s/.*\"head\":{[^}]*\"height\":\"\([0-9]*\)\".*/\1/p")
+              if [ -n "$h" ] && [ "$h" -ge 5 ]; then echo "producer at height $h"; exit 0; fi
+              sleep 1
+            done
+            cat /data/log; exit 1'
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha

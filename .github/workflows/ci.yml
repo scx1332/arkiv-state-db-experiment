@@ -10,6 +10,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only token: nothing here writes to the repository.
+permissions:
+  contents: read
+
 env:
   # The workspace MSRV (Cargo.toml rust-version) and the local toolchain.
   RUST_TOOLCHAIN: 1.90.0
@@ -26,7 +30,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
         run: |
@@ -34,16 +40,22 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
           rustc --version
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Fetch dependencies
         run: cargo fetch --locked
 
       - name: cargo fmt
-        run: cargo fmt $PACKAGES -- --check
+        run: |
+          # $PACKAGES is a list of -p flags: split on purpose.
+          # shellcheck disable=SC2086
+          cargo fmt $PACKAGES -- --check
 
       - name: cargo clippy
-        run: cargo clippy --offline --locked --all-targets $PACKAGES -- -D warnings
+        run: |
+          # $PACKAGES is a list of -p flags: split on purpose.
+          # shellcheck disable=SC2086
+          cargo clippy --offline --locked --all-targets $PACKAGES -- -D warnings
 
       - name: cargo test
         run: cargo test --offline --locked --workspace

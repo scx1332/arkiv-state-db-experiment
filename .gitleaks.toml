@@ -1,0 +1,20 @@
+# gitleaks configuration for .github/workflows/security.yml: the default rules
+# plus the secret files of a node deployment, which hold bare hex that content
+# rules cannot tell from a hash: proposer and account keys (`arkiv-proposer
+# keygen`), token files and .env files (ARKIV_PROPOSER_TOKEN). None of these
+# may ever be committed. Known false positives are listed, each with its
+# reason, in .gitleaksignore.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "arkiv-secret-file"
+description = "Node or account key, token, PEM or .env file"
+path = '''(^|/)(\.env(\.[^/]*)?|node\.env|[^/]*\.(key|token|pem))$'''
+
+# The status JSON names its authentication scheme, which the generic-api-key
+# rule takes for a credential. Only this exact value is allowed.
+[[allowlists]]
+description = "authentication scheme name, not a secret"
+regexTarget = "secret"
+regexes = ['''^signed-proposer-v1$''']

@@ -1,0 +1,17 @@
+# gitleaks false positives (fingerprint = commit:file:rule:line), each with its reason.
+# New findings must be fixed, not added here, unless they are false positives too.
+
+# entity keys of a test fixture (keccak hashes, not secrets)
+e62a355165b60e90c07d510eb15fcffbd53dabe5:crates/arkiv-db/tests/fixtures/arkiv/sdk-host.json:generic-api-key:10
+# entity keys of a test fixture (keccak hashes, not secrets)
+e62a355165b60e90c07d510eb15fcffbd53dabe5:crates/arkiv-db/tests/fixtures/arkiv/sdk-host.json:generic-api-key:17
+# a made-up bearer token of an HTTP test
+e62a355165b60e90c07d510eb15fcffbd53dabe5:crates/arkiv-node/tests/simulator_http.rs:generic-api-key:130
+# entity keys of the genesis smoke fixture (keccak hashes, not secrets)
+e62a355165b60e90c07d510eb15fcffbd53dabe5:scripts/genesis-bundle-smoke.py:generic-api-key:113
+# entity keys of the genesis smoke fixture (keccak hashes, not secrets)
+e62a355165b60e90c07d510eb15fcffbd53dabe5:scripts/genesis-bundle-smoke.py:generic-api-key:123
+# entity keys of the genesis smoke fixture (keccak hashes, not secrets)
+e62a355165b60e90c07d510eb15fcffbd53dabe5:scripts/genesis-bundle-smoke.py:generic-api-key:133
+# entity keys of the genesis smoke fixture (keccak hashes, not secrets)
+e62a355165b60e90c07d510eb15fcffbd53dabe5:scripts/genesis-bundle-smoke.py:generic-api-key:139

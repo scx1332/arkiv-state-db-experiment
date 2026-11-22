@@ -1,0 +1,13 @@
+# cargo-audit settings for .github/workflows/security.yml. cargo audit reads
+# every entry of Cargo.lock, including optional dependencies that no feature of
+# this workspace builds; cargo deny (deny.toml) checks only what is built.
+# Ignores carry their reason and date; the shared ones match deny.toml.
+[advisories]
+ignore = [
+    # crypto-bigint 0.5 via k256 0.13 (alloy), no fixed 0.5 release; see deny.toml. 2026-11-22.
+    "RUSTSEC-2026-0387",
+    # time 0.3.45 is a lockfile entry only: an optional dependency of
+    # ruint 1.20 (serde_with, schemars) that no feature here enables
+    # (`cargo tree -i time --target all -e all` prints nothing). 2026-11-22.
+    "RUSTSEC-2026-0009",
+]

@@ -1,0 +1,65 @@
+# cargo-deny policy, checked by .github/workflows/security.yml (all four
+# checks block; ported from golemfactory/golem-p2p). Every ignore or exception
+# names the advisory or crate, says why, and when it was added.
+
+[graph]
+# Check what any feature combination of the workspace can pull in.
+all-features = true
+
+[advisories]
+# Vulnerabilities fail. So do unmaintained and unsound crates, anywhere in the
+# tree, and yanked versions in Cargo.lock: each needs an update or an entry here.
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = [
+    # crypto-bigint 0.5 comes only through k256 0.13 (elliptic-curve 0.13),
+    # which alloy-primitives 1.x requires; no 0.5 release is fixed. The
+    # advisory is about timing variability in operations meant to be
+    # constant-time. The node signs blocks with the proposer key, so this is
+    # a real if remote side channel: drop the entry when alloy moves to
+    # k256 0.14 (crypto-bigint 0.7). Added 2026-11-22.
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 via k256 0.13 (alloy), no fixed 0.5 release" },
+    # paste is unmaintained (archived, no known defect). It is a proc-macro
+    # used at compile time by alloy-primitives and alloy-sol-*. Added 2026-11-22.
+    { id = "RUSTSEC-2024-0436", reason = "paste unmaintained, compile-time macro via alloy, no defect" },
+]
+
+[licenses]
+# Permissive licenses only. Workspace crates are covered by the repository's
+# LICENSE and are not published.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+exceptions = [
+    # Mozilla's root certificate list, as data (rustls via reqwest).
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+# Duplicate versions are reported, not refused: they come from alloy's and
+# reqwest's trees.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# crates.io only: no other registry and no git dependencies.
+unknown-registry = "deny"
+unknown-git = "deny"

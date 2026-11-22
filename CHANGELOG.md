@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Security checks
+
+- `security.yml` (on push to main, on PRs, weekly), ported from
+  golemfactory/golem-p2p, runs pinned, checksum-verified tools:
+  - `cargo deny` and `cargo audit` on the Rust dependencies;
+  - `zizmor` and `actionlint` on the workflows;
+  - `gitleaks` over the whole git history;
+  - Trivy on the published image, weekly.
+- The Image workflow scans each image with Trivy before publishing. A fixable
+  HIGH or CRITICAL stops the publish, and the full report goes to code
+  scanning. See `docs/security-checks.md`.
+- Dependency updates for RustSec advisories:
+  - rustls 0.23.46, rustls-webpki 0.103.17 and webpki-roots 1.0.12;
+  - quinn-proto 0.11.19 and quinn-udp 0.5.16;
+  - url 2.5.9, ruint 1.20.0, tokio 1.54.1, rustix 1.1.6 and yoke-derive 0.8.4.
+- Remaining exceptions: crypto-bigint 0.5, via k256 through alloy, which has
+  no fixed release, and paste, which is unmaintained.
+- Every workflow action is pinned to a commit. Checkouts no longer keep the
+  token, and write permissions are given only to the job that publishes.
+
 ### Container image
 
 - `Dockerfile` builds the node (`arkiv-proposer`) into a `debian:bookworm-slim`

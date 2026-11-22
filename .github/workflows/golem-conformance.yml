@@ -15,6 +15,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only token: nothing here writes to the repository.
+permissions:
+  contents: read
+
 env:
   # Pinned revisions the kit is tested against. Bump together with
   # conformance/golem-db (README.md "CI").
@@ -31,8 +35,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           path: arkiv-state-db-experiment
 
       - name: Install clang (MDBX bindgen)
@@ -47,7 +52,7 @@ jobs:
           rustup toolchain install
           rustc --version
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: golem-db-conformance-testing -> target
           key: pinned-${{ env.HARNESS_REV }}-${{ env.GOLEM_DB_REV }}
@@ -65,8 +70,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           path: arkiv-state-db-experiment
 
       - name: Install clang (MDBX bindgen)
@@ -81,7 +87,7 @@ jobs:
           rustup toolchain install
           rustc --version
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: golem-db-conformance-testing -> target
           key: latest

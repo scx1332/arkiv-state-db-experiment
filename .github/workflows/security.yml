@@ -1,0 +1,147 @@
+name: Security checks
+
+# Deterministic checks with pinned tools (scripts/security/tools.sh checks each
+# release binary's SHA-256); no secrets, read-only token. Ported from
+# golemfactory/golem-p2p. Every check fails its job on a finding; ignores live
+# in deny.toml, .cargo/audit.toml and .gitleaksignore, each with a reason. The
+# weekly run catches new advisories for unchanged code and new CVEs in the
+# published image. See docs/security-checks.md.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "23 5 * * 1" # Mondays 05:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: never
+  NO_COLOR: "1"
+  RUST_TOOLCHAIN: 1.90.0
+
+jobs:
+  rust-deps:
+    name: Rust dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install Rust and tools
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          scripts/security/tools.sh "$RUNNER_TEMP/bin" cargo-deny cargo-audit
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: cargo deny (advisories incl. unmaintained, unsound, yanked; bans; licenses; sources)
+        run: >-
+          scripts/security/check.sh "cargo deny" --
+          cargo deny --locked --color never check --hide-inclusion-graph
+      - name: cargo audit (RustSec, every Cargo.lock entry)
+        if: ${{ !cancelled() }}
+        run: >-
+          scripts/security/check.sh "cargo audit" --
+          cargo audit --color never
+
+  workflows:
+    name: GitHub Actions workflows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install tools
+        run: |
+          scripts/security/tools.sh "$RUNNER_TEMP/bin" zizmor actionlint shellcheck
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: zizmor (workflow security)
+        env:
+          # Online audits: impostor commits, known-vulnerable actions.
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          scripts/security/check.sh "zizmor" --
+          zizmor --persona pedantic --format plain --color never .github/workflows
+      - name: actionlint (workflow syntax, expressions, shellcheck)
+        if: ${{ !cancelled() }}
+        run: >-
+          scripts/security/check.sh "actionlint" --
+          actionlint -no-color
+
+  secrets:
+    name: Secrets in git history
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks
+        run: |
+          scripts/security/tools.sh "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: gitleaks (all commits of all branches, redacted)
+        run: >-
+          scripts/security/check.sh "gitleaks" --
+          gitleaks git --config .gitleaks.toml --log-opts=--all
+          --redact --no-banner --no-color --exit-code 1 .
+
+  published-image:
+    name: Published image (ghcr.io main)
+    # New CVEs appear without new commits; the Image workflow scans each build.
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install Trivy
+        run: |
+          scripts/security/tools.sh "$RUNNER_TEMP/bin" trivy
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: trivy image (fixable HIGH, CRITICAL)
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/arkiv-node:main
+        run: >-
+          scripts/security/check.sh "trivy image $IMAGE" --
+          trivy image --quiet --scanners vuln --severity HIGH,CRITICAL
+          --ignore-unfixed --exit-code 1 "$IMAGE"
+
+  summary:
+    name: Summary
+    needs: [rust-deps, workflows, secrets, published-image]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Results table
+        env:
+          RUST_DEPS: ${{ needs.rust-deps.result }}
+          WORKFLOWS: ${{ needs.workflows.result }}
+          SECRETS: ${{ needs.secrets.result }}
+          IMAGE: ${{ needs.published-image.result }}
+        run: |
+          {
+            echo "## Security checks"
+            echo
+            echo "| Job | Checks | Result |"
+            echo "| --- | --- | --- |"
+            echo "| Rust dependencies | cargo deny (advisories, bans, licenses, sources), cargo audit | $RUST_DEPS |"
+            echo "| GitHub Actions workflows | zizmor, actionlint with shellcheck | $WORKFLOWS |"
+            echo "| Secrets in git history | gitleaks over all commits | $SECRETS |"
+            echo "| Published image | Trivy on ghcr.io main (scheduled and manual runs) | $IMAGE |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for result in "$RUST_DEPS" "$WORKFLOWS" "$SECRETS"; do
+            [ "$result" = success ] || exit 1
+          done
+          [ "$IMAGE" = success ] || [ "$IMAGE" = skipped ] || exit 1

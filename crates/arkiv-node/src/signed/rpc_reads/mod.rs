@@ -29,7 +29,9 @@
 //! creation order: by block, then transaction, then operation. An `offset`
 //! first walks past that many matches reading ids only, then reads on from
 //! the last of them ([`Snapshot::cursor_after`]); it costs the walk, metered
-//! against the read budget like any other read.
+//! against the read budget like any other read. An offset above the node's
+//! [`ReadLimits::max_offset`] (`--read-max-offset`) is refused when the read
+//! is planned, before any snapshot is pinned; one beside a cursor is ignored.
 //!
 //! Offset and sort walks read engine pages of up to
 //! [`ReadLimits::WALK_PAGE`] rows, so a group is planned once per such page
@@ -216,7 +218,8 @@ pub struct PageRead {
 pub fn plan(host: &Host, method: &str, params: &Json, reads: ReadLimits) -> Option<Read<Planned>> {
     let bounds = reads.query_limits(&host.genesis.genesis.limits);
     Some(match method {
-        "arkiv_query" => plan_query(host, params, bounds).map(|page| Planned::Page(Box::new(page))),
+        "arkiv_query" => plan_query(host, params, bounds, reads.max_offset)
+            .map(|page| Planned::Page(Box::new(page))),
         "arkiv_getEntity" => {
             plan_entity(host, params, bounds).map(|page| Planned::Entity(Box::new(page)))
         }
@@ -525,14 +528,21 @@ fn plan_entity(host: &Host, params: &Json, bounds: QueryLimits) -> Read<PageRead
             options
         ]),
         bounds,
+        None,
     )
 }
 
 /// `arkiv_query`: `[query, options?]`. Options: `atBlock`, `select`, `limit`,
 /// `offset` and `cursor`. A cursor carries its own position, so it continues
 /// past the offset of the first page and an `offset` beside it is ignored; it
-/// needs the explicit `atBlock` of the page that issued it.
-fn plan_query(host: &Host, params: &Json, bounds: QueryLimits) -> Read<PageRead> {
+/// needs the explicit `atBlock` of the page that issued it. An offset above
+/// `max_offset` is refused before anything is read.
+fn plan_query(
+    host: &Host,
+    params: &Json,
+    bounds: QueryLimits,
+    max_offset: Option<u64>,
+) -> Read<PageRead> {
     let args = params
         .as_array()
         .filter(|p| !p.is_empty() && p.len() <= 2)
@@ -575,6 +585,16 @@ fn plan_query(host: &Host, params: &Json, bounds: QueryLimits) -> Read<PageRead>
         .map(quantity)
         .transpose()?
         .unwrap_or(0);
+    if let Some(max) = max_offset
+        && offset > max
+        && !options.contains_key("cursor")
+    {
+        return Err(limits(&format!(
+            "offset {offset} exceeds this node's limit of {max} (--read-max-offset): page with \
+             the cursor of the previous page and its blockNumber as atBlock, or narrow the query"
+        ))
+        .into());
+    }
     let binding: [u8; 32] = keccak256(
         serde_json::to_vec(&json!([
             host.identity.genesis_hash,

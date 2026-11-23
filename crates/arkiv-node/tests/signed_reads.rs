@@ -674,6 +674,54 @@ async fn an_interrupt_stops_every_phase_of_a_walk_within_a_few_reads() {
     }
 }
 
+/// An offset above `ReadLimits::max_offset` is refused before the read is
+/// planned: no state object is read, however slow the store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn offsets_above_the_limit_are_refused_without_reading_state() {
+    let node = node(ReadLimits {
+        max_offset: Some(100),
+        ..ReadLimits::default()
+    })
+    .await;
+    let client = client();
+    node.store.delay_us.store(10_000, Relaxed);
+    let before = node.store.reads();
+    let started = Instant::now();
+    let (code, refused) = rpc(
+        &client,
+        &node.public.url,
+        "arkiv_query",
+        json!(["n != u64(1)", {"limit": 1, "offset": 101}]),
+    )
+    .await;
+    assert_eq!(code, 200);
+    assert_eq!(refused["error"]["code"], -32004, "{refused}");
+    let message = refused["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("limit of 100 (--read-max-offset)"),
+        "{message}"
+    );
+    assert!(message.contains("cursor"), "{message}");
+    assert_eq!(node.store.reads(), before, "the refusal read no state");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    // At the limit the walk runs: match 100 of `n != 1` is entity 134.
+    node.store.delay_us.store(0, Relaxed);
+    let (code, page) = rpc(
+        &client,
+        &node.public.url,
+        "arkiv_query",
+        json!(["n != u64(1)", {"limit": 1, "offset": 100, "select": {"key": true}}]),
+    )
+    .await;
+    assert_eq!(code, 200);
+    assert_eq!(
+        page["result"]["data"],
+        json!([{"key": hex(&entity_key(134))}]),
+        "{page}"
+    );
+    assert!(node.store.reads() > before);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_reads_see_one_height_while_blocks_are_produced() {
     let node = Arc::new(node(limits(4, 30)).await);

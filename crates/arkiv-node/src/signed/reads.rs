@@ -56,7 +56,8 @@ use std::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Bounds of detached reads, set by `--read-concurrency`,
-/// `--read-deadline-secs`, `--read-max-groups` and `--read-max-literals`.
+/// `--read-deadline-secs`, `--read-max-groups`, `--read-max-literals` and
+/// `--read-max-offset`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReadLimits {
     /// Detached reads evaluated at once (1 to [`Self::MAX_CONCURRENCY`]).
@@ -71,6 +72,11 @@ pub struct ReadLimits {
     /// Most literals in one AND-group of those reads (1 to
     /// [`Self::MAX_LITERALS`]); `None` keeps the genesis `max_literals`.
     pub max_literals: Option<usize>,
+    /// Most matches an `arkiv_query` `offset` may skip
+    /// ([`Self::DEFAULT_MAX_OFFSET`] unless set); a larger one is refused
+    /// before the read is planned. `None` (`--read-max-offset 0`) leaves
+    /// offsets to the read budget alone.
+    pub max_offset: Option<u64>,
 }
 
 impl Default for ReadLimits {
@@ -80,6 +86,7 @@ impl Default for ReadLimits {
             deadline: Duration::from_secs(30),
             max_groups: None,
             max_literals: None,
+            max_offset: Some(Self::DEFAULT_MAX_OFFSET),
         }
     }
 }
@@ -91,6 +98,10 @@ impl ReadLimits {
     /// groups and 256 literals in all.
     pub const MAX_GROUPS: usize = 64;
     pub const MAX_LITERALS: usize = 256;
+    /// The default `max_offset`. An offset walk passes about 15,000 matches
+    /// a second on the 16.8-million-entity Sourcify store, so this one
+    /// answers in about 7 s, well inside the 30-second deadline.
+    pub const DEFAULT_MAX_OFFSET: u64 = 100_000;
     /// Most rows of one engine page of an SDK read. An offset or `ORDER BY`
     /// walk reads its matches in pages this large instead of the genesis
     /// `max_page` (64), so a group's plan (a range's terms, in particular)

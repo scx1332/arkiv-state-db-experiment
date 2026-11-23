@@ -49,9 +49,10 @@ costs, and follow-ups. Nothing here blocks the SDK smoke.
   16.8-million-entity Sourcify store a walk of the row map (a match-all or a
   negated query) costs about 67 µs a row, so the budget allows about 80 s of
   such a walk and the deadline ends it first (`ReadDeadlineExceeded`, the
-  permit returned at the next charge). Refusing these earlier would mean a
-  budget calibrated to time or a fixed offset cap, which could refuse reads
-  that succeed today; operators can lower `--read-deadline-secs` instead.
+  permit returned at the next charge). Since 0.1.0-alpha.7 a node-local
+  offset cap, `--read-max-offset` (default 100,000, about 7 s at the 15,000
+  matches a second measured on the Sourcify mirror), refuses deeper offsets
+  at once; `0` turns it off and leaves the budget as the only bound.
 - **A shortened unsorted page and SDK offsets.** An unsorted page whose
   entities pass the 8 MiB cap is shortened and continues by cursor. The SDK
   ignores cursors and computes the next offset as `n * size`, so it would skip

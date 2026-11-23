@@ -255,7 +255,9 @@ runs unplanned single-literal reads under the genesis limits. Their offset
 and sort walks read engine pages of 16,384 rows (a local read's own page
 bound), so a group is planned once per such page, and a walk the read budget
 cannot finish is refused before it starts when stored posting sizes show it
-(see the [API reference](node-api-reference.md)).
+(see the [API reference](node-api-reference.md)). An `arkiv_query` `offset`
+above `--read-max-offset` (default 100,000; `0` for no limit) is refused
+before the read is planned.
 
 A pinned snapshot is consistent while blocks are produced: it fixes one
 published state header, every trie node below it is a committed,

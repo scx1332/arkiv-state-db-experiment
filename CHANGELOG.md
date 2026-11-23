@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### A node-local offset limit: `--read-max-offset` (default 100,000)
+
+- Live testing of 0.1.0-alpha.6 on the Sourcify mirror: an offset walk
+  passes about 15,000 matches a second, so an offset of 300,000 took 19.8 s,
+  400,000 reached the 30-second deadline, and every offset from about
+  450,000 up to the budget's cut-off of 1,250,000 held a read slot for the
+  whole 30 s and then failed with `ReadDeadlineExceeded`.
+- `arkiv_query` with an `offset` above `--read-max-offset` (all node roles
+  that serve reads; default 100,000, about 7 s of walk there) is refused at
+  once with `-32004` (`limits`), when the read is planned and before any
+  state is read: `offset N exceeds this node's limit of M
+  (--read-max-offset): page with the cursor of the previous page and its
+  blockNumber as atBlock, or narrow the query`. An offset at the limit runs;
+  an offset beside a `cursor` is still ignored, as before.
+- `--read-max-offset 0` turns the limit off; the alpha.6 budget check stays
+  the backstop either way. `ReadLimits::max_offset` (`None` for no limit)
+  carries it.
+- **The one intended behaviour change:** offsets between 100,000 and the
+  budget's cut-off that used to succeed slowly (about 6 to 30 s on the
+  mirror) are now refused. Clients page deeper with the cursor, or the
+  operator raises or disables the limit.
+
 ## 0.1.0-alpha.6 — 2026-11-23
 
 Alpha pre-release. **A drop-in upgrade of 0.1.0-alpha.5:** consensus,

@@ -924,6 +924,7 @@ const NODE_FLAGS: &[&str] = &[
     "--read-deadline-secs",
     "--read-max-groups",
     "--read-max-literals",
+    "--read-max-offset",
 ];
 const PRODUCER_FLAGS: &[&str] = &[
     "--key-file",
@@ -961,14 +962,14 @@ fn help() {
         "[--chain-id 9001] [--block-period-ms 1000] [--state-retention archive|N (256)] ",
         "[--body-retention archive|window (archive)] ",
         "[--read-concurrency 4] [--read-deadline-secs 30] [--read-max-groups N] ",
-        "[--read-max-literals N] (--allocations-file FILE | --bundle BUNDLE ",
+        "[--read-max-literals N] [--read-max-offset 100000] (--allocations-file FILE | --bundle BUNDLE ",
         "[--prebuilt-state DIR])\n",
         "arkiv-proposer full|light --run-dir DIR --peer URL --genesis-hash 0xHEX ",
         "--proposer 0xADDRESS --chain-id N --source-id UUID --run-id HEX32 ",
         "[--replication-peer URL] [--bundle BUNDLE] [--state-retention archive|N (full ",
         "only, 256)] [--body-retention archive|window (full only, archive)] ",
         "[--read-concurrency 4] [--read-deadline-secs 30] [--read-max-groups N] ",
-        "[--read-max-literals N]\n",
+        "[--read-max-literals N] [--read-max-offset 100000]\n",
         "arkiv-proposer sign --key-file FILE --genesis-file FILE --tx-file FILE --nonce N ",
         "--out FILE\n",
         "arkiv-proposer create --key-file FILE --genesis-file FILE --nonce N --request-id ",
@@ -1026,7 +1027,9 @@ fn help() {
         "driven by its smallest index posting, so clause order does not change their ",
         "cost, and counts use stored posting sizes. An offset or ORDER BY walk that ",
         "stored posting sizes show the 25-million-unit read budget cannot finish is ",
-        "refused at once (-32004). --read-max-groups (1-64) and ",
+        "refused at once (-32004), and so is an arkiv_query offset above ",
+        "--read-max-offset (default 100000; 0 = no limit but the budget) unless the ",
+        "request carries a cursor. --read-max-groups (1-64) and ",
         "--read-max-literals (1-256) raise the genesis query bounds for these reads only ",
         "(default: the genesis values); larger queries still use the bounded scan ",
         "fallback (queries) or are refused (counts).",
@@ -1265,6 +1268,11 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
         },
         max_groups: args.count("--read-max-groups")?,
         max_literals: args.count("--read-max-literals")?,
+        // 0 leaves offsets to the read budget alone.
+        max_offset: match args.get("--read-max-offset") {
+            Some(value) => Some(number(value)?).filter(|max| *max > 0),
+            None => defaults.max_offset,
+        },
     };
     read_limits.validate()?;
     // Only a producer may adopt its own staged genesis store; followers keep

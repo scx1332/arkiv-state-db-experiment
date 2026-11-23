@@ -130,9 +130,11 @@ An offset is a walk: the node reads the skipped matches' ids (engine pages of
 16,384) and then reads on after the last of them, all charged to the
 request's read budget; `select.count` is the planned count (stored posting
 sizes where they decide it), charged to the same budget. A deep offset is
-refused as `-32004` (`limits`) rather than scanned for free, and at once,
-before the walk, when posting sizes show that it passes more matches than
-the budget pays for (1,250,000 at 20 units a match). A query beyond
+refused as `-32004` (`limits`) rather than scanned for free: at once when it
+is above the node's `--read-max-offset` (default 100,000, about 7 s of walk
+on the Sourcify store; `0` turns it off), and otherwise before the walk when
+posting sizes show that it passes more matches than the budget pays for
+(1,250,000 at 20 units a match). Deeper pages follow the cursor. A query beyond
 the group and literal bounds (an untyped `EXISTS(x)` is nine groups) takes
 the scan fallback for its page, its offset and its `select.count` alike;
 `arkiv_getEntityCount` still refuses it. `ORDER BY` is upstream's
@@ -205,7 +207,8 @@ smallest index posting whatever the clause order, other postings are checked
 by id instead of loading rows, and counts use the stored posting sizes where
 those decide them. The answers are exactly the clause-order evaluation's. The
 genesis bounds of 8 groups and 8 literals per group apply unless the node sets
-`--read-max-groups` (1–64) or `--read-max-literals` (1–256).
+`--read-max-groups` (1–64) or `--read-max-literals` (1–256), and an `offset`
+may skip at most `--read-max-offset` matches (default 100,000; `0`: no limit).
 HTTP batches contain at most 64 requests and total
 JSON responses are capped at 8 MiB. WebSocket sessions and subscriptions have
 additional bounded limits and disconnect rather than silently skip blocks if

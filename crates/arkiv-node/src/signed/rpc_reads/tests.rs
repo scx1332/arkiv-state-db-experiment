@@ -1,7 +1,9 @@
 use super::{syntax::TAGS, *};
 use alloy_primitives::U256;
 
-// The reads as served under the lock: planned and run back to back.
+// The reads as served under the lock: planned and run back to back, with
+// no offset limit (`ReadLimits::max_offset`), so that the read budget alone
+// bounds an offset walk.
 fn bounds(host: &Host) -> QueryLimits {
     ReadLimits::default().query_limits(&host.genesis.genesis.limits)
 }
@@ -11,7 +13,7 @@ fn entity_count(host: &Host, params: &Json) -> Read<Json> {
 }
 
 fn query(host: &Host, params: &Json) -> Read<Json> {
-    plan_query(host, params, bounds(host)).and_then(PageRead::run)
+    plan_query(host, params, bounds(host), None).and_then(PageRead::run)
 }
 
 /// [`query`] reading engine pages of at most `max_page` rows.
@@ -20,7 +22,7 @@ fn query_in_pages(host: &Host, params: &Json, max_page: usize) -> Read<Json> {
         max_page,
         ..bounds(host)
     };
-    plan_query(host, params, bounds).and_then(PageRead::run)
+    plan_query(host, params, bounds, None).and_then(PageRead::run)
 }
 
 /// The SDK's `select`: every key sent as an explicit boolean.
@@ -1341,7 +1343,7 @@ fn offset_sort_and_count_walks_are_charged_to_the_read_budget() {
     }
     host.produce().unwrap();
     let run = |source: &str, options: Json, budget: u64| {
-        plan_query(&host, &json!([source, options]), bounds(&host))
+        plan_query(&host, &json!([source, options]), bounds(&host), None)
             .and_then(|page| page.run_within(budget))
     };
     // The least budget each read is served under: a walk past 39
@@ -1440,7 +1442,8 @@ fn least_budget(host: &Host, params: &Json, max_page: usize) -> u64 {
         max_page,
         ..bounds(host)
     };
-    let run = |budget| plan_query(host, params, bounds).and_then(|page| page.run_within(budget));
+    let run =
+        |budget| plan_query(host, params, bounds, None).and_then(|page| page.run_within(budget));
     let (mut low, mut high) = (1, READ_BUDGET);
     assert!(run(high).is_ok());
     while low < high {
@@ -1504,7 +1507,7 @@ fn walk_pages_change_charges_not_answers() {
 /// The page's walk alone, without the up-front check: what the read did
 /// under `budget` before the check existed.
 fn walk_alone(host: &Host, params: &Json, budget: u64) -> Read<()> {
-    let page = plan_query(host, params, bounds(host))?;
+    let page = plan_query(host, params, bounds(host), None)?;
     let window = Window {
         snapshot: &page.snapshot,
         query: &page.query,
@@ -1522,7 +1525,7 @@ fn walk_alone(host: &Host, params: &Json, budget: u64) -> Read<()> {
 
 /// Whether the up-front check refuses `params` under `budget`.
 fn refused_up_front(host: &Host, params: &Json, budget: u64) -> Option<QueryError> {
-    let page = plan_query(host, params, bounds(host)).unwrap();
+    let page = plan_query(host, params, bounds(host), None).unwrap();
     unaffordable(
         &page.snapshot,
         &page.query,
@@ -1542,7 +1545,7 @@ fn walks_the_budget_cannot_finish_are_refused_before_they_start() {
     // The GLM schedule: ResultRow 10, a posting entry 10, ReadByte 1.
     assert_eq!((skip, sort), (20, 52));
     let run = |params: &Json, budget: u64| {
-        plan_query(&host, params, bounds(&host)).and_then(|page| page.run_within(budget))
+        plan_query(&host, params, bounds(&host), None).and_then(|page| page.run_within(budget))
     };
     let message = |result: Read<Json>| match result {
         Err(ReadError::Query(q)) => {
@@ -1609,6 +1612,72 @@ fn walks_the_budget_cannot_finish_are_refused_before_they_start() {
         }
     }
     assert!(refusals > 100, "{refusals}");
+}
+
+#[test]
+fn offsets_above_the_node_limit_are_refused_before_planning() {
+    let host = walk_fixture();
+    let run = |params: Json, max_offset: Option<u64>| {
+        let reads = ReadLimits {
+            max_offset,
+            ..ReadLimits::default()
+        };
+        plan(&host, "arkiv_query", &params, reads)
+            .unwrap()
+            .and_then(Planned::run)
+    };
+    assert_eq!(ReadLimits::default().max_offset, Some(100_000));
+    let typed = "TYPEOF(w) = u64";
+    let every = keys(&run(json!([typed, {"limit": 40}]), Some(39)).unwrap());
+    // At the limit the page is served.
+    assert_eq!(
+        keys(&run(json!([typed, {"limit": 1, "offset": 39}]), Some(39)).unwrap()),
+        every[39..]
+    );
+    // Above it, sorted or not, the request is refused naming the limit.
+    for source in [typed, "TYPEOF(w) = u64 ORDER BY v:u64"] {
+        match run(json!([source, {"limit": 1, "offset": "0x28"}]), Some(39)) {
+            Err(ReadError::Query(q)) => {
+                assert_eq!(q.kind, QueryErrorKind::Limits);
+                assert_eq!(
+                    q.message,
+                    "offset 40 exceeds this node's limit of 39 (--read-max-offset): page with \
+                     the cursor of the previous page and its blockNumber as atBlock, or narrow \
+                     the query"
+                );
+            }
+            other => panic!("expected a limits error, got {other:?}"),
+        }
+    }
+    // The default limit: an offset of 100,000 runs (past the end here),
+    // one more is refused.
+    let default = ReadLimits::default().max_offset;
+    assert_eq!(
+        run(json!(["*", {"offset": 100_000}]), default).unwrap()["data"],
+        json!([])
+    );
+    assert_eq!(
+        kind(run(json!(["*", {"offset": 100_001}]), default)),
+        QueryErrorKind::Limits
+    );
+    // Without a limit the read budget alone bounds the walk, as before.
+    assert_eq!(
+        run(json!(["*", {"offset": u64::MAX}]), None).unwrap()["data"],
+        json!([])
+    );
+    // An offset beside a cursor is ignored, whatever its size.
+    let first = run(json!([typed, {"limit": 1}]), Some(39)).unwrap();
+    let next = run(
+        json!([typed, {
+            "limit": 1,
+            "offset": 1_000,
+            "atBlock": first["blockNumber"],
+            "cursor": first["cursor"],
+        }]),
+        Some(39),
+    )
+    .unwrap();
+    assert_eq!(keys(&next), every[1..2]);
 }
 
 #[test]

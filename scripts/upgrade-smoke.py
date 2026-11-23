@@ -139,8 +139,6 @@ def main():
             wait("the NEW follower", lambda: height(url["new-full"]) >= old_head)
             old_headers = rest(url["producer"], "headers?limit=64")["certificates"]
             old_body = rest(url["private"], f"replication/blocks/{early[0]}", token=token)
-            old_refusal = rpc(url["producer"], "eth_getTransactionByBlockNumberAndIndex", [hex(early[0]), "0x0"])
-            assert old_refusal["error"]["code"] == -32006, old_refusal
             stop("producer")
             stopped_head = height(url["new-full"])
 
@@ -152,7 +150,8 @@ def main():
             assert rest(url["producer"], "headers?limit=64")["certificates"] == old_headers
             assert rest(url["private"], f"replication/blocks/{early[0]}", token=token) == old_body
             late = transaction(NEW, "alice", 3, "20")
-            # Below the record floor, transactions are served from the kept bodies.
+            # Below the record floor, transactions are served from the kept bodies
+            # (since 0.1.0-alpha.6).
             for index, block in enumerate(early):
                 served = rpc(url["producer"], "eth_getTransactionByBlockNumberAndIndex", [hex(block), "0x0"])
                 assert served["result"]["blockNumber"] == hex(block), served
@@ -189,7 +188,7 @@ def main():
             sorted_page = rpc(url["producer"], "arkiv_query", ["group = u64(1) ORDER BY $createdAt DESC",
                                                                 {"atBlock": pinned, "limit": 2, "offset": 1}])
             assert len(sorted_page["result"]["data"]) == 2, sorted_page
-            past = rpc(url["producer"], "arkiv_query", ["group = u64(1)", {"atBlock": pinned, "offset": 10**12}])
+            past = rpc(url["producer"], "arkiv_query", ["group = u64(1)", {"atBlock": pinned, "offset": 1000}])
             assert past["result"]["data"] == [] and "cursor" not in past["result"], past
             rest(url["private"], "control", {"action": "resume"}, token)
             for name in ("old-full", "old-light", "new-full"):

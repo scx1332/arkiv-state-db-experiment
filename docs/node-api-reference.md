@@ -72,8 +72,18 @@ failed count check, `off` when it keeps everything). State reads below
 below `receiptFloor`, are refused: REST answers `410 Gone` with
 `{"error":"HistoryPruned","requestedHeight":"N","stateFloor":"F"}`, JSON-RPC
 answers code `-32006` (the SDK's `block` kind, on every method) with message
-`history pruned: requested N, floor F` and hex `data.requested`/`data.floor`. Bodies, headers and transactions stay
-available at every height. See the [pruning design](pruning-design.md).
+`history pruned: requested N, floor F` and hex `data.requested`/`data.floor`.
+A node with a window also drops its per-height records below `recordFloor`:
+the feed, block JSON, receipts and request status answer the same refusal,
+and hash lookups (`eth_getTransactionByHash`, `eth_getBlockByHash`,
+`eth_getTransactionReceipt`) answer `null`. Block bodies are kept apart in
+`history.redb`: with `bodyRetention: all` (`--body-retention archive`, the
+default) headers, replication, `eth_getTransactionByBlockNumberAndIndex` and
+`eth_getBlockTransactionCountByNumber` are served at every height from the
+kept bodies. Block JSON stays refused below `receiptFloor`, since its
+`logsBloom` is derived from the state before the block, and so does the feed,
+whose entries carry each block's state changes. See the
+[pruning design](pruning-design.md).
 
 Entity reads, queries and counts (`arkiv_getEntity`, `arkiv_query`, `arkiv_getEntityCount`), raw proof
 generation (`query/eq`, `query/range`) and tree exploration are detached reads:

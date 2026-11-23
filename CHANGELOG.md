@@ -42,6 +42,26 @@
   450,000 and 1,250,000 still ends at the deadline
   (`docs/sdk-1.0-compatibility-todo.md`).
 
+### Transactions below the record floor are served from the kept bodies
+
+- With `bodyRetention: all` (the default `--body-retention archive`) every
+  block body stays in `history.redb`, but since 0.1.0-alpha.3
+  `eth_getTransactionByBlockNumberAndIndex` and
+  `eth_getBlockTransactionCountByNumber` answered `-32006 history pruned`
+  below the record floor. The docs disagreed: the API reference and the
+  pruning design promised transactions at every height, the OpenAPI text and
+  the record-expiry proposal expired them with the records. They now read
+  the kept body (authenticated against its indexed certificate), as
+  replication and `/headers` already did. With `--body-retention window`
+  they are refused as before.
+- Still refused below their floors, now documented as such: block JSON
+  (`eth_getBlockByNumber`/`ByHash`, with or without whole transactions),
+  whose `logsBloom` needs the state before the block, receipts and logs; the
+  REST feed (`/feed/blocks/{h}`, 410), whose entries carry each block's state
+  changes; request status. Hash lookups (`eth_getTransactionByHash`,
+  `eth_getBlockByHash`, `eth_getTransactionReceipt`) cover the record window
+  and answer `null` below it; `eth_feeHistory` starts at the record floor.
+
 ## 0.1.0-alpha.5 — 2026-11-22
 
 Alpha pre-release.

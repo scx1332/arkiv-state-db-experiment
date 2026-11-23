@@ -386,7 +386,10 @@ records. No snapshot sync is built.
   certificate and body through it (`Host::chain_certificate`,
   `Host::replication_block`), so followers and light clients start from
   genesis exactly as before; everything a user reads (feeds, blocks,
-  receipts, lookups) still expires at `R`. `node.redb` is bounded;
+  receipts, lookups) still expires at `R`. (Since 0.1.0-alpha.6 the two
+  reads that need only a body, `eth_getTransactionByBlockNumberAndIndex` and
+  `eth_getBlockTransactionCountByNumber`, are served from the kept bodies
+  below `R`; the rest still expires.) `node.redb` is bounded;
   `history.redb` grows by the bodies (about 125 KiB per block at 128
   patches) plus 300 B of index.
 - With `--body-retention window`, after each commit the host deletes, in

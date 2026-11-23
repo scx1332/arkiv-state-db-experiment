@@ -163,10 +163,12 @@ pub(super) fn block_by_hash(host: &Host, state: &mut RpcState, args: &[Value]) -
     }
 }
 
+/// Served from the kept body below the record floor, like
+/// [`transaction_by_index`]: the count needs no state.
 pub(super) fn block_transaction_count(host: &Host, args: &[Value]) -> Result<Value> {
     let height = at(host, args.first())?;
     Ok(json!(quantity(
-        host.shared_block(height)?.inputs.txs.len() as u64
+        host.body_block(height)?.inputs.txs.len() as u64
     )))
 }
 
@@ -232,10 +234,13 @@ pub(super) fn transaction_receipt(
     }
 }
 
+/// A transaction is its body's alone, so below the record floor it is
+/// served from the kept body (`bodyRetention: all`); the block JSON and the
+/// receipt also need the state before the block and keep the receipt floor.
 pub(super) fn transaction_by_index(host: &Host, args: &[Value]) -> Result<Value> {
     let height = at(host, args.first())?;
     let index = uint(args.get(1).ok_or(ErrorCode::InvalidParams)?)? as usize;
-    let block = host.shared_block(height)?;
+    let block = host.body_block(height)?;
     match block.inputs.txs.get(index) {
         Some(tx) => transaction(tx, Some((&block.header.header, index))),
         None => Ok(Value::Null),

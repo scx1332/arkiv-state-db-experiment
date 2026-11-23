@@ -133,7 +133,9 @@ recorded as a backstop.
 | Signed REST `accounts/{a}[?height]`, `accounts/{a}/proof`, `query/eq`, `query/range`, `state/explore` | state floor |
 | Simulator REST `query/eq` | state floor |
 | Light verified, inspect and account endpoints | relay the full peer's refusal as `HistoryPruned` |
-| Every height | `eth_getTransactionByHash`, `eth_getTransactionByBlockNumberAndIndex`, `eth_getBlockTransactionCountByNumber`, `eth_feeHistory`, `eth_getCode`, block filters, the hash index, headers, feed, genesis, replication, request status |
+| Record floor (a node with a window, see [record expiry](proposals/2026-11-20-index-pruning.md)) | feed, request status, block filters; `eth_getTransactionByHash`, `eth_getBlockByHash` and `eth_getTransactionReceipt` answer `null` below it (the hash index holds the window); `eth_feeHistory` starts at it |
+| Every height while bodies are kept (`bodyRetention: all`) | `eth_getTransactionByBlockNumberAndIndex` and `eth_getBlockTransactionCountByNumber` (from the kept body below the record floor), headers, genesis, replication |
+| Every height | `eth_getCode` |
 
 **Errors.**
 
@@ -274,8 +276,8 @@ commit transaction, with deletion deferred by death height.**
 - **Archive** (default): every snapshot, body and header; serves any height,
   replication from genesis and, later, snapshot export.
 - **Pruned full or producer**: `--state-retention <W>`. Serves state reads at
-  `[floor, head]`, receipts and logs at `[floor + 1, head]`, bodies and
-  headers at every height. Producers and full followers need only the head to
+  `[floor, head]`, receipts and logs at `[floor + 1, head]`, and, while
+  bodies are kept, headers and transactions by block at every height. Producers and full followers need only the head to
   execute, so a window does not affect block production or replay. The window
   should cover the longest expected query pagination, light-proof horizon,
   `eth_getLogs`/subscription replay and follower lag.

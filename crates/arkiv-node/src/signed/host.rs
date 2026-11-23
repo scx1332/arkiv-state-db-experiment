@@ -746,6 +746,19 @@ impl Host {
         Ok(block)
     }
 
+    /// The block of `height` for reads of its body alone (its transactions
+    /// and their count): [`Self::shared_block`] inside the record window,
+    /// and below it the kept body ([`Self::replication_block`]), while
+    /// `--body-retention` keeps bodies. `HistoryPruned` once the body
+    /// expired too. Reads that also need state (logs, receipts,
+    /// `logsBloom`) keep their own floors.
+    pub fn body_block(&self, height: u64) -> Result<std::sync::Arc<SignedBlock>> {
+        if !self.record_expired(height) {
+            return self.shared_block(height);
+        }
+        Ok(std::sync::Arc::new(self.replication_block(height)?))
+    }
+
     fn records_pruned(&self, height: u64) -> Error {
         Error::pruned(height, self.record_floor())
     }

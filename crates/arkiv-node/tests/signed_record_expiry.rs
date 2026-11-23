@@ -4,7 +4,9 @@
 //! impossible (nonces) and request identities stay unique for
 //! `REQUEST_IDENTITY_WINDOW` blocks, restart reads only the retained blocks,
 //! followers still replay from genesis while bodies are kept, and archive
-//! nodes keep everything.
+//! nodes keep everything. While bodies are kept, a transaction by block and
+//! index and a block's transaction count, which need no state, are served
+//! from the body at every height.
 
 use arkiv_db::durable::{Options, Retention};
 use arkiv_db_memory::MemoryVersionedStore;
@@ -151,9 +153,11 @@ fn records_expire_at_the_record_floor_and_duplicates_stay_refused() {
         host.feed(height).unwrap();
         host.block(height).unwrap();
     }
-    // Bodies are kept by default: replication and chain sync still serve
-    // the expired heights.
+    // Bodies are kept by default: replication, chain sync and body reads
+    // still serve the expired heights.
     assert_eq!(host.replication_block(2).unwrap(), block);
+    assert_eq!(*host.body_block(2).unwrap(), block);
+    assert_eq!(*host.body_block(head).unwrap(), host.block(head).unwrap());
     assert_eq!(host.chain_certificate(2).unwrap(), block.header);
     // The expired inclusion is gone from request status ...
     assert_eq!(
@@ -205,7 +209,7 @@ fn records_expire_at_the_record_floor_and_duplicates_stay_refused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn json_rpc_and_feeds_answer_history_pruned_and_restart_reads_the_window_only() {
     let stores = Stores::new();
-    let (host, early, _) = chain(&stores, Retention::Window(2));
+    let (host, early, block) = chain(&stores, Retention::Window(2));
     let floor = host.record_floor();
     let head = host.head.height;
     let rt = Runtime::new(Node::Full(Box::new(host)), None, None, None).unwrap();
@@ -218,15 +222,49 @@ async fn json_rpc_and_feeds_answer_history_pruned_and_restart_reads_the_window_o
         call(&rt, "eth_getTransactionReceipt", json!([early_hash])).await["result"],
         Value::Null
     );
-    let refused = call(&rt, "eth_getBlockByNumber", json!(["0x2", false])).await;
-    assert_eq!(refused["error"]["code"], -32006, "{refused}");
-    let refused = call(
+    // A block's JSON carries `logsBloom`, derived from the state before it:
+    // refused below the floor, with or without whole transactions.
+    for full in [false, true] {
+        let refused = call(&rt, "eth_getBlockByNumber", json!(["0x2", full])).await;
+        assert_eq!(refused["error"]["code"], -32006, "{refused}");
+        assert_eq!(refused["error"]["data"]["floor"], format!("{floor:#x}"));
+    }
+    // Its transactions need no state: served from the kept body.
+    let served = call(
         &rt,
         "eth_getTransactionByBlockNumberAndIndex",
         json!(["0x2", "0x0"]),
     )
     .await;
-    assert_eq!(refused["error"]["code"], -32006, "{refused}");
+    let tx = &served["result"];
+    assert_eq!(tx["hash"], early_hash, "{served}");
+    assert_eq!(tx["blockNumber"], "0x2");
+    assert_eq!(tx["transactionIndex"], "0x0");
+    assert_eq!(tx["blockHash"], hex(block.hash().as_slice()));
+    assert_eq!(tx["nonce"], "0x0");
+    assert_eq!(
+        call(
+            &rt,
+            "eth_getTransactionByBlockNumberAndIndex",
+            json!(["0x2", "0x1"])
+        )
+        .await["result"],
+        Value::Null
+    );
+    assert_eq!(
+        call(&rt, "eth_getBlockTransactionCountByNumber", json!(["0x2"])).await["result"],
+        "0x1"
+    );
+    // Hash lookups cover the record window only.
+    assert_eq!(
+        call(
+            &rt,
+            "eth_getBlockByHash",
+            json!([hex(block.hash().as_slice()), false])
+        )
+        .await["result"],
+        Value::Null
+    );
     let latest = call(&rt, "eth_getBlockByNumber", json!(["latest", false])).await;
     assert_eq!(latest["result"]["number"], format!("{head:#x}"));
     let history = call(&rt, "eth_feeHistory", json!(["0x400", "latest", []])).await;
@@ -291,6 +329,7 @@ fn expired_bodies_leave_history_and_a_restart_still_opens() {
     assert_eq!(body_floor, floor - 1);
     assert_eq!(code(host.replication_block(2)), "HistoryPruned");
     assert_eq!(code(host.chain_certificate(2)), "HistoryPruned");
+    assert_eq!(code(host.body_block(2)), "HistoryPruned");
     host.chain_certificate(floor - 1).unwrap();
     host.replication_block(floor).unwrap();
     for height in 1..body_floor {

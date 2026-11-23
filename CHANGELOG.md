@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.6 — 2026-11-23
+
+Alpha pre-release. **A drop-in upgrade of 0.1.0-alpha.5:** consensus,
+blocks, headers, transactions, signatures, genesis, state roots and the
+`node.redb` and `history.redb` layouts are unchanged. An alpha.6 node opens
+an alpha.5 run directory in place and continues its chain, with no rebuild
+or migration; alpha.5 and alpha.6 producers, full followers and light
+clients accept each other's blocks; alpha.5 reopens a directory alpha.6
+wrote. `scripts/upgrade-smoke.py` checks all of this and passed against
+0.1.0-alpha.5. Queries that answered before answer the same; the new
+refusals replace reads that ended in the deadline or an exhausted budget,
+and two reads that were refused below the record floor now answer.
+
 ### Expensive reads fail fast instead of running into the read deadline
 
 - On the 16.8-million-entity Sourcify node, `arkiv_query` with `"*"` and
@@ -61,6 +74,15 @@
   changes; request status. Hash lookups (`eth_getTransactionByHash`,
   `eth_getBlockByHash`, `eth_getTransactionReceipt`) cover the record window
   and answer `null` below it; `eth_feeHistory` starts at the record floor.
+
+### Upgrading
+
+- Replace the binary or image (`ghcr.io/scx1332/arkiv-node:0.1.0-alpha.6`)
+  and restart with the same flags; there are no new flags and no migration.
+  Producers and followers may be upgraded in any order.
+- Clients that page with an `offset` past 1,250,000 matches, or sort more
+  than 480,769, get `-32004` at once instead of `ReadDeadlineExceeded` after
+  30 s: page with the cursor or narrow the query.
 
 ## 0.1.0-alpha.5 — 2026-11-22
 

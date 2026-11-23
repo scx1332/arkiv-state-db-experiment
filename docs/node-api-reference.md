@@ -109,7 +109,15 @@ alone, it is the whole answer (`data: []`, no cursor). An offset walks the
 skipped matches by id and is charged to the request's 25-million-unit read
 budget with its count and rows, so a deep offset is refused as `limits` when
 the walk does not fit; an offset at or past the end is an empty page without a
-cursor. `offset` and `select.count` compose with `atBlock`: pinning page
+cursor. Such a walk is refused before it starts when stored posting sizes show
+it cannot fit (a 20,000-unit count probe sizes the match set): every skipped
+match costs at least 20 units on the GLM schedule (its result row, and the
+posting entry or row visit that found it), so an offset that passes more than
+1,250,000 matches answers `-32004` at once, with the offset, the matches it
+passes and the most the budget walks in the message. Offset and sort walks
+read engine pages of 16,384 rows rather than the genesis 64, so a group (a
+range's run of terms in particular) is planned once per such page. `offset`
+and `select.count` compose with `atBlock`: pinning page
 one's `blockNumber` keeps every offset page on that snapshot. A `cursor`
 carries its own position, so an `offset` beside one is ignored.
 
@@ -125,7 +133,10 @@ and `DESC` are words only where the clause stands. A sorted page is a
 fetch-and-sort, as upstream's: the node reads the key and sort cell of every
 match at the pinned snapshot, keeps the first `offset + limit` in order and
 reads that window's rows, all charged to the read budget, so a match set too
-large to sort within it answers `-32004`. Sorted pages carry no cursor and
+large to sort within it answers `-32004`. A sort reads at least 52 units per
+match (its result row, 32-byte key and source step), so when posting sizes
+show more than 480,769 matches it is refused before the walk: narrow the
+query, or drop `ORDER BY` and page by cursor. Sorted pages carry no cursor and
 page by `offset` (pin `atBlock` for a stable order); a `cursor` beside
 `ORDER BY` is `-32005`, and a sorted window past the 8 MiB response cap is
 `-32004` (lower the limit) rather than shortened. `select.count` and
@@ -258,7 +269,7 @@ table (`src/query/errors.ts`), with a message naming the kind:
 | `-32001` | `parse` | The query does not parse. `data` is `{position, expected, got}`: the UTF-8 byte offset, what the parser expected, and the source text there (`end of query` at the end). |
 | `-32002` | `type` | A predicate or sort is ill-typed: `STARTSWITH` on a type other than `str`, `BETWEEN` bounds of two types, an `ORDER BY` on a user attribute without its type, on `bytes` or on an unsortable system attribute, an unknown or unindexable type tag (`TYPEOF(x) = bytes`), a system attribute compared against the wrong type, `EXISTS($owner)`, or an unknown system attribute such as `$payload` or `$contentType`. `data` is `{position, got}`. |
 | `-32003` | `literal` | A literal fails validation: an `i32` out of range, a bad checksum, more than 18 decimal places. `data` is `{position, got}`. |
-| `-32004` | `limits` | A node budget is exceeded: more than 8192 bytes, 64 predicates or 32 levels of nesting, a Boolean expansion beyond 64 groups or 256 literals, an `arkiv_getEntityCount` beyond the read's group/literal bounds, an exhausted read budget (an `offset` walk and `select.count` included), a scan fallback past 4,096 rows, or a single entity whose JSON alone exceeds the 8 MiB response cap. |
+| `-32004` | `limits` | A node budget is exceeded: more than 8192 bytes, 64 predicates or 32 levels of nesting, a Boolean expansion beyond 64 groups or 256 literals, an `arkiv_getEntityCount` beyond the read's group/literal bounds, an exhausted read budget (an `offset` walk and `select.count` included), an `offset` or `ORDER BY` walk longer than the read budget pays for (refused before it starts when posting sizes show it), a scan fallback past 4,096 rows, or a single entity whose JSON alone exceeds the 8 MiB response cap. |
 | `-32005` | `cursor` | The cursor expired, is malformed, or belongs to another query, block or selection (cursors also need an explicit `atBlock`), or it was sent with `ORDER BY`, whose pages have none. |
 | `-32006` | `block` | The requested height is above the head or below the state floor (`HistoryPruned`, with `data.requested`/`data.floor`). |
 

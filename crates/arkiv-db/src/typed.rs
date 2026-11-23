@@ -1369,7 +1369,9 @@ fn evaluate<'a, 'q, 'm, T>(
 /// Returns the page rows and the id of the last row when a further match
 /// exists. Every group is positioned at its first match beyond the page
 /// when the page is full, so the terminal claim (`None`) is exact. Both
-/// evaluations return the same page; they differ only in charges.
+/// evaluations return the same page; they differ only in charges. A planned
+/// page that projects ids only does not read the rows it emits (an offset
+/// walk): the charges are the same, `ResultRow` 1 and no bytes per row.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn query<'a>(
     state: &TypedState,
@@ -1388,7 +1390,14 @@ pub(crate) fn query<'a>(
         after,
         evaluation,
         meter,
-        |evaluator, meter| page(state, loaders, evaluator, projection, limit, meter),
+        |evaluator, meter| {
+            let ids_only = evaluation == Evaluation::Planned
+                && !projection.key
+                && matches!(projection.cells, CellSelect::None);
+            page(
+                state, loaders, evaluator, projection, limit, ids_only, meter,
+            )
+        },
     )
 }
 
@@ -1398,6 +1407,7 @@ fn page(
     evaluator: &mut Evaluator<'_, '_>,
     projection: &Projection,
     limit: usize,
+    ids_only: bool,
     meter: &mut Meter<'_>,
 ) -> Result<(Vec<Row>, Option<RecordId>), Fault> {
     let mut rows: Vec<Row> = Vec::new();
@@ -1406,11 +1416,24 @@ fn page(
             let last = rows.last().map(|row| row.id);
             return Ok((rows, last));
         }
-        let row = match evaluator.head_row(id) {
-            Some(row) => row,
-            None => load_row(state, loaders, id, None, meter)?,
-        };
-        rows.push(emit(id, &row, projection, meter)?);
+        if ids_only {
+            // What `emit` charges and returns for an id-only projection.
+            meter.charge_group(&[
+                (OperationClass::ResultRow, 1),
+                (OperationClass::ReadByte, 0),
+            ])?;
+            rows.push(Row {
+                id,
+                key: None,
+                cells: Vec::new(),
+            });
+        } else {
+            let row = match evaluator.head_row(id) {
+                Some(row) => row,
+                None => load_row(state, loaders, id, None, meter)?,
+            };
+            rows.push(emit(id, &row, projection, meter)?);
+        }
         evaluator.advance_past(state, loaders, id, meter)?;
     }
     Ok((rows, None))

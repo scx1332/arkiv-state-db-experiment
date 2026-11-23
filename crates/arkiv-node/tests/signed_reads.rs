@@ -7,11 +7,12 @@
 //! the planned evaluation walks the row map) over the 256 prefilled
 //! entities takes seconds, a key lookup reads a few dozen objects and
 //! status, `eth_blockNumber`, admission and empty blocks read none. (A
-//! match-all count is answered from the stored row count.)
+//! match-all count is answered from the stored row count.) The store can
+//! also raise an [`Interrupt`] at a chosen read, to see where a walk stops.
 
 mod signed_support;
 
-use arkiv_db::{CellName, Value as DbValue, durable::Options};
+use arkiv_db::{CellName, Interrupt, Value as DbValue, durable::Options};
 use arkiv_db_memory::MemoryVersionedStore;
 use arkiv_db_storage::versioned::{
     CommitBatch, CommitOutcome, DatabaseId, Head, Health, ObjectId, ObjectReader, SpaceId,
@@ -53,18 +54,25 @@ const CHAIN: u64 = 9515;
 const ENTITIES: u64 = 256;
 const TOKEN: &str = "signed-test-replication-token-0123456789";
 
-/// A memory store whose namespace object reads take `delay_us` each.
+/// A memory store whose namespace object reads take `delay_us` each, and
+/// which raises `raise.1` at namespace read number `raise.0`.
 #[derive(Default)]
 struct SlowStore {
     inner: MemoryVersionedStore,
     delay_us: AtomicU64,
     namespace_reads: AtomicU64,
+    raise: std::sync::Mutex<Option<(u64, Interrupt)>>,
 }
 
 impl SlowStore {
     fn slow(&self, space: SpaceId) {
         if matches!(space, SpaceId::Namespace(_)) {
-            self.namespace_reads.fetch_add(1, Relaxed);
+            let read = self.namespace_reads.fetch_add(1, Relaxed) + 1;
+            if let Some((at, interrupt)) = &*self.raise.lock().unwrap()
+                && read >= *at
+            {
+                interrupt.raise();
+            }
             let delay = self.delay_us.load(Relaxed);
             if delay > 0 {
                 std::thread::sleep(Duration::from_micros(delay));
@@ -180,6 +188,11 @@ async fn node(limits: ReadLimits) -> Node2 {
                 (
                     CellName::new("n").unwrap(),
                     arkiv_db::Cell::attribute(DbValue::U64(n % 4)),
+                ),
+                // One term per entity: a range over it is a long run.
+                (
+                    CellName::new("id").unwrap(),
+                    arkiv_db::Cell::attribute(DbValue::U64(n)),
                 ),
             ],
         })
@@ -589,6 +602,76 @@ async fn deadlines_and_departed_clients_stop_the_walk() {
         departed_reads < full_walk,
         "{departed_reads} of {full_walk}"
     );
+}
+
+/// A detached read stops within a few object reads of its interrupt
+/// wherever in its walk the interrupt comes: planning, positioning a run's
+/// postings (which no charge covers), stepping a source, probing, loading
+/// rows. The reads are planned under the lock and run in an interrupt scope,
+/// as `reads::Admitted::run` runs them; the store raises the interrupt at
+/// every 3rd of the reads an undisturbed run makes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_interrupt_stops_every_phase_of_a_walk_within_a_few_reads() {
+    let node = node(ReadLimits::default()).await;
+    let plan = |method: &str, params: &Value| {
+        let guard = node.rt.node.lock().unwrap();
+        let Node::Full(host) = &*guard else {
+            panic!("full node")
+        };
+        rpc_reads::plan(host, method, params, ReadLimits::default())
+            .unwrap()
+            .unwrap()
+    };
+    // A count whose 256-term run is walked and then positioned (`n != 1`
+    // leaves an absent posting, so the sizes do not decide it), a sorted
+    // page, an offset walk and a count that loads every row.
+    for (method, params, answer) in [
+        (
+            "arkiv_getEntityCount",
+            json!([{"query":"id >= u64(0) AND n != u64(1)"}]),
+            json!(ENTITIES / 4 * 3),
+        ),
+        (
+            "arkiv_query",
+            json!(["n != u64(1) ORDER BY id:u64 DESC", {"limit": 2, "select": {"key": true}}]),
+            json!([{"key": hex(&entity_key(ENTITIES - 1))}, {"key": hex(&entity_key(ENTITIES - 2))}]),
+        ),
+        (
+            "arkiv_query",
+            json!(["n != u64(1)", {"limit": 1, "offset": 150, "select": {"key": true}}]),
+            json!([{"key": hex(&entity_key(200))}]),
+        ),
+        ("arkiv_getEntityCount", heavy_count(), json!(ENTITIES)),
+    ] {
+        let planned = plan(method, &params);
+        let before = node.store.reads();
+        let result = planned.run().unwrap();
+        let total = node.store.reads() - before;
+        let result = if method == "arkiv_query" {
+            result["data"].clone()
+        } else {
+            result
+        };
+        assert_eq!(result, answer, "{params}");
+        let mut worst = 0;
+        for at in (1..=total).step_by(3) {
+            let planned = plan(method, &params);
+            let interrupt = Interrupt::new();
+            let start = node.store.reads();
+            *node.store.raise.lock().unwrap() = Some((start + at, interrupt.clone()));
+            let stopped = interrupt.scope(|| planned.run());
+            *node.store.raise.lock().unwrap() = None;
+            let after = node.store.reads() - start - at;
+            // Stopped short of the full walk: the read answers no result.
+            assert!(after == total - at || stopped.is_err(), "{params} at {at}");
+            worst = worst.max(after);
+        }
+        eprintln!("{params}: at most {worst} reads after an interrupt, of {total}");
+        assert!(
+            worst <= 16,
+            "{params}: {worst} reads after an interrupt, of {total}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

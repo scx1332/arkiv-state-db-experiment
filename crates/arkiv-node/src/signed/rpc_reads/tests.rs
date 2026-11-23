@@ -14,6 +14,15 @@ fn query(host: &Host, params: &Json) -> Read<Json> {
     plan_query(host, params, bounds(host)).and_then(PageRead::run)
 }
 
+/// [`query`] reading engine pages of at most `max_page` rows.
+fn query_in_pages(host: &Host, params: &Json, max_page: usize) -> Read<Json> {
+    let bounds = QueryLimits {
+        max_page,
+        ..bounds(host)
+    };
+    plan_query(host, params, bounds).and_then(PageRead::run)
+}
+
 /// The SDK's `select`: every key sent as an explicit boolean.
 fn sdk_select(attributes: Json) -> Json {
     json!({
@@ -953,13 +962,16 @@ fn offset_skips_matches_in_creation_order() {
     let host = fixture();
     let every = keys(&query(&host, &json!(["*", {"limit": 10}])).unwrap());
     assert_eq!(every.len(), 4);
-    // The fixture's page size is two, so offsets of three or more skip
-    // over more than one engine page.
+    // In pages of two (the fixture's genesis page size), offsets of three
+    // or more skip over more than one engine page.
     for offset in 0..6u64 {
         for limit in 1..4usize {
             for spelling in [json!(offset), json!(format!("0x{offset:x}"))] {
-                let page =
-                    query(&host, &json!(["*", {"limit": limit, "offset": spelling}])).unwrap();
+                let params = json!(["*", {"limit": limit, "offset": spelling}]);
+                let page = query(&host, &params).unwrap();
+                let paged = query_in_pages(&host, &params, 2).unwrap();
+                assert_eq!(page["data"], paged["data"]);
+                assert_eq!(page.get("cursor").is_some(), paged.get("cursor").is_some());
                 let from = (offset as usize).min(4);
                 let to = (from + limit).min(4);
                 assert_eq!(keys(&page), every[from..to], "{offset} {limit}");
@@ -1397,6 +1409,206 @@ fn offset_sort_and_count_walks_are_charged_to_the_read_budget() {
             .map(|&(_, i)| every[i].clone())
             .collect::<Vec<_>>()
     );
+}
+
+/// The fixture with 40 more entities: `w` is `i % 7` and `v` is `i`, so a
+/// range on `v` is a run of one term per match.
+fn walk_fixture() -> Host {
+    let mut host = fixture();
+    let mut nonce = 0;
+    for i in 0..40u64 {
+        submit(
+            &mut host,
+            &mut nonce,
+            vec![create(
+                1000 + u128::from(i),
+                vec![
+                    ("w", arkiv_db::Cell::attribute(Value::U64(i % 7))),
+                    ("v", arkiv_db::Cell::attribute(Value::U64(i))),
+                ],
+            )],
+        );
+    }
+    host.produce().unwrap();
+    host
+}
+
+/// The least budget `params` is served under with engine pages of
+/// `max_page` rows; below it the read is refused as `limits`.
+fn least_budget(host: &Host, params: &Json, max_page: usize) -> u64 {
+    let bounds = QueryLimits {
+        max_page,
+        ..bounds(host)
+    };
+    let run = |budget| plan_query(host, params, bounds).and_then(|page| page.run_within(budget));
+    let (mut low, mut high) = (1, READ_BUDGET);
+    assert!(run(high).is_ok());
+    while low < high {
+        let mid = low + (high - low) / 2;
+        match run(mid) {
+            Ok(_) => high = mid,
+            Err(error) => {
+                assert_eq!(kind(Err(error)), QueryErrorKind::Limits);
+                low = mid + 1;
+            }
+        }
+    }
+    low
+}
+
+#[test]
+fn walk_pages_change_charges_not_answers() {
+    let host = walk_fixture();
+    let sources = [
+        "*",
+        "TYPEOF(w) = u64",
+        "v >= u64(3)",
+        "v >= u64(3) AND w = u64(2)",
+        "v >= u64(3) ORDER BY w:u64 DESC",
+        "TYPEOF(w) = u64 ORDER BY v:u64",
+        "v >= u64(3) AND w != u64(2) ORDER BY v:u64 DESC",
+    ];
+    for source in sources {
+        for (offset, limit) in [(0, 200), (0, 3), (5, 3), (13, 7), (36, 5), (60, 2)] {
+            let params = json!([source, {"limit": limit, "offset": offset, "select": {
+                "key": true, "attributes": true, "count": true,
+            }}]);
+            let wide = query(&host, &params).unwrap();
+            let narrow = query_in_pages(&host, &params, 2).unwrap();
+            assert_eq!(wide["data"], narrow["data"], "{source} {offset} {limit}");
+            assert_eq!(wide["count"], narrow["count"]);
+            assert_eq!(wide.get("cursor").is_some(), narrow.get("cursor").is_some());
+        }
+    }
+    // A range drives its group as a run, planned again for every engine
+    // page: sorting its 37 matches in pages of two plans it 19 times.
+    for source in [
+        "v >= u64(3) ORDER BY w:u64 DESC",
+        "v >= u64(3) AND w != u64(2) ORDER BY v:u64",
+    ] {
+        let params = json!([source, {"limit": 1}]);
+        let (wide, narrow) = (
+            least_budget(&host, &params, ReadLimits::WALK_PAGE),
+            least_budget(&host, &params, 2),
+        );
+        assert!(2 * wide < narrow, "{source}: {wide} {narrow}");
+    }
+    let params = json!(["v >= u64(3)", {"limit": 1, "offset": 30}]);
+    let (wide, narrow) = (
+        least_budget(&host, &params, ReadLimits::WALK_PAGE),
+        least_budget(&host, &params, 2),
+    );
+    assert!(2 * wide < narrow, "offset: {wide} {narrow}");
+}
+
+/// The page's walk alone, without the up-front check: what the read did
+/// under `budget` before the check existed.
+fn walk_alone(host: &Host, params: &Json, budget: u64) -> Read<()> {
+    let page = plan_query(host, params, bounds(host))?;
+    let window = Window {
+        snapshot: &page.snapshot,
+        query: &page.query,
+        limits: &page.limits,
+        bounds: page.bounds,
+        limit: page.limit,
+        offset: page.offset,
+    };
+    let mut budget = budget;
+    match &page.order {
+        None => read_page(&window, None, &mut budget).map(|_| ()),
+        Some(order) => sorted_page(&window, order, &mut budget).map(|_| ()),
+    }
+}
+
+/// Whether the up-front check refuses `params` under `budget`.
+fn refused_up_front(host: &Host, params: &Json, budget: u64) -> Option<QueryError> {
+    let page = plan_query(host, params, bounds(host)).unwrap();
+    unaffordable(
+        &page.snapshot,
+        &page.query,
+        page.order.as_ref(),
+        page.offset,
+        page.bounds,
+        budget,
+    )
+}
+
+#[test]
+fn walks_the_budget_cannot_finish_are_refused_before_they_start() {
+    let host = walk_fixture();
+    let pricing = host.genesis.genesis.pricing.clone();
+    let skip = least_per_match(&pricing, 0);
+    let sort = least_per_match(&pricing, KEY_BYTES);
+    // The GLM schedule: ResultRow 10, a posting entry 10, ReadByte 1.
+    assert_eq!((skip, sort), (20, 52));
+    let run = |params: &Json, budget: u64| {
+        plan_query(&host, params, bounds(&host)).and_then(|page| page.run_within(budget))
+    };
+    let message = |result: Read<Json>| match result {
+        Err(ReadError::Query(q)) => {
+            assert_eq!(q.kind, QueryErrorKind::Limits);
+            q.message
+        }
+        other => panic!("expected a limits error, got {other:?}"),
+    };
+    // An offset past 39 of the 40 matches, which the budget cannot pay
+    // for at 20 units each, is refused naming the walk, not by exhaustion.
+    let offset = json!(["TYPEOF(w) = u64", {"limit": 1, "offset": 39}]);
+    assert_eq!(
+        message(run(&offset, 39 * skip - 1)),
+        "offset 39 passes 39 matches; the read budget walks at most 38: continue from an \
+         earlier page's cursor (with its atBlock) or narrow the query"
+    );
+    // An offset past the end walks only the matches there are.
+    let past = json!(["TYPEOF(w) = u64", {"limit": 1, "offset": u64::MAX}]);
+    assert_eq!(
+        message(run(&past, 40 * skip - 1)),
+        format!(
+            "offset {} passes 40 matches; the read budget walks at most 39: continue from \
+             an earlier page's cursor (with its atBlock) or narrow the query",
+            u64::MAX
+        )
+    );
+    assert_eq!(
+        run(&past, READ_BUDGET).unwrap(),
+        json!({"data": [], "blockNumber": format!("0x{:x}", host.head.height)})
+    );
+    let sorted = json!(["TYPEOF(w) = u64 ORDER BY v:u64 DESC", {"limit": 1}]);
+    assert_eq!(
+        message(run(&sorted, 40 * sort - 1)),
+        "ORDER BY sorts all 40 matches; the read budget sorts at most 39: narrow the query, \
+         or drop ORDER BY and page with the cursor"
+    );
+    // Neither a page without an offset nor a count-only read is checked.
+    for params in [
+        json!(["TYPEOF(w) = u64", {"limit": 1}]),
+        json!(["TYPEOF(w) = u64 ORDER BY v:u64", {"offset": 39, "select": {"count": true}}]),
+    ] {
+        assert!(run(&params, 5_000).is_ok(), "{params}");
+    }
+    // Only reads the budget would have ended anyway are refused: wherever
+    // the check refuses, the walk alone runs out under the same budget.
+    let mut refusals = 0;
+    for params in [
+        offset,
+        past,
+        sorted,
+        json!(["v >= u64(3) AND w != u64(2) ORDER BY v:u64", {"limit": 2, "offset": 4}]),
+        json!(["*", {"limit": 2, "offset": 41}]),
+        json!(["v >= u64(3)", {"limit": 2, "offset": 30}]),
+    ] {
+        for budget in (1..4_000).step_by(37) {
+            if refused_up_front(&host, &params, budget).is_some() {
+                refusals += 1;
+                assert_eq!(
+                    kind(walk_alone(&host, &params, budget).map(|()| json!(null))),
+                    QueryErrorKind::Limits,
+                    "{params} {budget}"
+                );
+            }
+        }
+    }
+    assert!(refusals > 100, "{refusals}");
 }
 
 #[test]

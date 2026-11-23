@@ -727,8 +727,10 @@ fn closed_count(plan: &Plan<'_>, live: u64) -> Option<u64> {
 
 /// Positions a completely walked run at `from`, as `open_run` does: each
 /// posting's seek and first entry are stepped at once to prime the merge.
-/// On a storage failure the postings positioned so far are noted here, since
-/// no group will own them.
+/// Priming is not charged (the walk charged each term), so an interrupt is
+/// observed before each posting: a count's run is not capped and may hold
+/// millions. On a storage failure or an interrupt the postings positioned so
+/// far are noted here, since no group will own them.
 fn position_run<'a>(
     walked: Walked,
     loaders: &'a NamespaceLoaders<'a>,
@@ -738,8 +740,11 @@ fn position_run<'a>(
     let mut postings = Vec::with_capacity(walked.postings.len());
     let mut heads = BinaryHeap::new();
     for posting in walked.postings {
-        let entries = posting.range_from(&from, &loaders.postings);
-        if let Err(error) = prime(&mut heads, &mut postings, entries) {
+        let primed = meter.check_interrupt().map_err(Fault::from).and_then(|()| {
+            let entries = posting.range_from(&from, &loaders.postings);
+            prime(&mut heads, &mut postings, entries)
+        });
+        if let Err(error) = primed {
             Source::Run { heads, postings }.note_physical(meter);
             return Err(error);
         }

@@ -31,6 +31,16 @@
 //! the last of them ([`Snapshot::cursor_after`]); it costs the walk, metered
 //! against the read budget like any other read.
 //!
+//! Offset and sort walks read engine pages of up to
+//! [`ReadLimits::WALK_PAGE`] rows, so a group is planned once per such page
+//! rather than once per genesis page. A walk the read budget cannot finish is
+//! refused up front, before any of it runs (`unaffordable`): an offset past
+//! more matches, or a sort of more matches, than the budget pays for at the
+//! least a match can be charged. The match count comes from a small probe
+//! (posting sizes usually decide it); when the probe cannot, the walk runs
+//! under the budget as before. Only reads that the budget would have ended
+//! anyway are refused, and sooner.
+//!
 //! `ORDER BY name:type [ASC|DESC]` sorts by one attribute, read as one type
 //! whether or not it is indexed; an entity without it, or holding another
 //! type there, sorts below every value, and ties come in record-id order in
@@ -55,8 +65,8 @@ use super::{Error, ErrorCode, Result, host::Host, reads::ReadLimits};
 use crate::{arkiv, entity_json::scalar, text::hex};
 use alloy_primitives::keccak256;
 use arkiv_db::{
-    Budget, CellName, Cursor, Limits, Projection, Query, QueryLimits, QueryPage, RecordId,
-    RecordKey, Row, Snapshot, Term, TypeTag, Value,
+    Budget, CellName, Cursor, Limits, OperationClass, PriceSchedule, Projection, Query,
+    QueryLimits, QueryPage, RecordId, RecordKey, Row, Snapshot, Term, TypeTag, Value,
 };
 use error::{Read, cursor_mismatch, limits, unknown_block};
 use serde_json::{Value as Json, json};
@@ -78,6 +88,12 @@ const GROUP_CAP: usize = 64;
 const LITERAL_CAP: usize = 256;
 /// The most rows the scan fallback examines for one request.
 const SCAN_ROWS: usize = 4096;
+/// The budget of the count that decides whether a walk is affordable
+/// (`unaffordable`): enough for a count answered from posting sizes, far
+/// below the read budget.
+const COUNT_PROBE: u64 = 20_000;
+/// The bytes of an entity key, which a sort walk reads for every match.
+const KEY_BYTES: u64 = 32;
 /// The `select` keys, in response order. Matches the SDK's `RpcSelect`.
 const FIELDS: &[&str] = &[
     "key",
@@ -636,6 +652,12 @@ impl PageRead {
             binding,
             height,
         } = self;
+        if selection.rows
+            && let Some(refusal) =
+                unaffordable(&snapshot, &query, order.as_ref(), offset, bounds, budget)
+        {
+            return Err(refusal.into());
+        }
         let count = if !selection.count {
             None
         } else if scans(&query, bounds) {
@@ -692,6 +714,74 @@ impl PageRead {
             ));
         }
         page_result(data, next, binding, height, count)
+    }
+}
+
+/// The least units a walk charges for each match it passes: `ResultRow` 1
+/// with `bytes` of the projection, and the step of the source that found
+/// the match (a posting entry, a row visit or a repositioning).
+fn least_per_match(pricing: &PriceSchedule, bytes: u64) -> u64 {
+    let found = [
+        OperationClass::PostingEntry,
+        OperationClass::RowVisit,
+        OperationClass::RecordProbe,
+    ]
+    .map(|class| pricing.price(class))
+    .into_iter()
+    .min()
+    .unwrap_or(0);
+    pricing
+        .price(OperationClass::ResultRow)
+        .saturating_add(bytes.saturating_mul(pricing.price(OperationClass::ReadByte)))
+        .saturating_add(found)
+        .max(1)
+}
+
+/// Why a page's walk cannot finish within `budget`, decided before it
+/// starts: an `offset` skips `min(offset, matches)` matches reading ids,
+/// and an `ORDER BY` reads the key and sort cell of every match, each at
+/// least [`least_per_match`]. `None` when the walk may fit, when there is no
+/// walk, or when a [`COUNT_PROBE`] count cannot size the match set (the
+/// walk then runs under the budget as before). The scan fallback has its own
+/// row bound and is never refused here.
+fn unaffordable(
+    snapshot: &Snapshot,
+    query: &Query,
+    order: Option<&Order>,
+    offset: u64,
+    bounds: QueryLimits,
+    budget: u64,
+) -> Option<QueryError> {
+    if scans(query, bounds) {
+        return None;
+    }
+    let pricing = snapshot.pricing();
+    let per_match = least_per_match(pricing, if order.is_some() { KEY_BYTES } else { 0 });
+    let most = budget / per_match;
+    // Without a sort only the skipped matches are walked: an offset the
+    // budget covers needs no count.
+    if order.is_none() && offset <= most {
+        return None;
+    }
+    let mut probe = COUNT_PROBE;
+    let matches = count_matches(snapshot, query, bounds, &mut probe).ok()?;
+    match order {
+        None => {
+            let skipped = offset.min(matches);
+            (skipped > most).then(|| {
+                limits(&format!(
+                    "offset {offset} passes {skipped} matches; the read budget walks at most \
+                     {most}: continue from an earlier page's cursor (with its atBlock) or \
+                     narrow the query"
+                ))
+            })
+        }
+        Some(_) => (matches > most).then(|| {
+            limits(&format!(
+                "ORDER BY sorts all {matches} matches; the read budget sorts at most {most}: \
+                 narrow the query, or drop ORDER BY and page with the cursor"
+            ))
+        }),
     }
 }
 
@@ -779,18 +869,18 @@ fn native_query(query: &Query, bounds: QueryLimits) -> Query {
     }
 }
 
-/// A record-id page: combine native pages within the read's group and
-/// literal `bounds` (the chain's committed limits unless the node raised
-/// them). Larger Boolean trees use a bounded scan fallback of at most
-/// [`SCAN_ROWS`] rows; other queries take the engine's indexed path. Without
-/// a cursor, the first `offset` matches are skipped: by id alone on the
-/// indexed path, then the page reads on after the last of them. An offset at
-/// or past the end gives an empty page without a continuation.
+/// A record-id page: combine native pages within the read's group, literal
+/// and page `bounds` (the chain's committed group and literal limits unless
+/// the node raised them). Larger Boolean trees use a bounded scan fallback of
+/// at most [`SCAN_ROWS`] rows; other queries take the engine's indexed path.
+/// Without a cursor, the first `offset` matches are skipped: by id alone on
+/// the indexed path, then the page reads on after the last of them. An
+/// offset at or past the end gives an empty page without a continuation.
 fn read_page(window: &Window<'_>, mut cursor: Option<Cursor>, budget: &mut u64) -> Read<QueryPage> {
     let &Window {
         snapshot,
         query,
-        limits,
+        limits: _,
         bounds,
         limit,
         offset,
@@ -803,7 +893,7 @@ fn read_page(window: &Window<'_>, mut cursor: Option<Cursor>, budget: &mut u64) 
         while skip > 0 {
             let size = usize::try_from(skip)
                 .unwrap_or(usize::MAX)
-                .min(limits.max_page);
+                .min(bounds.max_page);
             let Some(page) = native_page(
                 snapshot,
                 &native,
@@ -837,7 +927,7 @@ fn read_page(window: &Window<'_>, mut cursor: Option<Cursor>, budget: &mut u64) 
         let page_size = if scan {
             1
         } else {
-            (limit - rows.len()).min(limits.max_page)
+            (limit - rows.len()).min(bounds.max_page)
         };
         if page_size == 0 {
             return Err(exhausted());
@@ -996,6 +1086,12 @@ fn sorted_page(window: &Window<'_>, order: &Order, budget: &mut u64) -> Read<Vec
     } else {
         Projection::named(true, [order.name.clone()])
     };
+    // The scan fallback keeps its genesis pages: it stops past SCAN_ROWS.
+    let page_size = if scan {
+        limits.max_page
+    } else {
+        bounds.max_page
+    };
     let start = usize::try_from(offset).unwrap_or(usize::MAX);
     let keep = start.saturating_add(limit);
     let mut kept: BinaryHeap<Ranked<'_>> = BinaryHeap::new();
@@ -1006,7 +1102,7 @@ fn sorted_page(window: &Window<'_>, order: &Order, budget: &mut u64) -> Read<Vec
             snapshot,
             &native,
             &projection,
-            limits.max_page,
+            page_size,
             cursor.as_ref(),
             bounds,
             budget,

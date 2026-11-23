@@ -265,13 +265,14 @@ pub(super) struct QueryRequest<'r> {
 }
 
 /// The limits a query or count read is admitted against: the instance's,
-/// with `max_groups` and `max_literals` replaced by the budget's read-side
-/// bounds when it carries them ([`Budget::with_query_limits`]).
+/// with `max_groups`, `max_literals` and `max_page` replaced by the budget's
+/// read-side bounds when it carries them ([`Budget::with_query_limits`]).
 fn query_admission(limits: &Limits, budget: Budget) -> Limits {
     match budget.query_limits() {
         Some(bounds) => Limits {
             max_groups: bounds.max_groups,
             max_literals: bounds.max_literals,
+            max_page: bounds.max_page,
             ..*limits
         },
         None => *limits,

@@ -251,7 +251,11 @@ posting sizes, with the same results as the written evaluation. Their group
 and literal bounds are the genesis limits unless `--read-max-groups` (1–64)
 or `--read-max-literals` (1–256) raise them for these reads; consensus never
 sees either option, since block execution (the expiry sweep included) only
-runs unplanned single-literal reads under the genesis limits.
+runs unplanned single-literal reads under the genesis limits. Their offset
+and sort walks read engine pages of 16,384 rows (a local read's own page
+bound), so a group is planned once per such page, and a walk the read budget
+cannot finish is refused before it starts when stored posting sizes show it
+(see the [API reference](node-api-reference.md)).
 
 A pinned snapshot is consistent while blocks are produced: it fixes one
 published state header, every trie node below it is a committed,

@@ -21,7 +21,8 @@ costs, and follow-ups. Nothing here blocks the SDK smoke.
 - **Fetch-and-sort cost.** Every sorted page reads the key and sort cell of
   every match (a named projection) and keeps the first `offset + limit` in a
   heap, so its cost grows with the match set, not the page; it is bounded only
-  by the 25-million-unit read budget (`-32004` past it). For an indexed sort
+  by the 25-million-unit read budget (`-32004` past it, at once when posting
+  sizes show more than 480,769 matches). For an indexed sort
   attribute held by every match (system attributes always are), an index walk
   over the term map in value order would read only the terms up to the window;
   golemdb's `docs/sort-implementation-plan.md` (phase 2, `IndexWalk`) has the
@@ -38,10 +39,19 @@ costs, and follow-ups. Nothing here blocks the SDK smoke.
 
 ## Offset and count
 
-- **Offset is a walk.** An offset reads the skipped matches' ids, one engine
-  page (`max_page`, at most 64 on signed chains) at a time, all charged to the
-  read budget. Skipping by posting sizes or an order-statistics trie would make
-  deep offsets cheap; nothing does that yet.
+- **Offset is a walk.** An offset reads the skipped matches' ids, in engine
+  pages of 16,384 (not the genesis `max_page`), all charged to the read
+  budget; one the budget cannot pay for is refused before the walk when
+  posting sizes show it. Skipping by posting sizes or an order-statistics trie
+  would make deep offsets cheap; nothing does that yet.
+- **The read budget and the deadline measure different things.** The budget
+  counts logical units; the 30-second deadline is wall time. On the
+  16.8-million-entity Sourcify store a walk of the row map (a match-all or a
+  negated query) costs about 67 µs a row, so the budget allows about 80 s of
+  such a walk and the deadline ends it first (`ReadDeadlineExceeded`, the
+  permit returned at the next charge). Refusing these earlier would mean a
+  budget calibrated to time or a fixed offset cap, which could refuse reads
+  that succeed today; operators can lower `--read-deadline-secs` instead.
 - **A shortened unsorted page and SDK offsets.** An unsorted page whose
   entities pass the 8 MiB cap is shortened and continues by cursor. The SDK
   ignores cursors and computes the next offset as `n * size`, so it would skip

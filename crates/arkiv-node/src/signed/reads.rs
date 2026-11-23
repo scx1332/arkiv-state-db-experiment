@@ -91,6 +91,12 @@ impl ReadLimits {
     /// groups and 256 literals in all.
     pub const MAX_GROUPS: usize = 64;
     pub const MAX_LITERALS: usize = 256;
+    /// Most rows of one engine page of an SDK read. An offset or `ORDER BY`
+    /// walk reads its matches in pages this large instead of the genesis
+    /// `max_page` (64), so a group's plan (a range's terms, in particular)
+    /// is made once per 16,384 matches, not once per 64. Rows, order,
+    /// cursors and counts are unchanged; only fewer units are charged.
+    pub const WALK_PAGE: usize = 16_384;
 
     pub fn validate(&self) -> Result<()> {
         if !(1..=Self::MAX_CONCURRENCY).contains(&self.concurrency)
@@ -108,11 +114,13 @@ impl ReadLimits {
     }
 
     /// The query bounds an SDK read is admitted against: `genesis` with
-    /// `max_groups` and `max_literals` replaced where these limits set them.
+    /// `max_groups` and `max_literals` replaced where these limits set them,
+    /// and pages of up to [`Self::WALK_PAGE`] rows.
     pub fn query_limits(&self, genesis: &arkiv_db::Limits) -> arkiv_db::QueryLimits {
         arkiv_db::QueryLimits {
             max_groups: self.max_groups.unwrap_or(genesis.max_groups),
             max_literals: self.max_literals.unwrap_or(genesis.max_literals),
+            max_page: genesis.max_page.max(Self::WALK_PAGE),
         }
     }
 }

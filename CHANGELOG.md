@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+### Expensive reads fail fast instead of running into the read deadline
+
+- On the 16.8-million-entity Sourcify node, `arkiv_query` with `"*"` and
+  `offset` 10,000,000, and `arkiv.schema = str('sourcify.v4.contract') ORDER
+  BY matchid:u64 DESC` (9.26 million matches), each held a read slot for the
+  whole 30 s deadline and answered `ReadDeadlineExceeded`. `matchid >
+  u64(59505252) AND arkiv.schema = str('sourcify.v4.contract') ORDER BY
+  matchid:u64 DESC` (8.4 thousand matches) took 26.8 s.
+- Causes: the 25-million-unit read budget allows far more than 30 s of work
+  on a store that size, so the deadline ended these reads, not the budget.
+  And offset and sort walks read engine pages of the genesis `max_page`
+  (64), planning every group again for each page: the range above was walked
+  and its 8.4 thousand postings positioned 133 times.
+- **New refusal, `-32004` (`limits`):** an offset or `ORDER BY` walk the read
+  budget cannot finish is refused before it starts, when a 20,000-unit count
+  probe sizes the match set (stored posting sizes usually do). An offset that
+  passes more than 1,250,000 matches (at least 20 units each on the GLM
+  schedule) or a sort of more than 480,769 matches (52 units each) is
+  refused. The message gives the numbers and suggests a cursor or a narrower
+  query. Only reads that exhausted the budget or hit the deadline before are
+  refused; an offset past the end of a small match set is still an empty page.
+- Offset and sort walks, and the pages of a request, read engine pages of up
+  to 16,384 rows (`ReadLimits::WALK_PAGE`, through the new read-side page
+  bound `arkiv_db::QueryLimits::max_page`), so a group is planned once per
+  16,384 matches. Rows, order, cursors and counts are unchanged; fewer units
+  are charged. The 8.4-thousand-match sort plans its run once instead of 133
+  times.
+- A planned page that projects ids only (an offset's skip) no longer loads
+  each row; its charges are unchanged.
+- The deadline now also stops a planned count while it positions a range's
+  postings, which no charge covers: before, a count over a run of millions of
+  terms could keep its read slot for a minute or more after the deadline.
+  Every phase of a walk now stops within a few object reads of its interrupt
+  (tested at every third read of four walks).
+- Not changed: a read the budget can finish runs as before. A walk of the row
+  map (a match-all or negated query) costs about 67 µs a row on the Sourcify
+  store, more than the budget assumes, so `"*"` with an offset between about
+  450,000 and 1,250,000 still ends at the deadline
+  (`docs/sdk-1.0-compatibility-todo.md`).
+
 ## 0.1.0-alpha.5 — 2026-11-22
 
 Alpha pre-release.

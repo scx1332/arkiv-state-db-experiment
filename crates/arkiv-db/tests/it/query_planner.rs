@@ -27,8 +27,11 @@
 //!   posting, a disjoint union of values, `NotEq`, `NOT Exists` and a prefix
 //!   run are answered from stored sizes, at the hand-derived charges below.
 //! - A planned read still stops at its budget with `OutOfBudget`.
-//! - Read-side query limits admit groups and literals beyond the instance
-//!   limits, for planned and written reads, and nothing else.
+//! - A planned id-only page (an offset walk) returns and charges exactly what
+//!   a page that loads each row to project none of its cells does.
+//! - Read-side query limits admit groups, literals and page sizes beyond the
+//!   instance limits, for planned and written reads, and a wider page is the
+//!   concatenation of the narrower ones.
 //!
 //! FIXTURE weights used by the hand-derived charges: DirectoryLookup 1,
 //! QueryGroup 5, TermSeek 4, TermVisit 3, PostingEntry 1, RowVisit 1,
@@ -429,6 +432,40 @@ fn projections_and_rows_are_byte_identical() {
     }
 }
 
+#[test]
+fn planned_id_only_pages_charge_what_row_loading_pages_do() {
+    let Fixture { engine, ns, .. } = fixture();
+    let snapshot = engine.head_snapshot();
+    // No key and no cells either way; only the id-only projection lets a
+    // planned page skip loading the rows.
+    let loading = Projection::named(false, []);
+    for query in random_queries(150).iter().chain([&Query::match_all()]) {
+        let mut cursors: [Option<Cursor>; 2] = [None, None];
+        loop {
+            let [ids, loaded] = [&Projection::ID_ONLY, &loading].map(|projection| {
+                let slot = usize::from(*projection != Projection::ID_ONLY);
+                snapshot
+                    .query(
+                        ns,
+                        query,
+                        projection,
+                        37,
+                        cursors[slot].as_ref(),
+                        PLANNED.traced(),
+                    )
+                    .unwrap()
+            });
+            assert_eq!(ids.value.rows, loaded.value.rows, "{query:?}");
+            assert_eq!(ids.receipt, loaded.receipt, "{query:?}: charges");
+            let (Some(next), Some(other)) = (ids.value.next, loaded.value.next) else {
+                break;
+            };
+            assert_eq!(next.after(), other.after());
+            cursors = [Some(next), Some(other)];
+        }
+    }
+}
+
 fn spent(snapshot: &Snapshot, ns: NamespaceId, query: &Query, limit: usize, budget: Budget) -> u64 {
     snapshot
         .query(ns, query, &Projection::ID_ONLY, limit, None, budget)
@@ -711,6 +748,7 @@ fn read_side_query_limits_admit_wider_queries() {
     let bounds = QueryLimits {
         max_groups: 16,
         max_literals: 16,
+        max_page: 200,
     };
     for budget in [WRITTEN, PLANNED] {
         assert_eq!(
@@ -734,7 +772,7 @@ fn read_side_query_limits_admit_wider_queries() {
             let pages = cycled_walk(&snapshot, ns, query, &[200], &[widened]);
             assert_eq!(flat(&pages), expected);
         }
-        // Only the group and literal bounds change.
+        // The page bound is the read's own, here the instance's 200.
         assert_eq!(
             snapshot
                 .query(ns, &wide, &Projection::ID_ONLY, 201, None, widened)
@@ -742,9 +780,27 @@ fn read_side_query_limits_admit_wider_queries() {
                 .reason,
             Rejection::InvalidQuery(QueryFault::LimitTooLarge)
         );
+        // A wider page bound admits longer pages, which join the narrower
+        // ones: the same rows in the same order, and the same end.
+        let long = budget.with_query_limits(QueryLimits {
+            max_groups: 8,
+            max_literals: 8,
+            max_page: 4_096,
+        });
+        for query in [
+            Query::match_all(),
+            Query::all(vec![eq("kind", s("contract"))]),
+        ] {
+            let narrow = cycled_walk(&snapshot, ns, &query, &[200], &[budget]);
+            let wide = cycled_walk(&snapshot, ns, &query, &[1_000, 4_096], &[long]);
+            assert_eq!(flat(&wide), flat(&narrow), "{query:?}");
+            assert_eq!(flat(&wide), matches(&model, &query));
+            assert!(wide.len() < narrow.len());
+        }
         let narrowed = budget.with_query_limits(QueryLimits {
             max_groups: 1,
             max_literals: 1,
+            max_page: 200,
         });
         assert_eq!(
             snapshot

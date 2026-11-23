@@ -312,14 +312,19 @@ pub struct Budget {
     query_limits: Option<QueryLimits>,
 }
 
-/// Read-side admission bounds of a query or count: the most AND-groups and
-/// the most literals in one group. See [`Budget::with_query_limits`].
+/// Read-side admission bounds of a query or count: the most AND-groups, the
+/// most literals in one group and the most rows of one page. See
+/// [`Budget::with_query_limits`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueryLimits {
     /// Most AND-groups in a query.
     pub max_groups: usize,
     /// Most literals in one AND-group.
     pub max_literals: usize,
+    /// Most rows one query page returns. A local read that walks many
+    /// matches (an offset, a sort) reads them in a few large pages instead
+    /// of planning every group again for each page of the instance's size.
+    pub max_page: usize,
 }
 
 impl Budget {
@@ -373,8 +378,8 @@ impl Budget {
     }
 
     /// Admits a query or count read against `limits` instead of the
-    /// instance's `max_groups` and `max_literals`. Every other admission
-    /// rule (page size, values, projection) is unchanged, and no other
+    /// instance's `max_groups`, `max_literals` and `max_page`. Every other
+    /// admission rule (values, projection) is unchanged, and no other
     /// operation reads the bounds. Only for local reads, whose admission no
     /// consensus rule depends on; block execution must never opt in.
     pub const fn with_query_limits(mut self, limits: QueryLimits) -> Self {
@@ -621,13 +626,11 @@ impl<'s> Meter<'s> {
         Ok(())
     }
 
-    /// Charges several classes atomically: all of them or none of them.
-    pub(crate) fn charge_group(
-        &mut self,
-        items: &[(OperationClass, u64)],
-    ) -> Result<(), Rejection> {
-        // An abandoned read stops before the work this group covers; the
-        // host discards its receipt (see `crate::interrupt`).
+    /// Stops an abandoned read as its next charge would: before the work
+    /// that follows, with the host discarding its receipt (see
+    /// `crate::interrupt`). For uncharged work between two charges that can
+    /// run long; charges nothing.
+    pub(crate) fn check_interrupt(&self) -> Result<(), Rejection> {
         if self
             .interrupt
             .as_ref()
@@ -635,6 +638,16 @@ impl<'s> Meter<'s> {
         {
             return Err(Rejection::OutOfBudget);
         }
+        Ok(())
+    }
+
+    /// Charges several classes atomically: all of them or none of them.
+    pub(crate) fn charge_group(
+        &mut self,
+        items: &[(OperationClass, u64)],
+    ) -> Result<(), Rejection> {
+        // An abandoned read stops before the work this group covers.
+        self.check_interrupt()?;
         let mut total = Cost::ZERO;
         let mut subtotals = [Cost::ZERO; OperationClass::ALL.len()];
         for &(class, count) in items {

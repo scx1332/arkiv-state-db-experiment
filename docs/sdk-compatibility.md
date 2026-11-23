@@ -126,18 +126,21 @@ without a cursor. `ORDER BY` pages are offset windows only: they carry no
 cursor and refuse one (`-32005`), so pin `atBlock` to page a sorted result
 consistently.
 
-An offset is a walk: the node reads the skipped matches' ids (one engine page
-at a time) and then reads on after the last of them, all charged to the
+An offset is a walk: the node reads the skipped matches' ids (engine pages of
+16,384) and then reads on after the last of them, all charged to the
 request's read budget; `select.count` is the planned count (stored posting
 sizes where they decide it), charged to the same budget. A deep offset is
-refused as `-32004` (`limits`) rather than scanned for free. A query beyond
+refused as `-32004` (`limits`) rather than scanned for free, and at once,
+before the walk, when posting sizes show that it passes more matches than
+the budget pays for (1,250,000 at 20 units a match). A query beyond
 the group and literal bounds (an untyped `EXISTS(x)` is nine groups) takes
 the scan fallback for its page, its offset and its `select.count` alike;
 `arkiv_getEntityCount` still refuses it. `ORDER BY` is upstream's
 fetch-and-sort: every page reads the key and sort cell of every match, keeps
 the first `offset + limit` in order and reads only that window's rows, so its
 cost grows with the match set, not the page, and a match set too large to
-sort within the budget is refused as `limits`.
+sort within the budget is refused as `limits`: at once when posting sizes
+show more than 480,769 matches (52 units a match).
 
 Upstream orders matches, and `ORDER BY` ties, by creating transaction, then
 by entity key among the entities one transaction creates; this node orders

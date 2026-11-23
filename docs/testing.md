@@ -170,6 +170,11 @@ CI; each takes the binary path as an option.
   the [demo run guide](full-light-demo-run.md)).
 - `scripts/test-sourcify-v4-prefill.py`: the prefill converter against an
   independent reader of its output.
+- `scripts/upgrade-smoke.py` (`OLD_BIN`, `NEW_BIN`): a drop-in upgrade. The
+  new binary opens the old one's run directory in place and continues its
+  chain, old and new followers and light clients accept each other's blocks,
+  and the old binary reopens what the new one wrote. Run it against the
+  previous release before tagging one that claims compatibility.
 
 ## Not covered
 

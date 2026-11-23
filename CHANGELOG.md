@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.7 — 2026-11-23
+
+Alpha pre-release. **A drop-in upgrade of 0.1.0-alpha.6** (and of
+0.1.0-alpha.5): consensus, blocks, headers, transactions, signatures,
+genesis, state roots and the `node.redb` and `history.redb` layouts are
+unchanged, and an alpha.7 node opens an alpha.6 run directory in place
+with no rebuild or migration. `scripts/upgrade-smoke.py` passed
+0.1.0-alpha.6 -> 0.1.0-alpha.7, followers and light clients both ways and
+rollback included. **One intended behaviour change:** an `arkiv_query`
+`offset` above 100,000 is refused (below).
+
 ### A node-local offset limit: `--read-max-offset` (default 100,000)
 
 - Live testing of 0.1.0-alpha.6 on the Sourcify mirror: an offset walk
@@ -23,6 +34,13 @@
   budget's cut-off that used to succeed slowly (about 6 to 30 s on the
   mirror) are now refused. Clients page deeper with the cursor, or the
   operator raises or disables the limit.
+
+### Upgrading
+
+- Replace the binary or image (`ghcr.io/scx1332/arkiv-node:0.1.0-alpha.7`)
+  and restart. Without new flags the node refuses offsets above 100,000;
+  add `--read-max-offset N` to choose another limit, or
+  `--read-max-offset 0` to keep alpha.6's behaviour.
 
 ## 0.1.0-alpha.6 — 2026-11-23
 

@@ -45,7 +45,30 @@ the peer and needed nothing else. `Host::open` accepts the copy because a
 producer's files hold nothing that is specific to the producer: the key is
 not stored, and the follower passes the same `--source-id`.
 
-Not tested: a chain with a prefill, and Kenobi's file.
+### Kenobi, 2026-11-24
+
+The same procedure by hand on Kenobi, with 0.1.0-alpha.8 on both sides.
+The producer was stopped at height 71,494. `node.redb` (106 GiB),
+`history.redb` (0.9 GiB), `genesis.bin` and `certificate.bin` were copied to
+another host with `rsync`, and the producer was restarted on alpha.8 about
+four hours later. A `full` node was then started on the copy with the pins,
+no token and no `--replication-peer`, syncing from the producer's public
+HTTPS URL with a path prefix (`https://host/rpc`).
+
+| Step | Time |
+| --- | ---: |
+| Prefill audit (`prefill.bin`, 42 GiB, already on the host) | 395 s |
+| Open of `node.redb` and `history.redb` (release build) | under 1 s |
+| Catch-up of the 229 blocks produced meanwhile | under 33 s |
+
+The follower then stayed at the producer's head with the same header hash
+and state root. The producer keeps every body (`archive`), so the pin was
+not needed. The prefill audit is the whole start time; plan item 1 removes
+it.
+
+A debug build opens the 106 GiB file in about 30 minutes: redb 4.3.0 walks
+every allocated page in `Database::new` under `debug_assertions`. Use a
+release build on files of this size.
 
 ## What the pruning allows
 
@@ -189,7 +212,9 @@ snapshot and exits, instead of polling forever.
 6. A smoke test: the 2026-11-24 experiment, with `--body-retention window`
    on the producer and a pinned snapshot follower, more than 256 blocks
    between the snapshot and the install.
-7. Run it on a copy of Kenobi and record sizes and times.
+7. Run it on a copy of Kenobi and record sizes and times. Done by hand on
+   2026-11-24 ([above](#kenobi-2026-11-24)); to repeat with the snapshot
+   commands and a `window` producer.
 
 Later, in no fixed order:
 

@@ -505,6 +505,23 @@ fn verify_split(
 }
 
 impl DurableEngine {
+    /// Reads and checks every object this engine's head state reaches, with
+    /// the walk [`adopt_staged_simulator`](Self::adopt_staged_simulator)
+    /// verifies a staged store with: content hash, object caps, trie
+    /// structure, entry counts, namespace association, row admission and
+    /// host value bounds. `threads` workers share the reads; nothing is
+    /// written. For state files that were not written by this node (a
+    /// snapshot from another host). States before the head are not read.
+    pub fn verify_head_state(&self, threads: usize) -> Result<(), DurableError> {
+        verify_staged(
+            self.context.store.as_ref(),
+            &self.manifest.state,
+            &self.genesis,
+            &self.options,
+            threads,
+        )
+    }
+
     /// Adopt this engine-only staged store in place as a simulator database
     /// at height zero, instead of copying it into a new store.
     ///

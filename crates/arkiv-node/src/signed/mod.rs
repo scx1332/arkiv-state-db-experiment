@@ -12,6 +12,7 @@ pub mod pool;
 pub mod protocol;
 pub mod reads;
 pub mod runtime;
+pub mod snapshot;
 
 pub mod rpc;
 pub mod rpc_reads;

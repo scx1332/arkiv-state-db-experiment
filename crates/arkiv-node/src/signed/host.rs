@@ -192,6 +192,9 @@ pub struct Host {
     /// Bodies expire from `history.redb` with the node's records (see
     /// [`Self::prune_bodies`]); otherwise they are kept for followers.
     prune_bodies: bool,
+    /// The snapshot pin ([`Self::set_body_pin`]): bodies from this height on
+    /// never expire.
+    body_pin: Option<u64>,
     /// Wall clock in Unix milliseconds for the timestamps this host stamps
     /// ([`SignedGenesis::next_timestamp`]); replaceable in tests.
     clock: fn() -> u64,
@@ -391,6 +394,7 @@ impl Host {
             certificates: Default::default(),
             blocks: Default::default(),
             prune_bodies: false,
+            body_pin: None,
             clock: system_clock_ms,
         })
     }
@@ -419,6 +423,22 @@ impl Host {
         self.prune_bodies
     }
 
+    /// Pins the bodies from `height` on: with a pin, bodies expire only
+    /// below it, however far the record floor has moved. A node that made a
+    /// snapshot at `height` can then feed the nodes installed from it
+    /// (see [`super::snapshot`]). A pin does not bring back a body that was
+    /// already deleted, and changes nothing while bodies are kept
+    /// ([`Self::prune_bodies`] off). `None` removes the pin; the bodies
+    /// below the record floor then expire with the following blocks.
+    pub fn set_body_pin(&mut self, height: Option<u64>) {
+        self.body_pin = height;
+    }
+
+    /// The snapshot pin, if any ([`Self::set_body_pin`]).
+    pub fn body_pin(&self) -> Option<u64> {
+        self.body_pin
+    }
+
     /// The lowest height (above zero) whose node records (feed, block,
     /// inclusions) are kept; zero when none expired.
     pub fn record_floor(&self) -> u64 {
@@ -435,7 +455,8 @@ impl Host {
         self.history.pruned()
     }
 
-    /// Deletes bodies below the record floor, when bodies expire.
+    /// Deletes bodies below the record floor, when bodies expire, and never
+    /// at or above the snapshot pin.
     fn expire_bodies(&mut self) -> Result<()> {
         if !self.prune_bodies {
             return Ok(());
@@ -443,6 +464,9 @@ impl Host {
         // The certificate just below the floor stays: a reader that is
         // exactly at the floor checks its parent hash against it.
         let floor = self.engine.record_floor().floor.saturating_sub(1);
+        // The pinned block itself stays too: a node installed from the
+        // snapshot names it as its head when it asks for the next one.
+        let floor = self.body_pin.map_or(floor, |pin| floor.min(pin));
         self.history.prune_below(floor, BODY_DELETE_BUDGET)?;
         Ok(())
     }

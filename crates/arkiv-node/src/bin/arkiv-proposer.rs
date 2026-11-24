@@ -773,6 +773,162 @@ fn state_command() -> Result<()> {
     Ok(())
 }
 
+/// `--allow-http-peers true|false`: the peer URL policy of this process.
+fn allow_http_peers(args: &Flags) -> Result<()> {
+    runtime::allow_http_peers(match args.get("--allow-http-peers").map(String::as_str) {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(_) => return Err(ErrorCode::InvalidRequest.into()),
+    });
+    Ok(())
+}
+
+const SNAPSHOT_USAGE: &str = "\
+snapshot create --run-dir RUN --out DIR [--no-pin | --keep-pin] (node stopped)
+snapshot install --from DIR --run-dir RUN --genesis-hash 0xHEX --proposer 0xADDRESS \
+--chain-id N --source-id UUID --run-id HEX32 [--peer URL] [--allow-http-peers true|false] \
+[--move] [--verify-state]
+snapshot pin --run-dir RUN --height H | snapshot unpin --run-dir RUN";
+
+/// `snapshot create|install|pin|unpin`: database snapshots of a stopped
+/// full node and the pin that keeps their bodies
+/// (`arkiv_node::signed::snapshot`). The switches take no value.
+async fn snapshot_command() -> Result<()> {
+    use arkiv_node::signed::snapshot::{self, InstallMode, PinMode, Pins, Snapshot};
+    const SWITCHES: &[&str] = &["--no-pin", "--keep-pin", "--move", "--verify-state"];
+    let usage = || {
+        eprintln!("{SNAPSHOT_USAGE}");
+        CliError::from(ErrorCode::InvalidRequest)
+    };
+    let mut args = std::env::args().skip(2);
+    let sub = args.next().unwrap_or_default();
+    let mut flags = BTreeMap::new();
+    while let Some(key) = args.next() {
+        let value = if SWITCHES.contains(&key.as_str()) {
+            String::new()
+        } else {
+            args.next().ok_or_else(usage)?
+        };
+        if !key.starts_with("--") || flags.insert(key, value).is_some() {
+            return Err(usage());
+        }
+    }
+    let allowed: &[&str] = match sub.as_str() {
+        "create" => &["--run-dir", "--out", "--no-pin", "--keep-pin"],
+        "install" => &[
+            "--from",
+            "--run-dir",
+            "--genesis-hash",
+            "--proposer",
+            "--chain-id",
+            "--source-id",
+            "--run-id",
+            "--peer",
+            "--allow-http-peers",
+            "--move",
+            "--verify-state",
+        ],
+        "pin" => &["--run-dir", "--height"],
+        "unpin" => &["--run-dir"],
+        _ => return Err(usage()),
+    };
+    let flags = Flags(flags).only(&[allowed]).map_err(|_| usage())?;
+    let required = |key: &str| flags.required(key).map_err(|_| usage());
+    let run_dir = PathBuf::from(required("--run-dir")?);
+    let height = |pin: Option<u64>| pin.map(|height| height.to_string());
+    match sub.as_str() {
+        "create" => {
+            let pin = match (
+                flags.contains_key("--no-pin"),
+                flags.contains_key("--keep-pin"),
+            ) {
+                (false, false) => PinMode::Set,
+                (false, true) => PinMode::KeepLower,
+                (true, false) => PinMode::Leave,
+                (true, true) => return Err(usage()),
+            };
+            let out = PathBuf::from(required("--out")?);
+            let created = snapshot::create(&run_dir, &out, pin)?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "snapshot": created.manifest,
+                    "out": out,
+                    "pin": height(created.pin),
+                    "seconds": created.seconds,
+                })
+            );
+        }
+        "pin" => {
+            let pinned = number(required("--height")?)?;
+            let checked = snapshot::pin(&run_dir, pinned)?;
+            // A running node (not checked) reads the pin at its next start.
+            println!(
+                "{}",
+                serde_json::json!({"pin": pinned.to_string(), "checked": checked,
+                    "applies": "at the next start of the node"})
+            );
+        }
+        "unpin" => {
+            let removed = snapshot::remove_pin(&run_dir)?;
+            println!(
+                "{}",
+                serde_json::json!({"pin": null, "removed": removed,
+                    "applies": "at the next start of the node"})
+            );
+        }
+        _ => {
+            allow_http_peers(&flags)?;
+            let source_id = required("--source-id")?;
+            parse_uuid(source_id)?;
+            let pins = Pins {
+                genesis_hash: hash(required("--genesis-hash")?)?,
+                proposer: unhex(required("--proposer")?, 20)?
+                    .try_into()
+                    .map_err(|_| ErrorCode::InvalidRequest)?,
+                chain_id: number(required("--chain-id")?)?,
+                run_id: required("--run-id")?.into(),
+                source_id: source_id.into(),
+            };
+            let from = PathBuf::from(required("--from")?);
+            // Pins first: nothing large is read for a snapshot of another
+            // chain, or one its peer cannot continue.
+            let loaded = Snapshot::load(&from, &pins)?;
+            let peer = match flags.get("--peer") {
+                Some(peer) => {
+                    let client = reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .timeout(Duration::from_secs(5))
+                        .build()
+                        .map_err(|_| ErrorCode::StorageUnavailable)?;
+                    Some(snapshot::check_peer(&client, peer, &loaded.manifest).await?)
+                }
+                None => None,
+            };
+            let mode = if flags.contains_key("--move") {
+                InstallMode::Move
+            } else {
+                InstallMode::Copy
+            };
+            let installed = loaded.install(&run_dir, mode, flags.contains_key("--verify-state"))?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "installed": run_dir,
+                    "head": installed.head.json(),
+                    "identity": loaded.manifest.identity(),
+                    "mode": if mode == InstallMode::Move { "move" } else { "copy" },
+                    "peer": peer.map(|peer| peer.json()),
+                    "verifiedState": installed.verified_state,
+                    "rebuiltGc": installed.rebuilt_gc,
+                    "seconds": installed.seconds,
+                })
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Writes the indexes that record expiry needs into files written before
 /// it (`arkiv_node::signed::migrate`), once, before the node opens them.
 fn migrate_records_if_needed(state: &RedbStore, history: &RedbStore) -> Result<()> {
@@ -878,6 +1034,9 @@ async fn run() -> Result<()> {
     }
     if std::env::args().nth(1).as_deref() == Some("state") {
         return state_command();
+    }
+    if std::env::args().nth(1).as_deref() == Some("snapshot") {
+        return snapshot_command().await;
     }
     let (command, args) = arguments()?;
     match command.as_str() {
@@ -985,6 +1144,13 @@ fn help() {
         "--run-dir DIR ",
         "(node stopped)\n",
         "arkiv-proposer state migrate --run-dir DIR --state-retention N (node stopped)\n",
+        "arkiv-proposer snapshot create --run-dir DIR --out SNAPSHOT [--no-pin | --keep-pin] ",
+        "(node stopped)\n",
+        "arkiv-proposer snapshot install --from SNAPSHOT --run-dir DIR --genesis-hash 0xHEX ",
+        "--proposer 0xADDRESS --chain-id N --source-id UUID --run-id HEX32 [--peer URL] ",
+        "[--allow-http-peers true|false (false)] [--move] [--verify-state]\n",
+        "arkiv-proposer snapshot pin --run-dir DIR --height H\n",
+        "arkiv-proposer snapshot unpin --run-dir DIR\n",
         "Optional private Prometheus exporter: --metrics-listen 127.0.0.1:9600 ",
         "[--metrics-table-stats-secs N] (minimum 10; opt-in table walk, which keeps redb from ",
         "reusing freed pages while it runs). Metrics use rogue_one_ prefix.\n",
@@ -1024,7 +1190,8 @@ fn help() {
         "certificate in history.redb, so followers and light clients can still start ",
         "from genesis and transactions by block number and index (and block ",
         "transaction counts) are served at every height; window deletes them with the records, which bounds history.redb ",
-        "but leaves new followers without a source (no snapshot sync yet). Files from ",
+        "but leaves followers that start from genesis without a source: new full nodes ",
+        "are then installed from a snapshot. Files from ",
         "before record expiry are indexed once at start (or with `state ",
         "migrate-records`). ",
         "Entity queries and counts, proofs and the state tree explorer run outside the ",
@@ -1041,6 +1208,26 @@ fn help() {
         "--read-max-literals (1-256) raise the genesis query bounds for these reads only ",
         "(default: the genesis values); larger queries still use the bounded scan ",
         "fallback (queries) or are refused (counts).",
+    ));
+    println!(concat!(
+        "Snapshots (docs/snapshots.md): snapshot create copies node.redb and history.redb of ",
+        "a stopped full node into the new directory SNAPSHOT with genesis.bin, ",
+        "certificate.bin and snapshot.json (chain, head, size and SHA-256 of each file; ",
+        "written last), and pins the node: RUN/snapshot-pin holds the snapshot height, and ",
+        "a node started with it keeps every block body from that height on, whatever ",
+        "--body-retention says (status: bodyPin). --keep-pin leaves an existing lower pin, ",
+        "--no-pin leaves the pin alone; snapshot pin and unpin set and remove it; a ",
+        "changed pin applies at the next start. snapshot install checks snapshot.json and ",
+        "the genesis against the pins, with --peer asks that node whether it can continue ",
+        "the snapshot (it must still hold the snapshot's block and the bodies after it), ",
+        "copies the files into the empty run directory checking each SHA-256 (--move: ",
+        "checks, then renames them) and opens the result as full does. --verify-state ",
+        "also reads every object of the head state and rebuilds the garbage-collection ",
+        "counts, for a snapshot from an untrusted source. A full node whose database has ",
+        "a head and whose run directory has no prefill.bin neither downloads nor audits ",
+        "the prefill and serves none. A full node whose peer answers HistoryPruned for ",
+        "the block after its head logs sync_gap and exits with status 3: it must be ",
+        "reinstalled from a newer snapshot.",
     ));
     println!(concat!(
         "producer --genesis-install copy|adopt: how a fresh producer installs a streaming ",
@@ -1250,11 +1437,7 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
     }
     // Peers are https, or http to loopback, unless the operator allows
     // plain http to any host (a private network, or TLS ended elsewhere).
-    runtime::allow_http_peers(match args.get("--allow-http-peers").map(String::as_str) {
-        None | Some("false") => false,
-        Some("true") => true,
-        Some(_) => return Err(ErrorCode::InvalidRequest.into()),
-    });
+    allow_http_peers(args)?;
     let peer = args.get("--peer").cloned();
     let replication = args.get("--replication-peer").cloned();
     let bundle = args
@@ -1422,6 +1605,9 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
             match result {
                 Ok(produced) => cadence.complete(tokio::time::Instant::now(), produced),
                 Err(e) => {
+                    if let Some(gap) = timer.sync_gap() {
+                        exit_on_gap(&gap);
+                    }
                     if e.code != ErrorCode::ServerBusy {
                         eprintln!("signed node: {}", e.diagnostic());
                     }
@@ -1449,6 +1635,36 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
     Ok(axum::serve(listener, runtime::public_router(rt))
         .await
         .map_err(unavailable(Path::new(&listen)))?)
+}
+
+/// The exit status of a full follower whose peer no longer has the block
+/// after its head: distinct from a failed start (1), so that a supervisor
+/// can leave the node down instead of restarting it into the same refusal.
+const GAP_EXIT_STATUS: i32 = 3;
+
+/// Stops a full follower that cannot catch up. Its peer deleted the bodies
+/// after its head and never gets them back, so polling on would only hide
+/// that the node is stuck. Nothing is in flight: the poll that found the
+/// gap has returned, and every imported block is already durable.
+fn exit_on_gap(gap: &runtime::SyncGap) -> ! {
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "event": "sync_gap",
+            "error": "HistoryPruned",
+            "head": gap.head.to_string(),
+            "peer": gap.peer,
+            "message": format!(
+                "peer {} no longer has block {}: this node (head {}) cannot catch up by \
+                 retrying and must be reinstalled from a newer snapshot (arkiv-proposer \
+                 snapshot install)",
+                gap.peer,
+                gap.head.saturating_add(1),
+                gap.head
+            ),
+        })
+    );
+    std::process::exit(GAP_EXIT_STATUS);
 }
 
 /// Exits on SIGTERM or SIGINT (`docker stop`, Kubernetes, Ctrl-C) once no
@@ -1542,6 +1758,8 @@ fn producer_node(env: &NodeEnv<'_>, adopt: bool) -> Result<Node> {
         launch_producer(env, state, history_store, signer, adopt)?
     };
     arkiv_node::retention::collect_new_state(&mut host.engine, path)?;
+    // The snapshot pin is read here only: a change needs a restart.
+    host.set_body_pin(arkiv_node::signed::snapshot::read_pin(path)?);
     host.prune_bodies(env.prune_bodies)?;
     match args.get_or("--start", "paused").as_str() {
         "paused" => {}
@@ -1766,7 +1984,25 @@ async fn follower_node(env: &NodeEnv<'_>, light: bool) -> Result<Node> {
         if replication.is_some() && token.as_ref().is_none_or(|s| s.len() < 32) {
             return Err(ErrorCode::InvalidRequest.into());
         }
-        let prefill = if genesis.prefill.is_some() {
+        // A node that already has a head never reads the prefill: it was
+        // built from it, or installed from a snapshot. Without the file it
+        // neither downloads nor audits it, and serves none (`prefill` and
+        // `prefill/chunk` answer PrefillBundleRequired). With the file, or
+        // with a bundle, it audits and serves it as before.
+        let skip_prefill = genesis.prefill.is_some()
+            && bundle.is_none()
+            && !path.join("prefill.bin").exists()
+            && has_head(&path.join("node.redb"))?;
+        if skip_prefill {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "prefill_skipped",
+                    "reason": "the node database has a head and the run directory no prefill.bin",
+                })
+            );
+        }
+        let prefill = if genesis.prefill.is_some() && !skip_prefill {
             if bundle.is_none() && !path.join("prefill.bin").exists() {
                 if streaming(&genesis) {
                     download_prefill(&client, peer, path, &genesis).await?;
@@ -1820,11 +2056,25 @@ async fn follower_node(env: &NodeEnv<'_>, light: bool) -> Result<Node> {
             return Err(ErrorCode::IdentityMismatch.into());
         }
         arkiv_node::retention::collect_new_state(&mut host.engine, path)?;
+        // The snapshot pin is read here only: a change needs a restart.
+        host.set_body_pin(arkiv_node::signed::snapshot::read_pin(path)?);
         host.prune_bodies(env.prune_bodies)?;
         host.paused = false;
         host.health = Health::Following;
         Ok(Node::Full(Box::new(host)))
     }
+}
+
+/// Whether the node database at `path` exists and has a head. A file that
+/// exists and does not open (locked by a running node, damaged) is an
+/// error here, before anything is downloaded for it.
+fn has_head(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    Ok(RedbStore::open(path, RedbConfig::default())?
+        .head()?
+        .is_some())
 }
 
 /// Fixed deadlines keep block execution/persistence time out of the cadence.

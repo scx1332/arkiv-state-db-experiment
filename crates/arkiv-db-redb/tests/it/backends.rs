@@ -8,11 +8,13 @@
 //!   refusal comes from the forwarded locks.
 //! - Its counters see the commit's syncs and writes, and they survive
 //!   `recover()` (one probe per store).
+//! - `read_only_head` reads a closed store's head and leaves the file's bytes
+//!   as they are, which opening a store does not; an open store locks it out.
 
 use std::{io, ops::Bound};
 
 use crate::common::{BenchDir, block, commit};
-use arkiv_db_redb::{CountingBackend, RedbConfig, RedbStore};
+use arkiv_db_redb::{CountingBackend, RedbConfig, RedbStore, read_only_head};
 use arkiv_db_storage::versioned::{SpaceId, StorageErrorKind, VersionedStore};
 use redb::{StorageBackend, backends::FileBackend};
 
@@ -117,4 +119,38 @@ fn counters_see_commits_and_survive_recovery() {
     store.recover().unwrap();
     let recovered = store.stats().backend.unwrap();
     assert!(recovered.reads >= after.reads && recovered.syncs >= after.syncs);
+}
+
+#[test]
+fn a_read_only_head_read_leaves_the_closed_file_as_it_is() {
+    let dir = BenchDir::new("read-only-head");
+    let path = dir.file("store.redb");
+    let batch = block(None, 0, 1, &[(SpaceId::Host, 1, 32)]);
+    let store = RedbStore::create(&path, RedbConfig::default()).unwrap();
+    assert_eq!(
+        read_only_head(&path).unwrap_err().kind,
+        StorageErrorKind::Locked
+    );
+    drop(store);
+    assert_eq!(read_only_head(&path).unwrap(), None);
+
+    let store = RedbStore::open(&path, RedbConfig::default()).unwrap();
+    commit(&store, &batch);
+    drop(store);
+    let closed = std::fs::read(&path).unwrap();
+    for _ in 0..2 {
+        assert_eq!(read_only_head(&path).unwrap(), Some(batch.new_head));
+        assert_eq!(std::fs::read(&path).unwrap(), closed);
+    }
+    // Opening the store and closing it again rewrites part of the file: a
+    // copy that must keep its hash is checked read-only.
+    drop(RedbStore::open(&path, RedbConfig::default()).unwrap());
+    assert_ne!(std::fs::read(&path).unwrap(), closed);
+    assert_eq!(read_only_head(&path).unwrap(), Some(batch.new_head));
+
+    // A file that is no store.
+    let other = dir.file("other.redb");
+    std::fs::write(&other, b"not a database").unwrap();
+    assert!(read_only_head(&other).is_err());
+    assert!(read_only_head(dir.file("absent.redb")).is_err());
 }

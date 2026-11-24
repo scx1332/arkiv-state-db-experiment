@@ -1244,6 +1244,35 @@ fn check_meta(format: Option<&[u8]>, id: Option<&[u8]>) -> Result<(DatabaseId, b
     Ok((DatabaseId(id), format == Some(GC_STORE_FORMAT)))
 }
 
+/// The head of the store in the file at `path`, read through a read-only
+/// open of the file, which never writes to it (opening a [`RedbStore`]
+/// does: redb marks the file open and rewrites its header when it closes).
+/// For checking a copy whose bytes must stay as they are.
+///
+/// `Locked` while a store has the file open; an error for a file that was
+/// not closed cleanly, which only a writable open can repair, and for a
+/// file without this store's metadata.
+pub fn read_only_head(path: impl AsRef<Path>) -> Result<Option<Head>, StorageError> {
+    let read = || -> Result<Option<Head>, Fault> {
+        let mut builder = Builder::new();
+        builder.set_cache_size(DEFAULT_CACHE_SIZE);
+        let db = builder.open_read_only(path.as_ref())?;
+        let txn = db.begin_read()?;
+        let meta = txn.open_table(META)?;
+        let format = meta.get(FORMAT_KEY)?;
+        let id = meta.get(DATABASE_ID_KEY)?;
+        check_meta(
+            format.as_ref().map(|value| value.value()),
+            id.as_ref().map(|value| value.value()),
+        )?;
+        Ok(match meta.get(HEAD_KEY)? {
+            Some(value) => Some(Head::decode(value.value())?),
+            None => None,
+        })
+    };
+    Ok(read()?)
+}
+
 impl ObjectReader for RedbStore {
     fn read_object_bounded(
         &self,

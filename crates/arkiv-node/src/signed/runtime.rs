@@ -120,9 +120,24 @@ pub struct Runtime {
     pub(super) reads: Reads,
     pub(super) rpc: Mutex<super::rpc::RpcState>,
     continuations: Mutex<VecDeque<(String, EqRequest, VerifiedContinuation)>>,
+    /// Set once a peer refused this full follower's next block as pruned
+    /// ([`Self::sync_gap`]).
+    gap: Mutex<Option<SyncGap>>,
 }
 
 pub type Shared = Arc<Runtime>;
+
+/// Why a full follower cannot catch up from its peer: the peer answered
+/// `HistoryPruned` for the block after the follower's head. Bodies are
+/// deleted from the bottom and never come back, so no retry can succeed;
+/// the node has to be installed again from a newer snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SyncGap {
+    /// The follower's head when it was refused.
+    pub head: u64,
+    /// The peer that refused.
+    pub peer: String,
+}
 
 impl Runtime {
     pub fn new(
@@ -170,7 +185,29 @@ impl Runtime {
             reads,
             rpc: Mutex::new(rpc),
             continuations: Mutex::new(VecDeque::new()),
+            gap: Mutex::new(None),
         }))
+    }
+
+    /// The gap [`sync_once`] found between this full follower's head and
+    /// what its peer still has, if it found one.
+    pub fn sync_gap(&self) -> Option<SyncGap> {
+        self.gap.lock().ok()?.clone()
+    }
+
+    /// Records the gap behind `error` when a fetch of the block after
+    /// `head` (or of its header) was refused as pruned by `peer`. Only the
+    /// sync path calls this, and only for those fetches: a pruned answer to
+    /// any other read is not a gap.
+    fn note_gap(&self, error: &Error, head: u64, peer: &str) {
+        if error.code == ErrorCode::HistoryPruned
+            && let Ok(mut gap) = self.gap.lock()
+        {
+            gap.get_or_insert_with(|| SyncGap {
+                head,
+                peer: peer.into(),
+            });
+        }
     }
 
     pub fn read_limits(&self) -> ReadLimits {
@@ -594,6 +631,8 @@ pub fn status(node: &Node) -> Json {
         Node::Full(h) => {
             let mut fields = crate::retention::status(&h.engine);
             fields["bodyFloor"] = json!(h.history_pruned().map(|p| p.height.to_string()).ok());
+            // The snapshot pin: bodies from this height on never expire.
+            fields["bodyPin"] = json!(h.body_pin().map(|pin| pin.to_string()));
             fields
         }
         Node::Light { .. } => {
@@ -605,6 +644,7 @@ pub fn status(node: &Node) -> Json {
                 "recordFloor": null,
                 "stateGc": null,
                 "bodyFloor": null,
+                "bodyPin": null,
             })
         }
     };
@@ -1459,6 +1499,11 @@ async fn fetch_once<T: serde::de::DeserializeOwned>(
 
 /// One follower poll. Its lock sections are writes ([`Runtime::write_node`]):
 /// reads never starve a follower's sync.
+///
+/// A full follower whose peer answers `HistoryPruned` for the block after
+/// its head (or for the header of it) cannot recover by polling again: the
+/// error is returned as any other, and [`Runtime::sync_gap`] then names the
+/// head and the peer, so that the caller can stop.
 pub async fn sync_once(rt: Shared) -> Result<()> {
     let (head, identity, genesis, is_light) = writing(&rt, |node| {
         Ok((
@@ -1473,7 +1518,7 @@ pub async fn sync_once(rt: Shared) -> Result<()> {
     if !is_light && rt.replication_peer.is_none() {
         return sync_blocks(&rt, peer, &head, &identity, &genesis).await;
     }
-    let response: Headers = fetch(
+    let response: Result<Headers> = fetch(
         &rt.client,
         peer,
         &format!(
@@ -1486,7 +1531,12 @@ pub async fn sync_once(rt: Shared) -> Result<()> {
         None,
         REQUEST_CAP,
     )
-    .await?;
+    .await;
+    if let (Err(error), false) = (&response, is_light) {
+        // The peer no longer has this node's head or the header after it.
+        rt.note_gap(error, head.height, peer);
+    }
+    let response = response?;
     if response.identity != identity
         || response.certificates.len() > if is_light { HEADER_BATCH } else { 1 }
     {
@@ -1525,11 +1575,13 @@ pub async fn sync_once(rt: Shared) -> Result<()> {
     })
     .await?;
     for certificate in headers {
-        let reply: Json = fetch(
+        let source = rt
+            .replication_peer
+            .as_deref()
+            .ok_or(ErrorCode::InvalidRequest)?;
+        let reply: Result<Json> = fetch(
             &rt.client,
-            rt.replication_peer
-                .as_deref()
-                .ok_or(ErrorCode::InvalidRequest)?,
+            source,
             &format!(
                 "/signed/v1/replication/blocks/{}",
                 certificate.header.height
@@ -1538,7 +1590,14 @@ pub async fn sync_once(rt: Shared) -> Result<()> {
             rt.token.as_deref(),
             RESPONSE_CAP,
         )
-        .await?;
+        .await;
+        if let Err(error) = &reply
+            && certificate.header.height == head.height.saturating_add(1)
+        {
+            // The body of this node's next block expired on the peer.
+            rt.note_gap(error, head.height, source);
+        }
+        let reply = reply?;
         let block: SignedBlock = unpack(
             reply["blockBytes"]
                 .as_str()
@@ -1571,7 +1630,7 @@ async fn sync_blocks(
     identity: &Identity,
     genesis: &SignedGenesis,
 ) -> Result<()> {
-    let response: Blocks = fetch(
+    let response: Result<Blocks> = fetch(
         &rt.client,
         peer,
         &format!(
@@ -1583,7 +1642,12 @@ async fn sync_blocks(
         None,
         RESPONSE_CAP,
     )
-    .await?;
+    .await;
+    if let Err(error) = &response {
+        // The peer no longer has this node's head or the block after it.
+        rt.note_gap(error, head.height, peer);
+    }
+    let response = response?;
     if &response.identity != identity || response.blocks.len() > BLOCK_BATCH {
         return Err(ErrorCode::IdentityMismatch.into());
     }

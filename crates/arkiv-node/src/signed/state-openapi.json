@@ -443,7 +443,7 @@
         ],
         "operationId": "prefillBundle",
         "summary": "Download prefill bundle",
-        "description": "Roles: producer, full. Available only when this node has a prefill stream; otherwise PrefillBundleRequired.",
+        "description": "Roles: producer, full. Available only when this node has a prefill stream; otherwise PrefillBundleRequired. A full node that started with a head and without prefill.bin (installed from a snapshot) has none: it serves no prefill here or in chunks.",
         "x-node-roles": [
           "producer",
           "full"
@@ -4509,7 +4509,18 @@
                 "type": "null"
               }
             ],
-            "description": "Block bodies of heights 1 up to (excluding) this one are deleted from history.redb (bodyRetention=window); 0 when none. null on a light node."
+            "description": "Block bodies of heights 1 up to (excluding) this one are deleted from history.redb (bodyRetention=window); 0 when none. It never passes bodyPin. null on a light node."
+          },
+          "bodyPin": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DecimalString"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Snapshot pin (the height in RUN/snapshot-pin, read when the node starts): block bodies from this height on are kept whatever bodyRetention says, so that nodes installed from a snapshot at this height can sync from this node. Headers and blocks of the pinned heights stay served by GET headers and GET blocks below recordFloor. null without a pin and on a light node."
           },
           "stateRetention": {
             "type": [

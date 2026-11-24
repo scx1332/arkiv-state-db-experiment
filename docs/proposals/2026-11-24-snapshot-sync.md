@@ -1,12 +1,15 @@
 # Proposal: start full nodes from a database snapshot
 
 Status: proposed 2026-11-24. The transport (plan items 4 and 5) was
-implemented on 2026-11-24; the snapshot commands, the pin and the prefill
-skip (items 1 to 3) are not. Decided so far: the snapshot is a copy of the
-node's database files, genesis and prefill are not part of syncing, the
-node that made a snapshot pins the block bodies since it, and the transport
-is plain HTTP (TLS is a proxy's job). The remaining choices are listed
-under [Open decisions](#open-decisions).
+implemented on 2026-11-24, and the snapshot commands, the pin, the prefill
+skip and the smoke test (items 1, 2, 3 and 6) on 2026-11-25; the
+[plan](#plan) says what was built, and [docs/snapshots.md](../snapshots.md)
+is the operator guide. Open: the run on a copy of Kenobi with the commands
+(item 7). Decided: the snapshot is a copy of the node's database files,
+genesis and prefill are not part of syncing, the node that made a snapshot
+pins the block bodies since it, and the transport is plain HTTP (TLS is a
+proxy's job). The remaining choices are listed under
+[Open decisions](#open-decisions).
 
 This is the snapshot bootstrap that
 [state history pruning](../pruning-design.md#phases) (phase 3) and the
@@ -98,9 +101,10 @@ A snapshot of height `N` is a directory:
 
 Version 1 makes it from a stopped node:
 `arkiv-proposer snapshot create --run-dir RUN --out DIR`. Opening takes the
-file locks, so it is refused while a node runs on `RUN`. It copies the two
-database files, checks the copy opens with the head it read, and writes
-`snapshot.json` last.
+file locks, so it is refused while a node runs on `RUN`. It reads the head,
+closes the files (a redb file is consistent on disk only while closed),
+copies them under a lock, checks through a read-only open that each copy
+has the storage head it read, and writes `snapshot.json` last.
 
 The snapshot is made on a follower kept for that purpose, so the chain does
 not stop. The files are published as static files over HTTP with range
@@ -144,8 +148,10 @@ pins as `full` (`--genesis-hash`, `--proposer`, `--chain-id`, `--run-id`,
 1. Check `snapshot.json` against the pins and each file against its
    SHA-256.
 2. Ask the peer for its status and refuse a snapshot it cannot continue:
-   `N + 1` must not be below the peer's `bodyFloor`.
-3. Move the files into `RUN` and open them as `full` does.
+   `N` must not be below the peer's `bodyFloor` (the peer needs block `N`
+   itself to check the new node's head, and every body after it).
+3. Copy the files into `RUN` (`--move`: rename them) and open them as
+   `full` does.
 
 Trust stays with the pins. `Host::open` already checks that the stored
 genesis is the pinned one, that the head record carries a certificate
@@ -164,14 +170,16 @@ counts (`gc::enable`).
 
 ### Follower start
 
-A `full` node whose `node.redb` already has a head skips the prefill: it
-neither downloads nor audits `prefill.bin`. Today it does both before it
-looks at the database, so on Kenobi a snapshot follower would fetch 42 GiB
-it never reads. Such a node does not serve `/signed/v1/prefill/chunk`.
+A `full` node whose `node.redb` already has a head and whose run directory
+has no `prefill.bin` skips the prefill: it neither downloads nor audits it.
+Before this it did both before it looked at the database, so on Kenobi a
+snapshot follower would fetch 42 GiB it never reads. Such a node does not
+serve `/signed/v1/prefill/chunk`. A node that has `prefill.bin` audits and
+serves it as before.
 
 A follower that is refused `HistoryPruned` for its next block cannot
 recover by retrying. It logs once that it must be reinstalled from a
-snapshot and exits, instead of polling forever.
+snapshot and exits (status 3), instead of polling forever.
 
 ### Transport
 
@@ -192,10 +200,59 @@ snapshot and exits, instead of polling forever.
 ## Plan
 
 1. Skip the prefill when the database has a head; exit on a `HistoryPruned`
-   next block.
-2. `snapshot create`, the pin, `bodyPin` in status.
+   next block. **Implemented 2026-11-25.**
+   - A `full` node skips the prefill when `node.redb` has a head *and*
+     `RUN/prefill.bin` is absent (and no `--bundle` is given): no download,
+     no audit, and `GET prefill` and `prefill/chunk` answer
+     `PrefillBundleRequired`. With `prefill.bin` present it audits and
+     serves it as before, so existing nodes do not change. The producer is
+     unchanged.
+   - A full follower that is refused `HistoryPruned` for the block after
+     its head logs one `sync_gap` line (head, peer, "must be reinstalled
+     from a newer snapshot") and exits with status 3. Both sync paths
+     report it: `GET blocks`, and `GET headers` with the private body
+     fetch. Only those fetches count; a pruned answer to any other read
+     does not stop the node, and a light node keeps polling.
+2. `snapshot create`, the pin, `bodyPin` in status. **Implemented
+   2026-11-25.**
+   - `snapshot create --run-dir RUN --out DIR [--no-pin | --keep-pin]`
+     takes no identity flags: the chain is read from the database, as a
+     producer does on restart.
+   - A redb file changes whenever it is opened and closed, and is only
+     consistent on disk while it is closed. `create` therefore opens the
+     databases as a node does (a running node's locks refuse this), reads
+     the head and closes them; locks both files against a starting node
+     with a shared record lock, which excludes redb's exclusive ones;
+     copies them with the SHA-256 computed in the same pass; and checks
+     each copy through a read-only open, which leaves the hashed bytes
+     alone, against the storage heads it read. `snapshot.json` has format
+     version 1 and the field `bodyFloor` for the lowest body height.
+   - The pin is `RUN/snapshot-pin`, read at start by producer and full
+     nodes. `Host::expire_bodies` deletes below `min(record floor - 1,
+     pin)`: the pinned block itself is kept, because a node installed from
+     the snapshot names it as its head. `create` sets the pin to the
+     snapshot height; `--keep-pin` leaves a lower one; `snapshot pin` and
+     `snapshot unpin` change it. A pin that keeps more is written before
+     `snapshot.json`, one that lets older bodies go after it.
+   - No new read path was needed: a test syncs a follower 296 blocks
+     behind from a pinned node over `GET blocks` and over `GET headers`
+     with the private body fetch.
 3. `snapshot install` with the SHA-256, pin and body-floor checks, and
-   `--verify-state`.
+   `--verify-state`. **Implemented 2026-11-25.**
+   - The files are copied into the run directory by default, hashed in the
+     same pass; `--move` checks the hashes and renames. A failed install
+     empties the run directory. It also writes `trust.json`, so the node
+     needs its peer for blocks only.
+   - The peer check is stricter than `N + 1 >= bodyFloor`: the peer needs
+     the snapshot's own block to check the follower's head hash, so the
+     rule is `N >= bodyFloor`. A peer that has reached `N` is also asked for
+     the header after it, which refuses a different block at `N`.
+   - `--verify-state` runs the adoption walk on the head state
+     (`DurableEngine::verify_head_state`) and, on a state file that
+     collects garbage, rebuilds the counts with `gc::enable`. It does not
+     cover the states before the head, the feed and inclusion records of
+     the record window, or the bodies; `docs/snapshots.md` lists what binds
+     each.
 4. `--allow-http-peers` and the path prefix. **Implemented 2026-11-24.**
    A peer is `https://host[:port][/prefix]`, or `http://` to loopback;
    `--allow-http-peers true` on `full` and `light` accepts `http://` to any
@@ -211,7 +268,10 @@ snapshot and exits, instead of polling forever.
    peers, one block per poll as before.
 6. A smoke test: the 2026-11-24 experiment, with `--body-retention window`
    on the producer and a pinned snapshot follower, more than 256 blocks
-   between the snapshot and the install.
+   between the snapshot and the install. **Implemented 2026-11-25** as
+   `scripts/snapshot-smoke.py` (run by hand, like `upgrade-smoke.py`). The
+   same procedure on a chain with a streaming prefill is a test of the
+   binary (`crates/arkiv-node/tests/snapshot_cli.rs`).
 7. Run it on a copy of Kenobi and record sizes and times. Done by hand on
    2026-11-24 ([above](#kenobi-2026-11-24)); to repeat with the snapshot
    commands and a `window` producer.

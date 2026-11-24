@@ -177,8 +177,10 @@ Engine:
 Node:
 
 - [Signed proposer](docs/signed-proposer-v1.md),
-  [API reference](docs/node-api-reference.md) and
-  [metrics](docs/metrics.md).
+  [API reference](docs/node-api-reference.md),
+  [metrics](docs/metrics.md) and
+  [snapshots](docs/snapshots.md): starting a full node from a copy of
+  another one's database.
 - [Entity profile](docs/arkiv-v2-compatibility.md),
   [entity expiration](docs/entity-expiration.md),
   [GLM gas](docs/glm-gas-v1.md) and [GLM accounts](docs/glm-accounts-v1.md).

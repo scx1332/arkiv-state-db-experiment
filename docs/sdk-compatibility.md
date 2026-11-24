@@ -231,7 +231,8 @@ history at startup. It does not replace the
 retained canonical data. Bodies are never pruned, so the index covers every
 block; with `--state-retention` logs and receipts below `receiptFloor` are
 refused with JSON-RPC error -32006 (see the [pruning design](pruning-design.md)).
-There is no snapshot bootstrap.
+A full node can start from a database snapshot of another one instead of
+from genesis ([snapshots](snapshots.md)).
 
 ## Validation
 

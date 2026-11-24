@@ -151,6 +151,7 @@ backends.
 | Entities, accounts, gas | The Arkiv entity host across producer, full and light roles; native accounts; rent and gas numbers; externally signed Ethereum transaction fixtures | `arkiv_profile.rs`, `accounts.rs`, `gas_execution.rs`, `ethereum_transactions.rs` |
 | Genesis | Genesis invariants and the expiry reservation; bundle authoring, prefill, streaming build, and prebuilt state, through the library and the `arkiv-proposer` binary; in-place adoption through the binary only | `genesis.rs`, `genesis_prefill.rs`, `genesis_adopt.rs`, `prebuilt_genesis_cli.rs` |
 | Signed proposer | Signature and preimage checks with independent keys; pool nonce ordering and capacity; execution, independent replay and publication faults; retained bodies and light headers; submission, body replication and light proof verification over real sockets; detached reads bounded in concurrency and time; the state-retention floor on every state consumer | `signed_protocol.rs`, `signed_pool.rs`, `signed_host.rs`, `signed_http.rs`, `signed_reads.rs`, `signed_retention.rs` |
+| Snapshots | The body pin holds bodies past the record window and a follower far behind syncs from them over both sync paths; the gap a pruned peer leaves is reported for the follower's next block only; `snapshot create` copies closed files whose hashes it records, and `install` refuses other pins, a changed byte, an occupied run directory and a peer that cannot continue; through the binary on a chain with a streaming prefill: a node installed from a snapshot starts without the prefill, catches up from the pinned follower, and one pointed at a pruned peer exits with status 3 | `signed_snapshot.rs`, `snapshot_cli.rs` |
 | Simulator | The durable simulator model, restart and uncertainty handling; redb write and sync cuts leaving a complete parent or candidate packet; HTTP controls, caps and replay over real sockets | `simulator.rs`, `simulator_crash.rs`, `simulator_http.rs` |
 | Demo | Authentication and wire rules of the bounded producer/full/light demo | `demo_auth.rs` |
 
@@ -175,6 +176,13 @@ CI; each takes the binary path as an option.
   chain, old and new followers and light clients accept each other's blocks,
   and the old binary reopens what the new one wrote. Run it against the
   previous release before tagging one that claims compatibility.
+- `scripts/snapshot-smoke.py` (`BIN`): [snapshot sync](snapshots.md) end to
+  end. A producer and a follower with `--body-retention window`; the
+  follower is stopped, snapshotted, pinned and restarted; more than 256
+  blocks later a node installed from the snapshot with `--peer` and
+  `--verify-state` catches up from the follower to the producer's head and
+  answers the same query, an install against the producer is refused, and a
+  node pointed at the producer exits with the reinstall message.
 
 ## Not covered
 

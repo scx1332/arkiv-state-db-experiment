@@ -294,6 +294,7 @@ commit transaction, with deletion deferred by death height.**
    receipt retention with their own floors (advance the floor durably in
    `node.redb` first, then sweep `history.redb`; rebuild the hash index from
    the body floor); snapshot export and bootstrap so new nodes need no
-   archive peer (proposed in
+   archive peer (done for a stopped node's files: [snapshots](snapshots.md);
+   the online export is proposed in
    [snapshot sync](proposals/2026-11-24-snapshot-sync.md)); moving the
    minimum window into genesis.

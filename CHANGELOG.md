@@ -2,8 +2,10 @@
 
 ## Unreleased
 
-Metrics only: consensus, blocks and the `node.redb` and `history.redb`
-layouts are unchanged ([docs/metrics.md](docs/metrics.md)).
+Consensus, blocks and the `node.redb` and `history.redb` layouts are
+unchanged by both changes below: metrics
+([docs/metrics.md](docs/metrics.md)) and snapshots
+([docs/snapshots.md](docs/snapshots.md)).
 
 ### Database metrics: finer latency buckets, garbage collection time, store and cache counters
 
@@ -44,6 +46,53 @@ layouts are unchanged ([docs/metrics.md](docs/metrics.md)).
   (20.6x, 152x for the small blocks alone). 277,486 cache misses, each one
   store read, 266,184 evictions. No measurable change of store read or
   commit time against the previous build under the same load.
+
+### Snapshots: a full node starts from a copy of the database
+
+Steps 1, 2, 3 and 6 of the
+[snapshot sync proposal](docs/proposals/2026-11-24-snapshot-sync.md);
+operator guide: [docs/snapshots.md](docs/snapshots.md). Nothing stored and
+nothing in block validity changed: `node.redb` and `history.redb` keep
+their layout, the pin is a side file, and `scripts/upgrade-smoke.py` passed
+0.1.0-alpha.8 -> this code.
+
+- `arkiv-proposer snapshot create --run-dir RUN --out DIR [--no-pin |
+  --keep-pin]` copies `node.redb` and `history.redb` of a stopped full node,
+  computing each SHA-256 in the same pass, with `genesis.bin`,
+  `certificate.bin` and `snapshot.json` (format version, chain ID, run ID,
+  source ID, genesis hash, proposer, height, header hash, state root,
+  `bodyFloor`, node version, creation time, size and SHA-256 of each file),
+  which is written last. A running node and a non-empty `--out` are
+  refused. The copy is checked through a read-only open, which leaves its
+  bytes as hashed.
+- `arkiv-proposer snapshot install --from DIR --run-dir RUN` with the pins
+  of `full` (`--genesis-hash`, `--proposer`, `--chain-id`, `--source-id`,
+  `--run-id`) checks `snapshot.json` and the genesis against the pins before
+  it reads a large file, copies the databases into the empty run directory
+  while checking each SHA-256 (`--move`: checks, then renames), and opens
+  the result as `full` does. `--peer URL` first asks that node whether it
+  can continue the snapshot and refuses if not. `--verify-state` also reads
+  every object of the head state, with the walk genesis adoption uses, and
+  rebuilds the garbage-collection counts, for a snapshot from an untrusted
+  source.
+- The snapshot pin: `RUN/snapshot-pin` holds a height, and a producer or
+  full node started with it keeps every block body from that height on,
+  whatever `--body-retention` says, so that it can feed the nodes installed
+  from its snapshot. `snapshot create` sets it; `snapshot pin --run-dir RUN
+  --height H` and `snapshot unpin --run-dir RUN` change it; a change
+  applies at the next start. Status reports `bodyPin` next to `bodyFloor`
+  (`null` without a pin).
+- A `full` node whose database already has a head and whose run directory
+  has no `prefill.bin` neither downloads nor audits the prefill, and
+  serves none (`PrefillBundleRequired`). With `prefill.bin` present nothing
+  changes.
+- A full node whose peer answers `HistoryPruned` for the block after its
+  head logs one `sync_gap` line (its head, the peer, and that it must be
+  reinstalled from a newer snapshot) and exits with status 3, instead of
+  polling forever.
+- `scripts/snapshot-smoke.py` runs the procedure with the real binary: a
+  `window` producer, a pinned snapshot follower, more than 256 blocks, an
+  installed node that catches up, and the refusals.
 
 ## 0.1.0-alpha.8 — 2026-11-24
 

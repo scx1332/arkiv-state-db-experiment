@@ -25,6 +25,10 @@ mixed-content or CORS restrictions prevent browser execution.
 | Replication blocks and node control | Producer/full; production controls require producer | Separate `--private-listen` |
 | Prometheus `/metrics` | When enabled | Separate `--metrics-listen` |
 
+A full node installed from a [snapshot](snapshots.md) has no prefill file:
+`GET /signed/v1/prefill` and `prefill/chunk` answer `PrefillBundleRequired`
+on it.
+
 Private operations have their own loopback server settings and require the exact
 bearer token from `--token-file`. Replace the illustrative port with the actual
 listener or an authorized tunnel. Merely documenting these operations does not
@@ -81,7 +85,12 @@ and hash lookups (`eth_getTransactionByHash`, `eth_getBlockByHash`,
 default) headers, replication, `GET /signed/v1/blocks`,
 `eth_getTransactionByBlockNumberAndIndex` and
 `eth_getBlockTransactionCountByNumber` are served at every height from the
-kept bodies. Block JSON stays refused below `receiptFloor`, since its
+kept bodies. With `bodyRetention: window` the bodies expire with the
+records: `bodyFloor` is the first height that still has one, and those
+reads answer `HistoryPruned` below it. `bodyPin` (a height, or `null`) is
+the [snapshot pin](snapshots.md#the-pin): a node started with one keeps
+every body from that height on, so that nodes installed from a snapshot at
+that height can sync from it. Block JSON stays refused below `receiptFloor`, since its
 `logsBloom` is derived from the state before the block, and so does the feed,
 whose entries carry each block's state changes. See the
 [pruning design](pruning-design.md).

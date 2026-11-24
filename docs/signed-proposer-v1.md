@@ -102,7 +102,8 @@ unsigned transactions are inserted. Normal transactions, including the signed
 bootstrap, pass through the pool and the native executor.
 
 `GET /signed/v1/status` reports identity, proposer, acknowledged head, role,
-authentication and body retention. `GET /signed/v1/genesis` returns public
+authentication and body retention (`bodyRetention`, `bodyFloor` and the
+snapshot pin `bodyPin`). `GET /signed/v1/genesis` returns public
 canonical genesis and its certificate. The producer exports `genesis.bin` and
 `certificate.bin`. A fresh follower requires these explicit pins:
 
@@ -122,6 +123,28 @@ block. The peer must run a build that serves `GET blocks` (later than
 `ARKIV_PROPOSER_TOKEN` the follower instead reads one header per poll from
 `GET headers` and its body from the private listener, as every release up
 to 0.1.0-alpha.7 does; this still works against older and newer peers.
+
+A full node does not have to start from genesis. `arkiv-proposer snapshot
+install` turns a copy of another full node's databases into a run directory,
+checked against the same pins, and the node then syncs only the blocks after
+the snapshot: see [snapshots](snapshots.md). Three rules of `full` follow
+from it:
+
+- A `full` node whose `node.redb` already has a head and whose run directory
+  has no `prefill.bin` neither downloads nor audits the prefill
+  (`{"event":"prefill_skipped"}`), and serves none: `GET prefill` and `GET
+  prefill/chunk` answer `PrefillBundleRequired`. With `prefill.bin` present,
+  or `--bundle` given, the prefill is audited at every start and served, as
+  before. A node without a head starts from the prefill as before.
+- The file `RUN/snapshot-pin` (written by `snapshot create` and `snapshot
+  pin`) holds a height. A producer or full node started with it keeps every
+  block body from that height on, whatever `--body-retention` says, and
+  reports it as `bodyPin`. The file is read at start only.
+- A full node whose peer answers `HistoryPruned` for the block after its
+  head (or for that block's header) cannot recover by retrying. It logs one
+  `{"event":"sync_gap",…}` line that names its head and the peer and exits
+  with status 3. It has to be installed again from a newer snapshot, or
+  pointed at a peer that still has the bodies.
 
 A peer URL is `https://HOST[:PORT][/PREFIX]`, or `http://` to loopback
 (`127.0.0.1`, `localhost`, `::1`). The prefix is where a reverse proxy
@@ -169,7 +192,7 @@ All public paths use `/signed/v1/`. The unsigned simulator serves a separate
 | `GET requests/:actor/:requestId` | Durable inclusion and execution status, volatile pending, or unknown |
 | `GET accounts/:actor/nonce` | Committed next nonce, advisory contiguous pending nonce and sampled head |
 | `GET headers` | Bounded certificate batch and sampled signed head; `afterHeight`, `afterHash`, `limit` |
-| `GET blocks` | Producer/full: up to 64 consecutive canonical signed blocks (each with its certificate) and the sampled signed head; `afterHeight`, `afterHash`, `limit`; a page is cut at about 3 MiB of block bytes; `HistoryPruned` once a body expired |
+| `GET blocks` | Producer/full: up to 64 consecutive canonical signed blocks (each with its certificate) and the sampled signed head; `afterHeight`, `afterHash`, `limit`; a page is cut at about 3 MiB of block bytes; `HistoryPruned` once a body expired (bodies from the snapshot pin on do not) |
 | `GET feed/blocks` | Full-node sanitized metadata; signed transaction hashes, no calldata |
 | `POST query/classify` | Existing independent language, execution and proof classification |
 | `POST query/resolve`, `query/eq` | Native canonical Eq request/proof transport |
@@ -309,7 +332,8 @@ compatible state and history files. All bodies and snapshots remain stored.
 `--state-retention <N>` (producer and full) only limits which state heights
 are served (older ones are `HistoryPruned`, see the
 [pruning design](pruning-design.md)); there is no physical pruning,
-compaction, key rotation or snapshot-based bootstrap.
+compaction or key rotation. A full node can start from a database snapshot
+of another one instead of from genesis ([snapshots](snapshots.md)).
 
 ## Validation
 

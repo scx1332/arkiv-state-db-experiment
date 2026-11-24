@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+Metrics only: consensus, blocks and the `node.redb` and `history.redb`
+layouts are unchanged ([docs/metrics.md](docs/metrics.md)).
+
+### Database metrics: finer latency buckets, garbage collection time, store and cache counters
+
+- `db_operation_duration_seconds` has 26 buckets instead of 12: 1-2.5-5
+  steps from 1 us to 10 s, with 7.5, 15, 20, 30 and 75 ms added where
+  durable commits fall. Every commit used to land in the 5-10 ms or the
+  10-50 ms bucket, so a p95 answered about 45 ms whatever the latency was.
+  The twelve old `le` values are all kept.
+- **Changed meaning:** `state_gc_seconds_total` is now the time of the
+  garbage collection work inside commits (reference counting, release,
+  choosing and applying deletions, the GC tables). It was the wall time of
+  the whole commit, `fsync` included. It excludes storing the block's own
+  objects and records and redb's commit, where the pages the collection
+  dirtied are written with the block's; it is a lower bound of the cost.
+- New counters of what the store wrote and read, per `database`:
+  `db_objects_written_total`, `db_objects_written_bytes_total`,
+  `db_object_reads_total`, `db_object_read_bytes_total` (label `space`:
+  `catalog`, `host`, `namespace`; namespaces are summed, their ids are never
+  labels), `db_records_written_total`, `db_record_reads_total`,
+  `db_record_read_bytes_total` and `db_entries_removed_total`. With
+  `db_backend_write_bytes_total` they give the write amplification.
+- New counters of the engine's decoded-node cache on producer and full
+  nodes: `state_cache_hits_total` and `state_cache_misses_total` (label
+  `map`), `state_cache_evictions_total` and
+  `state_cache_miss_read_seconds_total`.
+- `db_disk_overhead_bytes` is documented part by part (table metadata, slack
+  in table pages, redb's own structures, free pages). Free and allocated
+  page counts are not exported: redb 4.3.0 keeps them in memory but exposes
+  them only through `WriteTransaction::stats()`, which walks every table
+  inside a write transaction.
+- Local check on 2026-11-25 (release build, 250 ms blocks, 299 blocks,
+  1,540 creates, six clients querying): state commits took 10.5 ms on
+  average; their p95 reads 18.4 ms from the new buckets and 46.1 ms from
+  the old ones. Garbage collection work was 0.36 s of 3.16 s of commit time
+  (11.5 %, 1.2 ms a commit); the previous build's counter read over 99 %.
+  24,094 objects and 16.5 MB written, equal to the GC counters and, less
+  the deletions, to the rows in the file; 340 MB of backend writes for them
+  (20.6x, 152x for the small blocks alone). 277,486 cache misses, each one
+  store read, 266,184 evictions. No measurable change of store read or
+  commit time against the previous build under the same load.
+
 ## 0.1.0-alpha.8 — 2026-11-24
 
 Alpha pre-release. **A drop-in upgrade of 0.1.0-alpha.7** (and of

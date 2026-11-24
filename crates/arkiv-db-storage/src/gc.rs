@@ -465,9 +465,22 @@ pub struct Plan<'a> {
 impl Plan<'_> {
     /// Applies every change through `write`.
     pub fn apply(&self, write: &mut dyn GcWrite) -> Result<(), StorageError> {
+        self.apply_inserts(write)?;
+        self.apply_collection(write)
+    }
+
+    /// Stores the batch's absent objects: what a store without garbage
+    /// collection writes too.
+    pub fn apply_inserts(&self, write: &mut dyn GcWrite) -> Result<(), StorageError> {
         for (space, id, bytes) in &self.inserts {
             write.insert_object(*space, id, bytes)?;
         }
+        Ok(())
+    }
+
+    /// Applies what garbage collection adds to the commit: the deletions
+    /// and every change to the GC tables.
+    pub fn apply_collection(&self, write: &mut dyn GcWrite) -> Result<(), StorageError> {
         for (space, id) in &self.removes {
             write.remove_object(*space, id)?;
         }

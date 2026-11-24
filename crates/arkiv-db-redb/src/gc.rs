@@ -15,7 +15,11 @@
 //! [`GC_STORE_FORMAT`], so a binary without garbage collection refuses the
 //! file instead of adding objects nobody counts.
 
-use std::{collections::HashMap, ops::Bound};
+use std::{
+    collections::HashMap,
+    ops::Bound,
+    time::{Duration, Instant},
+};
 
 use arkiv_db_storage::{
     gc::{
@@ -101,6 +105,10 @@ pub(crate) struct TxnGc<'t> {
     release: Table<'t, u64, Key41>,
     epochs: Table<'t, u64, u64>,
     epoch_counts: Table<'t, u64, u64>,
+    /// Time spent checking whether the batch's objects are already stored
+    /// ([`GcRead::object_matches`]): a store without garbage collection
+    /// makes the same check, so it is not a cost of collection.
+    pub(crate) matching: Duration,
 }
 
 impl<'t> TxnGc<'t> {
@@ -115,6 +123,7 @@ impl<'t> TxnGc<'t> {
             release: txn.open_table(GC_RELEASE)?,
             epochs: txn.open_table(GC_EPOCHS)?,
             epoch_counts: txn.open_table(GC_EPOCH_COUNTS)?,
+            matching: Duration::ZERO,
         })
     }
 
@@ -145,9 +154,12 @@ impl GcRead for TxnGc<'_> {
         id: &ObjectId,
         bytes: &[u8],
     ) -> Result<Option<bool>, StorageError> {
+        let started = Instant::now();
         let table = self.objects(space)?;
         let found = table.get(id).map_err(storage)?;
-        Ok(found.map(|stored| stored.value() == bytes))
+        let matches = found.map(|stored| stored.value() == bytes);
+        self.matching += started.elapsed();
+        Ok(matches)
     }
 
     fn object(&mut self, space: SpaceId, id: &ObjectId) -> Result<Option<Vec<u8>>, StorageError> {

@@ -11,8 +11,9 @@ use super::{
     Error, ErrorCode, Result,
     runtime::{Node, Shared},
 };
+use arkiv_db::{MapKind, durable::CacheStats};
 use arkiv_db_redb::{DURATION_BUCKETS_NANOSECONDS, DataStats, OperationTimingSnapshot, RedbStore};
-use arkiv_db_storage::versioned::VersionedStore;
+use arkiv_db_storage::versioned::{SpaceId, SpaceStats, StoreStats, VersionedStore};
 use axum::{Router, extract::State, routing::get};
 use std::{
     collections::BTreeMap,
@@ -50,6 +51,8 @@ struct NodeSample {
     paused: Option<bool>,
     observed: Option<u64>,
     retention: Option<RetentionSample>,
+    /// The engine's decoded-node cache counters.
+    cache: Option<CacheStats>,
 }
 
 /// What bounds deletion on a full node: read from the engine's atomics.
@@ -257,6 +260,7 @@ fn sample_node(rt: &Shared) -> Option<NodeSample> {
                 record_floor: h.engine.record_floor().floor,
                 record_backlog: h.engine.record_floor().backlog(),
             });
+            sample.cache = Some(h.engine.cache_stats());
         }
         Node::Light { light, .. } => {
             sample.observed = Some(light.observed);
@@ -393,6 +397,7 @@ impl Metrics {
             }
             let io = db.store.probe().stats();
             let commits = db.store.stats();
+            export_store(&mut families, db.name, &commits);
             for (name, help, value) in [
                 (
                     "db_backend_read_bytes_total",
@@ -536,6 +541,129 @@ impl NodeSample {
                 r.record_backlog,
             );
         }
+        if let Some(cache) = &self.cache {
+            export_cache(families, cache);
+        }
+    }
+}
+
+/// The Prometheus label of a map kind.
+fn map_label(map: MapKind) -> &'static str {
+    match map {
+        MapKind::Catalog => "catalog",
+        MapKind::Host => "host",
+        MapKind::Records => "records",
+        MapKind::Keys => "keys",
+        MapKind::Rows => "rows",
+        MapKind::Terms => "terms",
+        MapKind::Postings => "postings",
+    }
+}
+
+/// The state engine's decoded-node cache: counters the cache keeps in
+/// atomics, as of the last node sample.
+fn export_cache(families: &mut Families, cache: &CacheStats) {
+    for map in MapKind::ALL {
+        let labels = format!("{{map=\"{}\"}}", map_label(map));
+        families.counter(
+            "state_cache_hits_total",
+            "Trie node loads answered by the decoded-node cache, without a store read.",
+            &labels,
+            cache.hits_by_map[map.index()],
+        );
+        families.counter(
+            "state_cache_misses_total",
+            "Trie node loads that read the store (one object read and a decode each).",
+            &labels,
+            cache.misses_by_map[map.index()],
+        );
+    }
+    families.counter(
+        "state_cache_evictions_total",
+        "Decoded nodes evicted from the cache to stay within its byte and entry limits.",
+        "",
+        cache.evictions,
+    );
+    families.counter(
+        "state_cache_miss_read_seconds_total",
+        "Wall time of the store reads of cache misses, summed over reader threads; \
+         decoding excluded.",
+        "",
+        cache.miss_read_ns as f64 / 1e9,
+    );
+}
+
+/// The store's logical counters: objects and records through the storage
+/// contract. Namespaces are summed, so the `space` label stays bounded and
+/// no namespace id is exposed.
+fn export_store(families: &mut Families, database: &str, stats: &StoreStats) {
+    let mut namespaces = SpaceStats::default();
+    for (space, stats) in &stats.spaces {
+        if matches!(space, SpaceId::Namespace(_)) {
+            namespaces.reads += stats.reads;
+            namespaces.read_bytes += stats.read_bytes;
+            namespaces.objects_written += stats.objects_written;
+            namespaces.bytes_written += stats.bytes_written;
+        }
+    }
+    for (space, stats) in [
+        ("catalog", stats.space(SpaceId::Catalog)),
+        ("host", stats.space(SpaceId::Host)),
+        ("namespace", namespaces),
+    ] {
+        let labels = format!("{{database=\"{database}\",space=\"{space}\"}}");
+        for (name, help, value) in [
+            (
+                "db_object_reads_total",
+                "Answered store object reads, found or absent; reads the engine cache \
+                 answers never reach the store.",
+                stats.reads,
+            ),
+            (
+                "db_object_read_bytes_total",
+                "Encoded bytes of the objects store reads returned.",
+                stats.read_bytes,
+            ),
+            (
+                "db_objects_written_total",
+                "Objects newly stored by committed batches; an object already stored is \
+                 not counted again.",
+                stats.objects_written,
+            ),
+            (
+                "db_objects_written_bytes_total",
+                "Encoded bytes (values only) of the objects newly stored.",
+                stats.bytes_written,
+            ),
+        ] {
+            families.counter(name, help, &labels, value);
+        }
+    }
+    let labels = format!("{{database=\"{database}\"}}");
+    for (name, help, value) in [
+        (
+            "db_record_reads_total",
+            "Answered store record reads, found or absent.",
+            stats.record_reads,
+        ),
+        (
+            "db_record_read_bytes_total",
+            "Bytes of the records store reads returned.",
+            stats.record_read_bytes,
+        ),
+        (
+            "db_records_written_total",
+            "Records newly stored by committed batches.",
+            stats.records_written,
+        ),
+        (
+            "db_entries_removed_total",
+            "Records and objects removed by committed batches (expiry); objects deleted \
+             by garbage collection are in state_gc_deleted_total.",
+            stats.removed,
+        ),
+    ] {
+        families.counter(name, help, &labels, value);
     }
 }
 
@@ -705,7 +833,9 @@ fn export_gc(
     }
     families.counter(
         "state_gc_seconds_total",
-        "Wall time of garbage-collecting commits in this process (whole commit).",
+        "Wall time of garbage collection work inside commits in this process: reference \
+         counting, release, deletion and the GC tables; excludes storing the block's own \
+         objects and records and the durable commit (page writes, fsync).",
         labels,
         seconds,
     );
@@ -955,6 +1085,13 @@ mod tests {
                 record_floor: 2,
                 record_backlog: 1,
             }),
+            cache: Some(CacheStats {
+                hits: 5,
+                misses: 2,
+                evictions: 1,
+                miss_read_ns: 1_500,
+                ..CacheStats::default()
+            }),
         };
         metrics.refresh();
         let rendered = metrics.render();
@@ -1022,8 +1159,150 @@ mod tests {
         ] {
             assert!(rendered.contains(family), "{family} missing");
         }
+        // The GC time is the collection work alone: part of the commits,
+        // never the whole of them.
+        let commits = store.operation_timings()[3];
+        assert_eq!(commits.operation, "commit");
+        let collecting = store.gc_seconds();
+        assert!(collecting > 0.0);
+        assert!(collecting < commits.total_nanoseconds as f64 / 1e9);
         drop(engine);
         std::fs::remove_file(&path).unwrap();
+    }
+
+    /// The value of the sample `series` (name and labels) in a scrape.
+    fn value(rendered: &str, series: &str) -> f64 {
+        let line = rendered
+            .lines()
+            .find(|line| {
+                line.rsplit_once(' ')
+                    .is_some_and(|(name, _)| name == series)
+            })
+            .unwrap_or_else(|| panic!("{series} missing"));
+        line.rsplit_once(' ').unwrap().1.parse().unwrap()
+    }
+
+    /// The store's object and record counters are exported per database,
+    /// with every namespace summed under one `space` label.
+    #[test]
+    fn store_counters_sum_namespaces_and_expose_no_namespace_id() {
+        use arkiv_db_storage::versioned::{CommitBatch, CommitOutcome, Head, ObjectReader, Table};
+        let (path, metrics) = walking_databases(false);
+        let store = metrics.databases[0].store.clone();
+        let object = |tag: u8, len: usize| {
+            let bytes = vec![tag; len];
+            (alloy_primitives::keccak256(&bytes).0, bytes)
+        };
+        let head = Head {
+            height: 0,
+            hash: [1; 32],
+        };
+        let mut batch = CommitBatch::new(None, head);
+        let (host, host_bytes) = object(1, 10);
+        batch.put_object(SpaceId::Host, host, host_bytes);
+        let (first, first_bytes) = object(2, 100);
+        batch.put_object(SpaceId::Namespace(0xabcdef), first, first_bytes);
+        let (second, second_bytes) = object(3, 1000);
+        batch.put_object(SpaceId::Namespace(0x123456), second, second_bytes);
+        batch.put_record(Table::Blocks, 0u64.to_be_bytes().to_vec(), vec![7; 40]);
+        assert!(matches!(store.commit(&batch), CommitOutcome::Committed));
+        store
+            .read_object(SpaceId::Namespace(0xabcdef), &first)
+            .unwrap();
+        store
+            .read_object(SpaceId::Namespace(0x123456), &second)
+            .unwrap();
+        store
+            .read_object(SpaceId::Namespace(0x123456), &first)
+            .unwrap();
+        store
+            .read_record(Table::Blocks, &0u64.to_be_bytes())
+            .unwrap();
+
+        let rendered = metrics.render();
+        std::fs::remove_file(&path).unwrap();
+        for (series, expected) in [
+            (
+                "db_objects_written_total{database=\"state\",space=\"host\"}",
+                1.,
+            ),
+            (
+                "db_objects_written_bytes_total{database=\"state\",space=\"host\"}",
+                10.,
+            ),
+            (
+                "db_objects_written_total{database=\"state\",space=\"namespace\"}",
+                2.,
+            ),
+            (
+                "db_objects_written_bytes_total{database=\"state\",space=\"namespace\"}",
+                1100.,
+            ),
+            (
+                "db_objects_written_total{database=\"state\",space=\"catalog\"}",
+                0.,
+            ),
+            (
+                "db_object_reads_total{database=\"state\",space=\"namespace\"}",
+                3.,
+            ),
+            (
+                "db_object_read_bytes_total{database=\"state\",space=\"namespace\"}",
+                1100.,
+            ),
+            (
+                "db_object_reads_total{database=\"state\",space=\"host\"}",
+                0.,
+            ),
+            ("db_records_written_total{database=\"state\"}", 1.),
+            ("db_record_reads_total{database=\"state\"}", 1.),
+            ("db_record_read_bytes_total{database=\"state\"}", 40.),
+            ("db_entries_removed_total{database=\"state\"}", 0.),
+        ] {
+            assert_eq!(
+                value(&rendered, &format!("rogue_one_{series}")),
+                expected,
+                "{series}"
+            );
+        }
+        assert!(!rendered.to_lowercase().contains("abcdef"));
+        assert!(!rendered.contains("123456"));
+    }
+
+    /// Cache hits and misses are exported per map, and add up.
+    #[test]
+    fn cache_counters_are_exported_per_map() {
+        let mut cache = CacheStats {
+            evictions: 4,
+            miss_read_ns: 2_500_000_000,
+            ..CacheStats::default()
+        };
+        cache.hits_by_map[MapKind::Rows.index()] = 7;
+        cache.misses_by_map[MapKind::Rows.index()] = 3;
+        cache.misses_by_map[MapKind::Catalog.index()] = 1;
+        let mut families = Families::default();
+        export_cache(&mut families, &cache);
+        let rendered = families.render();
+        for (series, expected) in [
+            ("state_cache_hits_total{map=\"rows\"}", 7.),
+            ("state_cache_hits_total{map=\"catalog\"}", 0.),
+            ("state_cache_misses_total{map=\"rows\"}", 3.),
+            ("state_cache_misses_total{map=\"catalog\"}", 1.),
+            ("state_cache_evictions_total", 4.),
+            ("state_cache_miss_read_seconds_total", 2.5),
+        ] {
+            assert_eq!(
+                value(&rendered, &format!("rogue_one_{series}")),
+                expected,
+                "{series}"
+            );
+        }
+        assert_eq!(
+            rendered
+                .matches("rogue_one_state_cache_hits_total{")
+                .count(),
+            7
+        );
     }
 
     #[test]

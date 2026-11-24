@@ -227,7 +227,8 @@ pub struct RedbStore {
     /// store that keeps every object.
     gc: Mutex<Option<GcState>>,
     gc_report: Mutex<Option<GcReport>>,
-    /// Wall time spent planning and applying garbage collection.
+    /// Wall time of the garbage collection work inside commits (see
+    /// [`Self::gc_seconds`]).
     gc_nanos: AtomicU64,
 }
 
@@ -396,8 +397,18 @@ impl RedbStore {
         lock(&self.gc).is_some()
     }
 
-    /// Wall time spent in garbage-collecting commits (planning, applying
-    /// and their retries), since the store was opened.
+    /// Wall time of the garbage collection work inside commits, since the
+    /// store was opened: reading the GC state, planning (counting the new
+    /// head's references, releasing the old head's, the release cascade and
+    /// choosing what to delete) and applying the plan's deletions and GC
+    /// table changes. Failed and retried attempts count.
+    ///
+    /// It excludes what a store without garbage collection does too:
+    /// checking and storing the batch's own objects and records. It also
+    /// excludes redb's commit (writing the dirty pages and the durability
+    /// barriers), where the pages the collection dirtied are written
+    /// together with the batch's and cannot be told apart. Compare it with
+    /// the `commit` operation timing, which is the whole call.
     pub fn gc_seconds(&self) -> f64 {
         self.gc_nanos.load(Ordering::Relaxed) as f64 / 1e9
     }
@@ -1457,15 +1468,15 @@ impl VersionedStore for RedbStore {
     ) -> CommitOutcome {
         let mut timing = self.timings[3].start();
         let _writer = lock(&self.writer);
-        let started = Instant::now();
         let invariant = std::cell::Cell::new(None::<String>);
         let planned = std::cell::Cell::new(None::<(GcState, GcReport)>);
+        let collecting = std::cell::Cell::new(Duration::ZERO);
         let validate = || match batch.remove_objects.is_empty() {
             true => batch.validate(),
             false => Err(gc_write_refused("an object removal")),
         };
         let mut outcome = self.transact_locked(validate, |txn| {
-            stage_gc(txn, batch, gc, graph, &invariant, &planned)
+            stage_gc(txn, batch, gc, graph, &invariant, &planned, &collecting)
         });
         if let Some(reason) = invariant.take() {
             // The counts are wrong: commit without collection, suspended,
@@ -1486,7 +1497,7 @@ impl VersionedStore for RedbStore {
             });
         }
         self.gc_nanos.fetch_add(
-            started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+            collecting.get().as_nanos().min(u128::from(u64::MAX)) as u64,
             Ordering::Relaxed,
         );
         if outcome.is_ok() {
@@ -1628,13 +1639,20 @@ fn stage_gc(
     graph: &dyn ObjectGraph,
     invariant: &std::cell::Cell<Option<String>>,
     planned: &std::cell::Cell<Option<(GcState, GcReport)>>,
+    collecting: &std::cell::Cell<Duration>,
 ) -> Result<Written, Fault> {
+    // `collecting` accumulates the time of the garbage collection work
+    // only ([`RedbStore::gc_seconds`]): the spans below that a store
+    // without collection would not run.
+    let spent = |time: Duration| collecting.set(collecting.get() + time);
+    let started = Instant::now();
     let state = tables::read_state(txn)?.ok_or_else(|| {
         Fault::new(
             StorageErrorKind::Incompatible,
             "this store does not collect garbage",
         )
     })?;
+    spent(started.elapsed());
     if state.suspended {
         let written = stage_batch(txn, batch)?;
         planned.set(Some((state, GcReport::default())));
@@ -1649,15 +1667,20 @@ fn stage_gc(
         &batch.records,
         Some(batch.new_head),
     )?;
+    let started = Instant::now();
     let mut view = TxnGc::open(txn)?;
-    let plan = match collect::plan(
+    let plan = collect::plan(
         &mut view,
         graph,
         &state,
         &batch.objects,
         gc,
         batch.new_head.height,
-    ) {
+    );
+    // The planner also checks whether each of the batch's objects is
+    // already stored, as every commit must.
+    spent(started.elapsed().saturating_sub(view.matching));
+    let plan = match plan {
         Ok(plan) => plan,
         Err(GcError::Storage(error)) => return Err(error.into()),
         Err(GcError::Invariant(reason)) => {
@@ -1665,9 +1688,12 @@ fn stage_gc(
             return Err(Fault::new(StorageErrorKind::Corrupt, reason));
         }
     };
-    plan.apply(&mut view)?;
+    plan.apply_inserts(&mut view)?;
+    let started = Instant::now();
+    plan.apply_collection(&mut view)?;
     drop(view);
     tables::write_state(txn, &plan.state)?;
+    spent(started.elapsed());
     for (space, _, bytes) in &plan.inserts {
         written.objects.push((*space, bytes.len()));
     }

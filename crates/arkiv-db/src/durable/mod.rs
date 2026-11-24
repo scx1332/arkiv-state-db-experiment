@@ -1103,6 +1103,12 @@ impl DurableEngine {
         Ok(Recovery::Ready)
     }
 
+    /// The decoded-node cache counters alone: atomics and one short lock
+    /// per shard, no store call.
+    pub fn cache_stats(&self) -> CacheStats {
+        self.context.stats()
+    }
+
     pub fn stats(&self) -> DurableStats {
         DurableStats {
             cache: self.context.stats(),

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.9 — 2026-11-24
 
 Consensus, blocks and the `node.redb` and `history.redb` layouts are
 unchanged by both changes below: metrics

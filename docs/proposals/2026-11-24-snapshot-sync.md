@@ -4,8 +4,8 @@ Status: proposed 2026-11-24. The transport (plan items 4 and 5) was
 implemented on 2026-11-24, and the snapshot commands, the pin, the prefill
 skip and the smoke test (items 1, 2, 3 and 6) on 2026-11-25; the
 [plan](#plan) says what was built, and [docs/snapshots.md](../snapshots.md)
-is the operator guide. Open: the run on a copy of Kenobi with the commands
-(item 7). Decided: the snapshot is a copy of the node's database files,
+is the operator guide. The commands were run on a copy of Kenobi on
+2026-11-24 (item 7). Decided: the snapshot is a copy of the node's database files,
 genesis and prefill are not part of syncing, the node that made a snapshot
 pins the block bodies since it, and the transport is plain HTTP (TLS is a
 proxy's job). The remaining choices are listed under
@@ -72,6 +72,37 @@ it.
 A debug build opens the 106 GiB file in about 30 minutes: redb 4.3.0 walks
 every allocated page in `Database::new` under `debug_assertions`. Use a
 release build on files of this size.
+
+### Kenobi with the snapshot commands, 2026-11-24
+
+Plan item 7, on the follower above (one host, RAID 0 of three NVMe disks,
+ext4), with the build of commit `7322440`. The follower runs `full` with
+`--body-retention archive`, syncing from the producer over HTTPS; its run
+directory has no `prefill.bin`.
+
+| Step | Time |
+| --- | ---: |
+| Start of the follower without `prefill.bin` (`prefill_skipped`), until it serves | under 3 s |
+| `snapshot create` at height 74,555: copy and SHA-256 of 106.8 GiB | 119 s |
+| Follower stopped, in total | 120 s |
+| Follower back at the producer's head after its restart | 5 s |
+| `snapshot install` (copy mode, hashes checked) with `--peer` the follower | 134 s |
+| New node at the head after its start, 144 blocks synced from the follower | 10 s |
+
+The snapshot is 114.7 GB on disk. The producer, the follower and the node
+installed from the snapshot then had the same head (height 74,699, header
+hash and state root), and the follower's status reported
+`bodyPin: "74555"`. The new node synced from the follower, not from the
+producer.
+
+A second `snapshot create`, run by a systemd timer while another 106 GiB
+copy was running on the same disks, took 270 s (follower stopped for 279 s,
+back at the head 11 s later). The copy speed is the disks': about 0.95 GB/s
+alone.
+
+Not covered by this run: a producer with `--body-retention window` (both
+Kenobi nodes keep every body, so the pin was set but never needed; the
+smoke test covers it), and a snapshot moved between hosts.
 
 ## What the pruning allows
 
@@ -272,9 +303,11 @@ snapshot and exits (status 3), instead of polling forever.
    `scripts/snapshot-smoke.py` (run by hand, like `upgrade-smoke.py`). The
    same procedure on a chain with a streaming prefill is a test of the
    binary (`crates/arkiv-node/tests/snapshot_cli.rs`).
-7. Run it on a copy of Kenobi and record sizes and times. Done by hand on
-   2026-11-24 ([above](#kenobi-2026-11-24)); to repeat with the snapshot
-   commands and a `window` producer.
+7. Run it on a copy of Kenobi and record sizes and times. **Done
+   2026-11-24**, by hand ([above](#kenobi-2026-11-24)) and with the snapshot
+   commands ([above](#kenobi-with-the-snapshot-commands-2026-11-24)). The
+   follower there takes a snapshot every day. A `window` producer at this
+   size is not tested.
 
 Later, in no fixed order:
 

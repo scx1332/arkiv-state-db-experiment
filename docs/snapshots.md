@@ -326,7 +326,10 @@ node that fell behind, and has to be installed again from someone else's
 snapshot.
 
 - The copy is sequential: read, SHA-256 and write run side by side. Measure
-  it once on your disks. Kenobi's `node.redb` is 106 GiB.
+  it once on your disks. Kenobi's `node.redb` is 106 GiB: on NVMe disks
+  `snapshot create` took 119 s and the follower was stopped for 120 s, and
+  270 s when another large copy ran on the same disks
+  ([measurements](proposals/2026-11-24-snapshot-sync.md#kenobi-with-the-snapshot-commands-2026-11-24)).
 - A peer that keeps every body (`--body-retention archive`, Kenobi's
   producer today) has no window, and neither has a pinned peer for the
   heights from its pin on.
@@ -373,7 +376,7 @@ snapshot you publish.
 Nothing stored changed. `node.redb` and `history.redb` have the layout of
 0.1.0-alpha.8, the pin is a side file, and blocks validate the same. A
 snapshot of a 0.1.0-alpha.8 node's files can be created and installed by
-this build. 0.1.0-alpha.8 also opens an installed run directory, but it
+0.1.0-alpha.9, the first release with the snapshot commands. 0.1.0-alpha.8 also opens an installed run directory, but it
 ignores the pin and, on a chain with a prefill, still downloads and audits
 the prefill before it starts.
 

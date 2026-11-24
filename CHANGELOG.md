@@ -2,16 +2,20 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.8 — 2026-11-24
+
+Alpha pre-release. **A drop-in upgrade of 0.1.0-alpha.7** (and of
+0.1.0-alpha.5 and 0.1.0-alpha.6): consensus, blocks, headers, transactions,
+signatures, genesis, state roots and the `node.redb` and `history.redb`
+layouts are unchanged, and it opens an older run directory in place with no
+rebuild or migration. `scripts/upgrade-smoke.py` passed 0.1.0-alpha.7 ->
+this code before the version was set, followers and light clients both ways
+and rollback included.
+
 ### Full followers sync from a public block endpoint, without a token
 
 Steps 4 and 5 of the
 [snapshot sync proposal](docs/proposals/2026-11-24-snapshot-sync.md).
-Nothing stored and nothing in block validity changes: consensus, blocks,
-headers, transactions, signatures, genesis, state roots and the `node.redb`
-and `history.redb` layouts are as in 0.1.0-alpha.7, and this build opens an
-alpha.7 run directory in place with no rebuild or migration.
-`scripts/upgrade-smoke.py` passed 0.1.0-alpha.7 -> this build, followers
-and light clients both ways and rollback included.
 
 - Public `GET /signed/v1/blocks?afterHeight=H&afterHash=X&limit=K` on
   producer and full nodes answers consecutive canonical blocks after `H`,
@@ -34,10 +38,10 @@ and light clients both ways and rollback included.
   that ends elsewhere. What is synced is verified the same over either
   transport; a replication token sent over plain HTTP crosses the network
   in clear text.
-- **Compatibility:** a peer must run this build or later to serve
-  `GET blocks`. A follower of this build started with `--replication-peer`
+- **Compatibility:** a peer must run 0.1.0-alpha.8 or later to serve
+  `GET blocks`. A 0.1.0-alpha.8 follower started with `--replication-peer`
   and the token still syncs from older peers, and older followers sync
-  from this build unchanged.
+  from 0.1.0-alpha.8 unchanged.
 - Local check on 2026-11-24 (250 ms blocks, debug build): a follower
   started on a copy of the producer's `node.redb` and `history.redb`, with
   no token, caught up 412 blocks in under 11 s and ended on the producer's

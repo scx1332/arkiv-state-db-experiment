@@ -183,7 +183,7 @@ snapshot and exits, instead of polling forever.
    about 3 MiB of block bytes, from the height index of `history.redb`. A
    `full` node without `--replication-peer` syncs from it, one batch per
    50 ms poll, with no token. Nothing stored and nothing in block validity
-   changed. A peer must run this build or later to serve `GET blocks`; with
+   changed. A peer must run 0.1.0-alpha.8 or later to serve `GET blocks`; with
    `--replication-peer` and the token a new follower still syncs from older
    peers, one block per poll as before.
 6. A smoke test: the 2026-11-24 experiment, with `--body-retention window`

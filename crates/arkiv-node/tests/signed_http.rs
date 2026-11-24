@@ -126,6 +126,15 @@ fn head(rt: &Shared) -> arkiv_node::Header {
     rt.node.lock().unwrap().head()
 }
 
+fn head_at(rt: &Shared, height: u64) -> arkiv_node::Header {
+    rt.node
+        .lock()
+        .unwrap()
+        .chain_certificate(height)
+        .unwrap()
+        .header
+}
+
 fn query() -> Value {
     json!({
         "height": "2",
@@ -563,6 +572,154 @@ async fn light_chain() -> (Shared, Server, Shared, Server) {
     (producer, public, light, local)
 }
 
+/// A full follower with no replication peer and no token.
+fn public_follower(peer: &str) -> Shared {
+    Runtime::new(
+        Node::Full(Box::new(host(false))),
+        Some(peer.into()),
+        None,
+        None,
+    )
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_full_follower_syncs_batches_from_public_blocks_without_a_token() {
+    let mut source = host(true);
+    source.produce().unwrap();
+    for nonce in 0..3 {
+        source.submit(create(2, nonce, 20 + nonce as u128)).unwrap();
+        source.produce().unwrap();
+    }
+    source.produce().unwrap();
+    let producer = Runtime::new(Node::Full(Box::new(source)), None, None, None).unwrap();
+    let public = serve(runtime::public_router(producer.clone())).await;
+    let client = reqwest::Client::new();
+
+    // The endpoint: every block from genesis, each with its certificate.
+    let all = get(&client, &public.url, "blocks").await;
+    let blocks = all["blocks"].as_array().unwrap();
+    assert_eq!(blocks.len(), 6);
+    for (height, block) in blocks.iter().enumerate() {
+        let block: SignedBlock = unpack(block.as_str().unwrap(), BODY_CAP as usize).unwrap();
+        block.authenticate(&genesis()).unwrap();
+        assert_eq!(block.header.header.height, height as u64);
+    }
+    let first = head_at(&producer, 1);
+    let page = get(
+        &client,
+        &public.url,
+        &format!(
+            "blocks?afterHeight=1&afterHash={}&limit=2",
+            hex(first.hash().as_slice())
+        ),
+    )
+    .await;
+    assert_eq!(page["blocks"].as_array().unwrap().len(), 2);
+    assert_eq!(page["blocks"][0], blocks[2]);
+    for (query, error) in [
+        ("blocks?limit=65", "InvalidRequest"),
+        ("blocks?limit=0", "InvalidRequest"),
+        ("blocks?afterHeight=1", "ChainConflict"),
+        (
+            &*format!(
+                "blocks?afterHeight=2&afterHash={}",
+                hex(first.hash().as_slice())
+            ),
+            "ChainConflict",
+        ),
+        (
+            &*format!(
+                "blocks?afterHeight=9&afterHash={}",
+                hex(first.hash().as_slice())
+            ),
+            "BlockNotSynced",
+        ),
+    ] {
+        let refused = client
+            .get(format!("{}/signed/v1/{query}", public.url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), 422, "{query}");
+        assert_eq!(
+            refused.json::<Value>().await.unwrap()["error"],
+            error,
+            "{query}"
+        );
+    }
+
+    // One poll imports the whole batch; no private listener exists at all.
+    let full = public_follower(&public.url);
+    runtime::sync_once(full.clone()).await.unwrap();
+    assert_eq!(head(&full), head(&producer));
+    runtime::sync_once(full.clone()).await.unwrap();
+    assert_eq!(head(&full), head(&producer));
+
+    // The follower serves the same blocks, behind a proxy prefix, to another.
+    let full_public = serve(Router::new().nest("/rpc", runtime::public_router(full.clone()))).await;
+    let relayed = get(&client, &format!("{}/rpc", full_public.url), "blocks").await;
+    assert_eq!(relayed["blocks"], all["blocks"]);
+    let second = public_follower(&format!("{}/rpc/", full_public.url));
+    runtime::sync_once(second.clone()).await.unwrap();
+    assert_eq!(head(&second), head(&producer));
+
+    // New blocks follow, one hop at a time.
+    {
+        let mut node = producer.node.lock().unwrap();
+        let Node::Full(source) = &mut *node else {
+            unreachable!()
+        };
+        source.submit(create(3, 0, 30)).unwrap();
+        source.produce().unwrap();
+    }
+    runtime::sync_once(second.clone()).await.unwrap();
+    assert_eq!(head(&second).height, 5);
+    runtime::sync_once(full.clone()).await.unwrap();
+    runtime::sync_once(second.clone()).await.unwrap();
+    assert_eq!(head(&second), head(&producer));
+
+    // A light node has no bodies to serve.
+    let light = light_rt(&public.url, &producer);
+    let light_public = serve(runtime::public_router(light)).await;
+    let refused = client
+        .get(format!("{}/signed/v1/blocks", light_public.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        refused.json::<Value>().await.unwrap()["error"],
+        "UnsupportedNodeRole"
+    );
+}
+
+#[test]
+fn peers_are_https_or_loopback_unless_plain_http_is_allowed() {
+    for peer in [
+        "https://node.example",
+        "https://node.example/rpc",
+        "https://node.example:8443/a/b/",
+        "http://127.0.0.1:9500",
+        "http://localhost:9500/rpc",
+    ] {
+        runtime::check_peer(peer, false).unwrap_or_else(|_| panic!("{peer}"));
+    }
+    for peer in ["http://10.0.0.5:9500", "http://node.example/rpc"] {
+        assert!(runtime::check_peer(peer, false).is_err(), "{peer}");
+        runtime::check_peer(peer, true).unwrap_or_else(|_| panic!("{peer}"));
+    }
+    for peer in [
+        "https://user:secret@node.example",
+        "https://node.example/rpc?x=1",
+        "https://node.example/#top",
+        "ftp://node.example",
+        "node.example:9500",
+        "",
+    ] {
+        assert!(runtime::check_peer(peer, true).is_err(), "{peer}");
+    }
+}
+
 fn text_query() -> Value {
     json!({
         "query": "group = u64(1)",
@@ -965,34 +1122,50 @@ async fn altered_or_truncated_proof_never_returns_verified_rows() {
 async fn authentic_conflict_in_sampled_header_freezes_full_without_body_fetch() {
     let mut producer = host(true);
     producer.produce().unwrap();
-    let mut full = host(false);
-    full.import(producer.block(1).unwrap()).unwrap();
-    let mut changed = full.head;
-    changed.inputs_digest = arkiv_db::B256::repeat_byte(7);
-    let conflict = SignedHeader::sign(&genesis(), changed, &signer(1)).unwrap();
-    let response = json!({"identity":full.identity,"certificates":[],"sampled":pack(&conflict)});
-    let source = serve(Router::new().route(
-        "/signed/v1/headers",
-        axum::routing::get(move || {
-            let response = response.clone();
-            async move { Json(response) }
-        }),
-    ))
-    .await;
-    let rt = Runtime::new(
-        Node::Full(Box::new(full)),
-        Some(source.url.clone()),
-        None,
-        None,
-    )
-    .unwrap();
-    assert_eq!(
-        runtime::sync_once(rt.clone()).await,
-        Err(ErrorCode::ChainConflict.into())
-    );
-    let node = rt.node.lock().unwrap();
-    assert_eq!(runtime::status(&node)["health"], "chain-conflict");
-    assert_eq!(node.head(), producer.head);
+    // Both sync paths sample the peer's head: `GET headers` with a
+    // replication peer, public `GET blocks` without one. The peer serves
+    // that one route and no body.
+    for replicating in [true, false] {
+        let mut full = host(false);
+        full.import(producer.block(1).unwrap()).unwrap();
+        let mut changed = full.head;
+        changed.inputs_digest = arkiv_db::B256::repeat_byte(7);
+        let conflict = SignedHeader::sign(&genesis(), changed, &signer(1)).unwrap();
+        let (route, response) = if replicating {
+            (
+                "/signed/v1/headers",
+                json!({"identity":full.identity,"certificates":[],"sampled":pack(&conflict)}),
+            )
+        } else {
+            (
+                "/signed/v1/blocks",
+                json!({"identity":full.identity,"blocks":[],"sampled":pack(&conflict)}),
+            )
+        };
+        let source = serve(Router::new().route(
+            route,
+            axum::routing::get(move || {
+                let response = response.clone();
+                async move { Json(response) }
+            }),
+        ))
+        .await;
+        let rt = Runtime::new(
+            Node::Full(Box::new(full)),
+            Some(source.url.clone()),
+            replicating.then(|| source.url.clone()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            runtime::sync_once(rt.clone()).await,
+            Err(ErrorCode::ChainConflict.into()),
+            "{route}"
+        );
+        let node = rt.node.lock().unwrap();
+        assert_eq!(runtime::status(&node)["health"], "chain-conflict");
+        assert_eq!(node.head(), producer.head);
+    }
 }
 
 fn full_with_retained_history() -> (Host, Arc<MemoryVersionedStore>) {

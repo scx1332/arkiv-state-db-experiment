@@ -38,7 +38,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex, MutexGuard, TryLockError,
-        atomic::{AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -143,7 +143,7 @@ impl Runtime {
     ) -> Result<Shared> {
         let reads = Reads::new(read_limits)?;
         for p in [&peer, &replication_peer].into_iter().flatten() {
-            crate::simulator::runtime::validate_peer(p)?;
+            validate_peer(p)?;
         }
         if token.as_ref().is_some_and(|s| s.len() < 32) {
             return Err(ErrorCode::InvalidRequest.into());
@@ -385,6 +385,64 @@ pub struct Headers {
     pub sampled: String,
 }
 
+/// The answer of public `GET blocks`: consecutive canonical blocks (each
+/// carries its certificate) after the caller's head, and the sampled head.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Blocks {
+    pub identity: Identity,
+    pub blocks: Vec<String>,
+    pub sampled: String,
+}
+
+/// Blocks one `GET blocks` answers at most.
+pub const BLOCK_BATCH: usize = 64;
+/// Canonical block bytes one `GET blocks` answers at most, beyond its first
+/// block: hex doubles them, and the answer stays under [`RESPONSE_CAP`].
+const BLOCKS_BYTES: usize = 3 * 1024 * 1024;
+
+/// Whether peers may be plain `http` beyond loopback
+/// (`--allow-http-peers true`). One policy for the process: it is the
+/// operator's statement about this node's network.
+static ALLOW_HTTP_PEERS: AtomicBool = AtomicBool::new(false);
+
+/// Sets the peer policy [`validate_peer`] applies.
+pub fn allow_http_peers(allow: bool) {
+    ALLOW_HTTP_PEERS.store(allow, Ordering::Relaxed);
+}
+
+/// [`check_peer`] under the process's policy.
+pub fn validate_peer(peer: &str) -> Result<()> {
+    check_peer(peer, ALLOW_HTTP_PEERS.load(Ordering::Relaxed))
+}
+
+/// A peer is `https://host[:port][/prefix]`, or `http://` to loopback, or
+/// `http://` to any host when `allow_http`. The prefix is where a reverse
+/// proxy mounts the node (`https://host/rpc`). Credentials, a query and a
+/// fragment are refused. Plain http adds no trust in what is synced: every
+/// header is checked against the pinned proposer and every block is
+/// re-executed. It does expose a replication token to the network path.
+pub fn check_peer(peer: &str, allow_http: bool) -> Result<()> {
+    let url = reqwest::Url::parse(peer).map_err(|_| ErrorCode::InvalidRequest)?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.host_str().is_none()
+    {
+        return Err(ErrorCode::InvalidRequest.into());
+    }
+    let local = matches!(
+        url.host_str(),
+        Some("127.0.0.1" | "localhost" | "[::1]" | "::1")
+    );
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if local || allow_http => Ok(()),
+        _ => Err(ErrorCode::InvalidRequest.into()),
+    }
+}
+
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReadQuery {
@@ -603,6 +661,45 @@ fn read(node: &Node, path: &str, q: &ReadQuery) -> Result<Json> {
             }
             _ => Err(ErrorCode::FullNodeRequired.into()),
         };
+    }
+    if path == "blocks" {
+        let Node::Full(h) = node else {
+            return Err(ErrorCode::UnsupportedNodeRole.into());
+        };
+        let limit = q.limit.unwrap_or(BLOCK_BATCH);
+        if !(1..=BLOCK_BATCH).contains(&limit) {
+            return Err(ErrorCode::InvalidRequest.into());
+        }
+        let start = match &q.after_height {
+            Some(after) => {
+                let n = number(after)?;
+                if n > h.head.height {
+                    return Err(ErrorCode::BlockNotSynced.into());
+                }
+                if q.after_hash.as_deref().map(hash).transpose()?
+                    != Some(h.chain_certificate(n)?.header.hash())
+                {
+                    return Err(ErrorCode::ChainConflict.into());
+                }
+                n.checked_add(1).ok_or(ErrorCode::CapacityReached)?
+            }
+            None => 0,
+        };
+        let end = h.head.height.min(start.saturating_add(limit as u64 - 1));
+        let (mut blocks, mut total) = (Vec::new(), 0usize);
+        for height in start..=end {
+            let bytes = h.block_bytes(height)?;
+            total += bytes.len();
+            if !blocks.is_empty() && total > BLOCKS_BYTES {
+                break;
+            }
+            blocks.push(hex(&bytes));
+        }
+        return Ok(json!(Blocks {
+            identity: node.identity().clone(),
+            blocks,
+            sampled: pack(&h.certificate(h.head.height)?)
+        }));
     }
     if path == "headers" || path == "feed/blocks" {
         let limit = q.limit.unwrap_or(HEADER_BATCH);
@@ -1320,7 +1417,7 @@ async fn fetch_once<T: serde::de::DeserializeOwned>(
     token: Option<&str>,
     cap: usize,
 ) -> Result<T> {
-    crate::simulator::runtime::validate_peer(peer)?;
+    validate_peer(peer)?;
     let url = format!("{}{}", peer.trim_end_matches('/'), path);
     let request = if let Some(body) = body {
         client.post(url).json(&body)
@@ -1373,6 +1470,9 @@ pub async fn sync_once(rt: Shared) -> Result<()> {
     })
     .await?;
     let peer = rt.peer.as_deref().ok_or(ErrorCode::InvalidRequest)?;
+    if !is_light && rt.replication_peer.is_none() {
+        return sync_blocks(&rt, peer, &head, &identity, &genesis).await;
+    }
     let response: Headers = fetch(
         &rt.client,
         peer,
@@ -1454,6 +1554,68 @@ pub async fn sync_once(rt: Shared) -> Result<()> {
                 return Err(ErrorCode::ChainConflict.into());
             }
             host.import(block)
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// One poll of a full follower without a replication peer: up to
+/// [`BLOCK_BATCH`] blocks after its head from the peer's public
+/// `GET blocks`, no token. Each block is imported in its own write section,
+/// so reads interleave with a long catch-up.
+async fn sync_blocks(
+    rt: &Shared,
+    peer: &str,
+    head: &crate::Header,
+    identity: &Identity,
+    genesis: &SignedGenesis,
+) -> Result<()> {
+    let response: Blocks = fetch(
+        &rt.client,
+        peer,
+        &format!(
+            "/signed/v1/blocks?afterHeight={}&afterHash={}&limit={BLOCK_BATCH}",
+            head.height,
+            hex(head.hash().as_slice()),
+        ),
+        None,
+        None,
+        RESPONSE_CAP,
+    )
+    .await?;
+    if &response.identity != identity || response.blocks.len() > BLOCK_BATCH {
+        return Err(ErrorCode::IdentityMismatch.into());
+    }
+    let sampled: SignedHeader = unpack(&response.sampled, 512)?;
+    sampled.authenticate(genesis)?;
+    let blocks = response
+        .blocks
+        .iter()
+        .map(|s| unpack(s, super::protocol::BODY_CAP as usize))
+        .collect::<Result<Vec<SignedBlock>>>()?;
+    for block in &blocks {
+        block.header.authenticate(genesis)?;
+    }
+    let observed: Vec<SignedHeader> = blocks.iter().map(|b| b.header.clone()).collect();
+    writing(rt, move |node| {
+        if let Node::Full(host) = node {
+            host.observe_certificate(&sampled)?;
+            for certificate in &observed {
+                // As with separate header and body fetches: every authentic
+                // header is retained before any block is executed.
+                host.observe_certificate(certificate)?;
+            }
+        }
+        Ok(())
+    })
+    .await?;
+    for block in blocks {
+        writing(rt, move |node| {
+            let Node::Full(host) = node else {
+                return Err(ErrorCode::InvalidRequest.into());
+            };
+            host.import(block).map(|_| ())
         })
         .await?;
     }

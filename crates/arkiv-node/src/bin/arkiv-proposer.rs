@@ -941,6 +941,7 @@ const PRODUCER_FLAGS: &[&str] = &[
 const FOLLOWER_FLAGS: &[&str] = &[
     "--peer",
     "--replication-peer",
+    "--allow-http-peers",
     "--proposer",
     "--genesis-hash",
     "--source-id",
@@ -966,7 +967,8 @@ fn help() {
         "[--prebuilt-state DIR])\n",
         "arkiv-proposer full|light --run-dir DIR --peer URL --genesis-hash 0xHEX ",
         "--proposer 0xADDRESS --chain-id N --source-id UUID --run-id HEX32 ",
-        "[--replication-peer URL] [--bundle BUNDLE] [--state-retention archive|N (full ",
+        "[--replication-peer URL] [--allow-http-peers true|false (false)] [--bundle BUNDLE] ",
+        "[--state-retention archive|N (full ",
         "only, 256)] [--body-retention archive|window (full only, archive)] ",
         "[--read-concurrency 4] [--read-deadline-secs 30] [--read-max-groups N] ",
         "[--read-max-literals N] [--read-max-offset 100000]\n",
@@ -986,7 +988,13 @@ fn help() {
         "Optional private Prometheus exporter: --metrics-listen 127.0.0.1:9600 ",
         "[--metrics-table-stats-secs N] (minimum 10; opt-in table walk, which keeps redb from ",
         "reusing freed pages while it runs). Metrics use rogue_one_ prefix.\n",
-        "Private listener/full replication use ARKIV_PROPOSER_TOKEN (at least 32 bytes). ",
+        "The private listener uses ARKIV_PROPOSER_TOKEN (at least 32 bytes). A full node ",
+        "syncs up to 64 blocks per poll from its peer's public GET /signed/v1/blocks and ",
+        "needs no token; with --replication-peer it fetches each body from that private ",
+        "listener with the token instead (peers older than 0.1.0-alpha.8). A peer is ",
+        "https://HOST[/PREFIX], or http:// to loopback; --allow-http-peers true accepts ",
+        "http:// to any host (headers and blocks are verified either way; a replication ",
+        "token would cross the network in clear text). ",
         "Producer starts paused. Every chain runs the glm-v2 gas profile with funded ",
         "accounts. A bundle chain creates the entities namespace (and its prefill) at ",
         "height 0; a chain created from --allocations-file creates it with the proposer's ",
@@ -1240,6 +1248,13 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
     if args.contains_key("--private-listen") && token.as_ref().is_none_or(|s| s.len() < 32) {
         return Err(ErrorCode::InvalidRequest.into());
     }
+    // Peers are https, or http to loopback, unless the operator allows
+    // plain http to any host (a private network, or TLS ended elsewhere).
+    runtime::allow_http_peers(match args.get("--allow-http-peers").map(String::as_str) {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(_) => return Err(ErrorCode::InvalidRequest.into()),
+    });
     let peer = args.get("--peer").cloned();
     let replication = args.get("--replication-peer").cloned();
     let bundle = args
@@ -1397,7 +1412,8 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
                 .await
                 .unwrap_or(Err(ErrorCode::StorageUnavailable.into()))
             } else {
-                // Followers import one block per poll; retain fast polling.
+                // A poll imports one block, or one batch from the peer's
+                // public `GET blocks`; retain fast polling.
                 runtime::sync_once(timer.clone()).await.map(|_| false)
             };
             if let Some(metrics) = &metrics {
@@ -1745,7 +1761,9 @@ async fn follower_node(env: &NodeEnv<'_>, light: bool) -> Result<Node> {
             identity,
         })
     } else {
-        if replication.is_none() || token.as_ref().is_none_or(|s| s.len() < 32) {
+        // Without a replication peer the node syncs from the peer's public
+        // `GET blocks` and needs no token.
+        if replication.is_some() && token.as_ref().is_none_or(|s| s.len() < 32) {
             return Err(ErrorCode::InvalidRequest.into());
         }
         let prefill = if genesis.prefill.is_some() {

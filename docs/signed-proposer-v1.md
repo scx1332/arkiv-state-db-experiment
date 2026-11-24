@@ -62,7 +62,8 @@ the proposer for its block-1 bootstrap transaction (see
 from a [genesis bundle](genesis-bundle-v1.md) instead.
 
 Set `ARKIV_PROPOSER_TOKEN` to a private bearer of at least 32 bytes before
-enabling the private listener or running a full follower. Key generation writes
+enabling the private listener, or running a full follower with
+`--replication-peer`. Key generation writes
 a new file with mode 0600 on Unix and prints only the public address. The
 producer starts paused; private `POST /signed/v1/control` accepts `action`
 `step`, `pause`, `resume` or `retry`. `--start running` enables the periodic
@@ -108,13 +109,30 @@ canonical genesis and its certificate. The producer exports `genesis.bin` and
 ```sh
 target/debug/arkiv-proposer full \
   --run-dir /tmp/signed-full --listen 127.0.0.1:9510 \
-  --peer http://127.0.0.1:9500 --replication-peer http://127.0.0.1:9501 \
+  --peer http://127.0.0.1:9500 \
   --source-id SOURCE_UUID --run-id RUN_HEX32 --chain-id 9001 \
   --genesis-hash 0xGENESIS_HASH --proposer 0xPROPOSER_ADDRESS
 ```
 
-Use `light` instead of `full`, another run directory/listener, and omit the
-replication peer for a light node. Pins are validated and retained in
+A full follower started this way needs no token. Every 50 ms it asks its
+peer's public `GET /signed/v1/blocks` for up to 64 blocks after its head,
+authenticates each header against the pinned proposer and re-executes each
+block. The peer must run a build that serves `GET blocks` (later than
+0.1.0-alpha.7). With `--replication-peer http://127.0.0.1:9501` and
+`ARKIV_PROPOSER_TOKEN` the follower instead reads one header per poll from
+`GET headers` and its body from the private listener, as every release up
+to 0.1.0-alpha.7 does; this still works against older and newer peers.
+
+A peer URL is `https://HOST[:PORT][/PREFIX]`, or `http://` to loopback
+(`127.0.0.1`, `localhost`, `::1`). The prefix is where a reverse proxy
+mounts the node, for example `https://node.example/rpc`. `--allow-http-peers
+true` on `full` and `light` accepts `http://` to any host, for a private
+network or TLS that ends elsewhere. What is synced is verified the same over
+either transport, but a replication token sent over plain HTTP crosses the
+network in clear text.
+
+Use `light` instead of `full` and another run directory/listener for a light
+node; it takes no replication peer. Pins are validated and retained in
 `trust.json` before initialization. Followers can reopen with those same pins
 while the peer is offline; network availability is needed only to advance or
 fetch proofs. A changed signer or pinned identity is rejected.
@@ -151,6 +169,7 @@ All public paths use `/signed/v1/`. The unsigned simulator serves a separate
 | `GET requests/:actor/:requestId` | Durable inclusion and execution status, volatile pending, or unknown |
 | `GET accounts/:actor/nonce` | Committed next nonce, advisory contiguous pending nonce and sampled head |
 | `GET headers` | Bounded certificate batch and sampled signed head; `afterHeight`, `afterHash`, `limit` |
+| `GET blocks` | Producer/full: up to 64 consecutive canonical signed blocks (each with its certificate) and the sampled signed head; `afterHeight`, `afterHash`, `limit`; a page is cut at about 3 MiB of block bytes; `HistoryPruned` once a body expired |
 | `GET feed/blocks` | Full-node sanitized metadata; signed transaction hashes, no calldata |
 | `POST query/classify` | Existing independent language, execution and proof classification |
 | `POST query/resolve`, `query/eq` | Native canonical Eq request/proof transport |
@@ -159,7 +178,9 @@ All public paths use `/signed/v1/`. The unsigned simulator serves a separate
 
 Full/light nodes refuse transaction submissions. The private listener checks
 the configured bearer; public query requests cannot select arbitrary peers or
-forward client credentials. Peer URLs must be HTTPS or loopback HTTP.
+forward client credentials. Peer URLs must be HTTPS or loopback HTTP, with an
+optional path prefix; `--allow-http-peers true` also accepts plain HTTP to
+other hosts.
 
 Signatures use domain-separated native prehashes and exactly 65 bytes
 `r || s || yParity`, with parity 0/1. Received high-S, zero/out-of-range

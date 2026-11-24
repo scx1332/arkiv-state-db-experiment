@@ -17,7 +17,7 @@ mixed-content or CORS restrictions prevent browser execution.
 | API | Node role | Listener |
 | --- | --- | --- |
 | Status, genesis, headers, query classification and request resolution | All | Public |
-| Feed blocks, prefill, accounts, nonces, request status, raw proof generation, tree exploration | Producer/full | Public |
+| Feed blocks, canonical blocks for sync (`GET /signed/v1/blocks`), prefill, accounts, nonces, request status, raw proof generation, tree exploration | Producer/full | Public |
 | Native signed transaction submission | Producer | Public |
 | Verified account, equality, range, inspection and text-query execution | Light | Public |
 | JSON-RPC at `/` | All; reads on light nodes are forwarded without proof verification | Public |
@@ -78,7 +78,8 @@ the feed, block JSON, receipts and request status answer the same refusal,
 and hash lookups (`eth_getTransactionByHash`, `eth_getBlockByHash`,
 `eth_getTransactionReceipt`) answer `null`. Block bodies are kept apart in
 `history.redb`: with `bodyRetention: all` (`--body-retention archive`, the
-default) headers, replication, `eth_getTransactionByBlockNumberAndIndex` and
+default) headers, replication, `GET /signed/v1/blocks`,
+`eth_getTransactionByBlockNumberAndIndex` and
 `eth_getBlockTransactionCountByNumber` are served at every height from the
 kept bodies. Block JSON stays refused below `receiptFloor`, since its
 `logsBloom` is derived from the state before the block, and so does the feed,

@@ -614,6 +614,117 @@
         ]
       }
     },
+    "/signed/v1/blocks": {
+      "get": {
+        "tags": [
+          "Synchronization"
+        ],
+        "operationId": "signedBlocks",
+        "summary": "Page canonical signed blocks",
+        "description": "Roles: producer, full. Public and without a token: consecutive canonical blocks after afterHeight, each with its certificate, as full followers without --replication-peer sync them. Without afterHeight, starts at genesis. A page holds at most limit blocks and about 3 MiB of block bytes (the first block is always returned), so it can be shorter than limit. sampled is the current head certificate, not the last page item. The stored bytes are returned as they are; a follower authenticates and re-executes every block.",
+        "x-node-roles": [
+          "producer",
+          "full"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlocksResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid request, unsupported node role, unknown snapshot, proof or execution failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "HistoryPruned: the body of a requested block has expired on this node (--body-retention window).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryPruned"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Shared admission slots exhausted (ServerBusy), or transaction pool full.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Storage/history unavailable or commit uncertain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Axum rejects malformed or unknown query parameters before the native handler.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "afterHeight",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$",
+              "description": "Unsigned decimal string (not a JSON number)."
+            },
+            "description": "Resume after this height. Requires the matching afterHash."
+          },
+          {
+            "name": "afterHash",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^0x[0-9a-fA-F]{64}$"
+            },
+            "description": "Hash at afterHeight; a mismatch returns ChainConflict."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64,
+              "default": 64
+            },
+            "description": "Maximum blocks; the byte cap can shorten the page."
+          }
+        ]
+      }
+    },
     "/signed/v1/feed/blocks": {
       "get": {
         "tags": [
@@ -4528,6 +4639,33 @@
         "required": [
           "identity",
           "certificates",
+          "sampled"
+        ]
+      },
+      "BlocksResponse": {
+        "type": "object",
+        "properties": {
+          "identity": {
+            "$ref": "#/components/schemas/NodeIdentity"
+          },
+          "blocks": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "string",
+              "pattern": "^0x([0-9a-fA-F]{2})*$",
+              "description": "0x-prefixed hex bytes. Native canonical payloads use the Arkiv binary codec, not JSON or base64."
+            }
+          },
+          "sampled": {
+            "type": "string",
+            "pattern": "^0x([0-9a-fA-F]{2})*$",
+            "description": "0x-prefixed hex bytes. Native canonical payloads use the Arkiv binary codec, not JSON or base64."
+          }
+        },
+        "required": [
+          "identity",
+          "blocks",
           "sampled"
         ]
       },

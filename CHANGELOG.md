@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+### Full followers sync from a public block endpoint, without a token
+
+Steps 4 and 5 of the
+[snapshot sync proposal](docs/proposals/2026-11-24-snapshot-sync.md).
+Nothing stored and nothing in block validity changes: consensus, blocks,
+headers, transactions, signatures, genesis, state roots and the `node.redb`
+and `history.redb` layouts are as in 0.1.0-alpha.7, and this build opens an
+alpha.7 run directory in place with no rebuild or migration.
+`scripts/upgrade-smoke.py` passed 0.1.0-alpha.7 -> this build, followers
+and light clients both ways and rollback included.
+
+- Public `GET /signed/v1/blocks?afterHeight=H&afterHash=X&limit=K` on
+  producer and full nodes answers consecutive canonical blocks after `H`,
+  each with its certificate, and the sampled signed head. A page holds at
+  most 64 blocks and about 3 MiB of block bytes (the first block is always
+  returned). Without `afterHeight` it starts at genesis; a wrong or missing
+  `afterHash` is `ChainConflict`; an expired body is `HistoryPruned` (410).
+  The blocks are read through the height index of `history.redb` and
+  returned as stored. They hold nothing JSON-RPC does not already serve.
+- A `full` node without `--replication-peer` syncs from that endpoint, up
+  to 64 blocks per 50 ms poll, and needs no `ARKIV_PROPOSER_TOKEN`. It
+  authenticates every header against the pinned proposer and re-executes
+  every block, as before. With `--replication-peer` and the token it syncs
+  as alpha.7 does, one block per poll from the private listener.
+- Peer URLs (`--peer`, `--replication-peer`) may carry a path prefix where
+  a reverse proxy mounts the node: `https://host/rpc`. Credentials, a query
+  and a fragment are refused, as before.
+- `--allow-http-peers true|false` (default `false`) on `full` and `light`
+  accepts `http://` peers beyond loopback, for a private network or TLS
+  that ends elsewhere. What is synced is verified the same over either
+  transport; a replication token sent over plain HTTP crosses the network
+  in clear text.
+- **Compatibility:** a peer must run this build or later to serve
+  `GET blocks`. A follower of this build started with `--replication-peer`
+  and the token still syncs from older peers, and older followers sync
+  from this build unchanged.
+- Local check on 2026-11-24 (250 ms blocks, debug build): a follower
+  started on a copy of the producer's `node.redb` and `history.redb`, with
+  no token, caught up 412 blocks in under 11 s and ended on the producer's
+  head (height, hash, state root).
+
 ## 0.1.0-alpha.7 — 2026-11-23
 
 Alpha pre-release. **A drop-in upgrade of 0.1.0-alpha.6** (and of

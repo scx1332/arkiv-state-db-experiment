@@ -746,6 +746,27 @@ impl Host {
         Ok(block)
     }
 
+    /// The stored canonical bytes of block `height` for public sync
+    /// (`GET blocks`), read through the `history.redb` height index at
+    /// every height whose body is kept. They are not authenticated again
+    /// here: a follower authenticates and re-executes every block it
+    /// imports, and a block served to many followers must not cost a
+    /// signature recovery per transaction under the node lock.
+    /// `HistoryPruned` once the body expired.
+    pub fn block_bytes(&self, height: u64) -> Result<Vec<u8>> {
+        if height > self.head.height {
+            return Err(ErrorCode::BlockNotSynced.into());
+        }
+        let (indexed, bytes) = self
+            .history
+            .read_height(height)?
+            .ok_or_else(|| self.records_pruned(height))?;
+        if indexed.certificate.header.height != height {
+            return Err(ErrorCode::StorageCorrupt.into());
+        }
+        Ok(bytes)
+    }
+
     /// The block of `height` for reads of its body alone (its transactions
     /// and their count): [`Self::shared_block`] inside the record window,
     /// and below it the kept body ([`Self::replication_block`]), while

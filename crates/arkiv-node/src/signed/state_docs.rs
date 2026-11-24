@@ -29,6 +29,7 @@ mod tests {
             ("genesis", "get"),
             ("prefill", "get"),
             ("headers", "get"),
+            ("blocks", "get"),
             ("feed/blocks", "get"),
             ("feed/blocks/{height}", "get"),
             ("accounts/{address}", "get"),

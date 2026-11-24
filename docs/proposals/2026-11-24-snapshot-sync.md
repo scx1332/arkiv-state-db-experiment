@@ -1,10 +1,12 @@
 # Proposal: start full nodes from a database snapshot
 
-Status: proposed 2026-11-24, not implemented. Decided so far: the snapshot
-is a copy of the node's database files, genesis and prefill are not part of
-syncing, the node that made a snapshot pins the block bodies since it, and
-the transport is plain HTTP (TLS is a proxy's job). The remaining choices
-are listed under [Open decisions](#open-decisions).
+Status: proposed 2026-11-24. The transport (plan items 4 and 5) was
+implemented on 2026-11-24; the snapshot commands, the pin and the prefill
+skip (items 1 to 3) are not. Decided so far: the snapshot is a copy of the
+node's database files, genesis and prefill are not part of syncing, the
+node that made a snapshot pins the block bodies since it, and the transport
+is plain HTTP (TLS is a proxy's job). The remaining choices are listed
+under [Open decisions](#open-decisions).
 
 This is the snapshot bootstrap that
 [state history pruning](../pruning-design.md#phases) (phase 3) and the
@@ -171,8 +173,19 @@ snapshot and exits, instead of polling forever.
 2. `snapshot create`, the pin, `bodyPin` in status.
 3. `snapshot install` with the SHA-256, pin and body-floor checks, and
    `--verify-state`.
-4. `--allow-http-peers` and the path prefix.
-5. The public batch endpoint; followers without a token.
+4. `--allow-http-peers` and the path prefix. **Implemented 2026-11-24.**
+   A peer is `https://host[:port][/prefix]`, or `http://` to loopback;
+   `--allow-http-peers true` on `full` and `light` accepts `http://` to any
+   host. Credentials, a query and a fragment in the URL are refused.
+5. The public batch endpoint; followers without a token. **Implemented
+   2026-11-24.** Public `GET /signed/v1/blocks?afterHeight=H&afterHash=X&limit=K`
+   on producer and full nodes answers up to 64 consecutive blocks, cut at
+   about 3 MiB of block bytes, from the height index of `history.redb`. A
+   `full` node without `--replication-peer` syncs from it, one batch per
+   50 ms poll, with no token. Nothing stored and nothing in block validity
+   changed. A peer must run this build or later to serve `GET blocks`; with
+   `--replication-peer` and the token a new follower still syncs from older
+   peers, one block per poll as before.
 6. A smoke test: the 2026-11-24 experiment, with `--body-retention window`
    on the producer and a pinned snapshot follower, more than 256 blocks
    between the snapshot and the install.

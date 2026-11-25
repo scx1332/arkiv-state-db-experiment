@@ -314,7 +314,7 @@ It does not read the states before the head, the records or the bodies (see
 the table). It reads the whole state once and scans every object once more
 for the counts, and writes about 42 bytes per object and per reference to
 `RUN/gc-seed` while it counts. On Kenobi's file (106 GiB, 138.6 M objects,
-12 cores, NVMe) the walk took 30 minutes and the count another 30 minutes,
+6 cores with 12 threads, NVMe) the walk took 30 minutes and the count another 30 minutes,
 so an install with `--verify-state` took 65 minutes against about 2 minutes
 without
 ([measurements](proposals/2026-11-24-snapshot-sync.md#kenobi-with-the-snapshot-commands-2026-11-24)).

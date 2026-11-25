@@ -101,7 +101,7 @@ back at the head 11 s later). The copy speed is the disks': about 0.95 GB/s
 alone.
 
 `snapshot install --verify-state` of the same snapshot, on the same host
-(12 cores), took 3,882 s:
+(6 cores, 12 threads), took 3,882 s:
 
 | Step | Time |
 | --- | ---: |

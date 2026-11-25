@@ -1,0 +1,47 @@
+# golem-db's public API (`golemdb-api`) on the arkiv engine.
+#
+# The library is named `golemdb_api` and re-exports golem-db's own types, so
+# code written against golem-db switches engines by renaming one dependency:
+#
+#   golemdb-api = { package = "arkiv-golem-api", path = ".../golem-api" }
+#
+# See README.md.
+[package]
+name = "arkiv-golem-api"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "GPL-3.0-or-later"
+publish = false
+description = "golem-db's public API served by the arkiv engine"
+
+# Its own workspace, lock file and toolchain: it depends on golem-db (a git
+# dependency that needs Rust 1.97, MDBX and clang), which the node's
+# workspace must not pull in. Nothing in the node's workspace depends on this
+# crate.
+[workspace]
+
+[lib]
+name = "golemdb_api"
+path = "src/lib.rs"
+
+[dependencies]
+# golem-db `main`. Every golem-db crate below is pinned to the same revision;
+# conformance/golem-db/ci.sh moves them together.
+real = { package = "golemdb-api", git = "https://github.com/Arkiv-Network/golemdb", rev = "f6dae1dd9a321ccd2fc7bc3540e9818649193f44" }
+golemdb-cells = { git = "https://github.com/Arkiv-Network/golemdb", rev = "f6dae1dd9a321ccd2fc7bc3540e9818649193f44" }
+golemdb-immutable-data = { git = "https://github.com/Arkiv-Network/golemdb", rev = "f6dae1dd9a321ccd2fc7bc3540e9818649193f44" }
+golemdb-index = { git = "https://github.com/Arkiv-Network/golemdb", rev = "f6dae1dd9a321ccd2fc7bc3540e9818649193f44" }
+golemdb-merkle = { git = "https://github.com/Arkiv-Network/golemdb", rev = "f6dae1dd9a321ccd2fc7bc3540e9818649193f44" }
+golemdb-metering = { git = "https://github.com/Arkiv-Network/golemdb", rev = "f6dae1dd9a321ccd2fc7bc3540e9818649193f44" }
+golemdb-storage = { git = "https://github.com/Arkiv-Network/golemdb", rev = "f6dae1dd9a321ccd2fc7bc3540e9818649193f44" }
+# The engine, unmodified. The arrow points only this way.
+arkiv-db = { path = "../crates/arkiv-db" }
+arkiv-db-redb = { path = "../crates/arkiv-db-redb" }
+arkiv-db-storage = { path = "../crates/arkiv-db-storage" }
+# The immutable-data store's own file; the version the engine's store uses.
+redb = { version = "=4.3.0", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+arkiv-db-redb = { path = "../crates/arkiv-db-redb", features = ["testing"] }
+tempfile = "3"

@@ -1,0 +1,5 @@
+# golem-db's toolchain (its rust-toolchain.toml). The node's workspace, one
+# directory up, builds with its own (.github/workflows/ci.yml).
+[toolchain]
+channel = "1.97"
+components = ["rustfmt", "clippy"]

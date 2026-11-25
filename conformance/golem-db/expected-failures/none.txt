@@ -1,0 +1,2 @@
+# No test is expected to fail: golem-db's in-repo conformance crate on
+# golem-db's own engine, through the drop-in crate.

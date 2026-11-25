@@ -1,0 +1,15 @@
+# golem-db-conformance-testing (crates/conformance) on the arkiv backends:
+# the tests expected to fail, each with its reason (format in in-repo.txt).
+#
+#   stale-upstream  fails on golem-db main itself (external-golemdb.txt)
+#   blake3          the engine hashes with keccak-256 only
+#   index-root      index_root is zeros: the term index is under the state
+#                   root (this test also opens a Blake3 database)
+opening::create_new_refuses_an_initialized_store                       blake3
+opening::genesis_id_depends_on_settings_only                           stale-upstream
+opening::genesis_index_root_is_the_hash_of_nothing                     index-root
+opening::genesis_load_reads_a_file                                     stale-upstream
+opening::genesis_writes_only_the_listed_cells                          stale-upstream
+opening::genesis_yaml_rejects_missing_duplicate_and_unknown_fields     stale-upstream
+opening::reopening_with_another_genesis_is_genesis_mismatch            blake3
+query::sort_is_not_implemented_yet                                     stale-upstream

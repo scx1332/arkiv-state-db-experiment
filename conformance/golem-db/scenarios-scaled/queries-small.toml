@@ -1,0 +1,42 @@
+# scenarios/queries/arkiv.toml at 2,000 records and 5 runs per query: the same shape and queries, small
+# enough for a smoke run. It exercises the query path of every backend; it measures nothing.
+name = "queries-small"
+description = "Arkiv-like queries at 2k records"
+seed = 7
+
+[database]
+hash = "keccak-256"
+limits = { max_cell_name_len = 32, max_str_len = 64, max_bytes_len = 1024 }
+
+[shape]
+attributes = [
+    { name = "kind", type = "str", cardinality = 1, len = 8 },
+    { name = "status", type = "str", cardinality = 4, len = 8 },
+    { name = "project", type = "str", cardinality = 50, distribution = "zipf", len = 16 },
+    { name = "$owner", type = "str", cardinality = 10000, distribution = "zipf", len = 40 },
+    { name = "$expiresAt", type = "u64", cardinality = 1000000 },
+    { name = "id", type = "str", distribution = "unique", len = 36 },
+]
+fields = [{ name = "payload", type = "bytes", len = 512 }]
+
+[workload]
+kind = "queries"
+at = [2000]
+runs = 5
+queries = [
+    { name = "kind (all records)", filter = { eq = { kind = 0 } } },
+    { name = "kind, count", filter = { eq = { kind = 0 } }, count = true },
+    { name = "status, limit 10", filter = { eq = { status = 0 } }, limit = 10 },
+    { name = "status, only id", filter = { eq = { status = 0 } }, only = ["id"] },
+    { name = "status, offset 300", filter = { eq = { status = 0 } }, offset = 300 },
+    { name = "exists status", filter = { exists = "status" } },
+    { name = "project top + status", filter = { and = [{ eq = { project = 0 } }, { eq = { status = 1 } }] } },
+    { name = "$owner top", filter = { eq = { "$owner" = 0 } } },
+    { name = "$expiresAt > (10%)", filter = { range = { "$expiresAt" = { gt = 900000 } } } },
+    { name = "project 40 + $expiresAt > (10%)", filter = { and = [{ eq = { project = 40 } }, { range = { "$expiresAt" = { gt = 900000 } } }] } },
+    { name = "id (one record)", filter = { eq = { id = 1 } } },
+    { name = "id range (1000 ids)", filter = { range = { id = { gte = 1, lte = 1000 } } } },
+    { name = "id prefix", filter = { prefix = { id = "000000000000000000000000000000000" } } },
+    { name = "project in top 10", filter = { in = { project = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] } } },
+    { name = "status or project 40", filter = { or = [{ eq = { status = 2 } }, { eq = { project = 40 } }] } },
+]

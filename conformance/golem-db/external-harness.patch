@@ -1,0 +1,189 @@
+diff --git a/crates/conformance/src/lib.rs b/crates/conformance/src/lib.rs
+index 7964afa..63a3157 100644
+--- a/crates/conformance/src/lib.rs
++++ b/crates/conformance/src/lib.rs
+@@ -25,7 +25,7 @@ pub const RECORD_LIMITS: RecordLimits = RecordLimits {
+ pub const B: Budget = Budget::Unlimited;
+ 
+ pub fn genesis() -> Genesis {
+-    Genesis::new(HashAlgorithm::Keccak256, LIMITS, RECORD_LIMITS, None)
++    Genesis::new(HashAlgorithm::Keccak256, LIMITS, RECORD_LIMITS, None, PricingConfig::zero())
+ }
+ 
+ /// A fresh database on MDBX, the store hosts run on, in its own temporary
+diff --git a/crates/conformance/tests/oracle/main.rs b/crates/conformance/tests/oracle/main.rs
+index 20a3720..cafc47e 100644
+--- a/crates/conformance/tests/oracle/main.rs
++++ b/crates/conformance/tests/oracle/main.rs
+@@ -432,7 +432,7 @@ fn outcome<T: std::fmt::Debug, U: std::fmt::Debug>(
+ impl Run {
+     fn new() -> Self {
+         Self {
+-            db: open_db(&Genesis::new(HashAlgorithm::Keccak256, LIMITS, CAPS, None)),
++            db: open_db(&Genesis::new(HashAlgorithm::Keccak256, LIMITS, CAPS, None, PricingConfig::zero())),
+             mirror: Mirror::new(Limits {
+                 max_cell_name_len: LIMITS.max_cell_name_len as usize,
+                 max_str_len: LIMITS.max_str_len as usize,
+diff --git a/crates/conformance/tests/spec/immutable_data.rs b/crates/conformance/tests/spec/immutable_data.rs
+index c5ee540..155cd14 100644
+--- a/crates/conformance/tests/spec/immutable_data.rs
++++ b/crates/conformance/tests/spec/immutable_data.rs
+@@ -23,7 +23,7 @@ fn immutable_genesis() -> Genesis {
+         Some(ImmutableDataConfig::new(
+             2,
+             vec![segment("headers", &["h"]), segment("bodies", &["a", "b"])],
+-        )),
++        )), PricingConfig::zero(),
+     )
+ }
+ 
+diff --git a/crates/conformance/tests/spec/opening.rs b/crates/conformance/tests/spec/opening.rs
+index 2416b57..fc58bc9 100644
+--- a/crates/conformance/tests/spec/opening.rs
++++ b/crates/conformance/tests/spec/opening.rs
+@@ -113,7 +113,7 @@ fn zero_name_length_is_invalid_config() {
+         HashAlgorithm::Keccak256,
+         limits,
+         RECORD_LIMITS,
+-        None,
++        None, PricingConfig::zero(),
+     ));
+     assert!(
+         matches!(result, Err(OpenError::InvalidConfig(_))),
+@@ -139,7 +139,7 @@ fn limits_that_do_not_fit_an_mdbx_key_are_invalid_config() {
+     ] {
+         let result = open(
+             dir.path(),
+-            Genesis::new(HashAlgorithm::Keccak256, limits, RECORD_LIMITS, None),
++            Genesis::new(HashAlgorithm::Keccak256, limits, RECORD_LIMITS, None, PricingConfig::zero()),
+             OpenMode::CreateIfMissing,
+         );
+         assert!(
+@@ -155,7 +155,7 @@ fn limits_that_do_not_fit_an_mdbx_key_are_invalid_config() {
+     };
+     open(
+         dir.path(),
+-        Genesis::new(HashAlgorithm::Keccak256, limits, RECORD_LIMITS, None),
++        Genesis::new(HashAlgorithm::Keccak256, limits, RECORD_LIMITS, None, PricingConfig::zero()),
+         OpenMode::CreateIfMissing,
+     )
+     .unwrap();
+@@ -231,7 +231,7 @@ fn create_new_refuses_an_initialized_store() {
+         Err(OpenError::AlreadyInitialized)
+     ));
+     // "validate, then": a mismatching genesis is reported as such.
+-    let other = Genesis::new(HashAlgorithm::Blake3, LIMITS, RECORD_LIMITS, None);
++    let other = Genesis::new(HashAlgorithm::Blake3, LIMITS, RECORD_LIMITS, None, PricingConfig::zero());
+     assert!(matches!(
+         open(dir.path(), other, OpenMode::CreateNew),
+         Err(OpenError::GenesisMismatch)
+@@ -244,7 +244,7 @@ fn reopening_with_another_genesis_is_genesis_mismatch() {
+     let dir = tempfile::tempdir().unwrap();
+     open(dir.path(), genesis(), OpenMode::CreateNew).unwrap();
+     for other in [
+-        Genesis::new(HashAlgorithm::Blake3, LIMITS, RECORD_LIMITS, None),
++        Genesis::new(HashAlgorithm::Blake3, LIMITS, RECORD_LIMITS, None, PricingConfig::zero()),
+         Genesis::new(
+             HashAlgorithm::Keccak256,
+             LIMITS,
+@@ -252,7 +252,7 @@ fn reopening_with_another_genesis_is_genesis_mismatch() {
+                 max_cells: 33,
+                 ..RECORD_LIMITS
+             },
+-            None,
++            None, PricingConfig::zero(),
+         ),
+         Genesis::new(
+             HashAlgorithm::Keccak256,
+@@ -261,7 +261,7 @@ fn reopening_with_another_genesis_is_genesis_mismatch() {
+                 max_indexed_cells: 23,
+                 ..RECORD_LIMITS
+             },
+-            None,
++            None, PricingConfig::zero(),
+         ),
+         Genesis::new(
+             HashAlgorithm::Keccak256,
+@@ -270,7 +270,7 @@ fn reopening_with_another_genesis_is_genesis_mismatch() {
+                 ..LIMITS
+             },
+             RECORD_LIMITS,
+-            None,
++            None, PricingConfig::zero(),
+         ),
+         Genesis::new(
+             HashAlgorithm::Keccak256,
+@@ -279,7 +279,7 @@ fn reopening_with_another_genesis_is_genesis_mismatch() {
+                 ..LIMITS
+             },
+             RECORD_LIMITS,
+-            None,
++            None, PricingConfig::zero(),
+         ),
+         Genesis::new(
+             HashAlgorithm::Keccak256,
+@@ -288,7 +288,7 @@ fn reopening_with_another_genesis_is_genesis_mismatch() {
+                 ..LIMITS
+             },
+             RECORD_LIMITS,
+-            None,
++            None, PricingConfig::zero(),
+         ),
+     ] {
+         for mode in [OpenMode::CreateIfMissing, OpenMode::ExistingOnly] {
+@@ -354,7 +354,7 @@ fn genesis_and_info_accessors() {
+ #[test]
+ fn genesis_index_root_is_the_hash_of_nothing() {
+     for algorithm in [HashAlgorithm::Keccak256, HashAlgorithm::Blake3] {
+-        let db = open_db(&Genesis::new(algorithm, LIMITS, RECORD_LIMITS, None));
++        let db = open_db(&Genesis::new(algorithm, LIMITS, RECORD_LIMITS, None, PricingConfig::zero()));
+         assert_eq!(db.info().index_root, h(algorithm, b""), "{algorithm:?}");
+     }
+ }
+@@ -485,7 +485,7 @@ fn spec_genesis_id(
+ #[ignore = "spec-gap: no #keyMode genesis cell, and the record caps are stored as u64, not u32"]
+ fn genesis_id_follows_the_spec_formula() {
+     for algorithm in [HashAlgorithm::Keccak256, HashAlgorithm::Blake3] {
+-        let db = open_db(&Genesis::new(algorithm, LIMITS, RECORD_LIMITS, None));
++        let db = open_db(&Genesis::new(algorithm, LIMITS, RECORD_LIMITS, None, PricingConfig::zero()));
+         assert_eq!(
+             db.info().genesis_id,
+             spec_genesis_id(algorithm, LIMITS, RECORD_LIMITS),
+diff --git a/crates/conformance/tests/spec/query.rs b/crates/conformance/tests/spec/query.rs
+index b79c089..48bf700 100644
+--- a/crates/conformance/tests/spec/query.rs
++++ b/crates/conformance/tests/spec/query.rs
+@@ -682,7 +682,7 @@ fn only_the_head_can_be_queried() {
+ 
+ fn sorted() -> QueryOp {
+     QueryOp::from_filter(eq("color", marker::Str, "red"), B)
+-        .sort([SortKey::asc("n", CellType::Uint(Width::W4))])
++        .sort([SortKey::asc("n", marker::U32)])
+ }
+ 
+ /// Staging: "unsupported parts return `NotImplemented`, naming the part"
+diff --git a/crates/conformance/tests/spec/record_caps.rs b/crates/conformance/tests/spec/record_caps.rs
+index a42c42b..0dd044f 100644
+--- a/crates/conformance/tests/spec/record_caps.rs
++++ b/crates/conformance/tests/spec/record_caps.rs
+@@ -12,7 +12,7 @@ const CAPS: RecordLimits = RecordLimits {
+ };
+ 
+ fn capped(caps: RecordLimits) -> TestDb {
+-    open_db(&Genesis::new(HashAlgorithm::Keccak256, LIMITS, caps, None))
++    open_db(&Genesis::new(HashAlgorithm::Keccak256, LIMITS, caps, None, PricingConfig::zero()))
+ }
+ 
+ fn u(n: u32) -> CellValue {
+diff --git a/crates/harness/src/main.rs b/crates/harness/src/main.rs
+index d698461..079974d 100644
+--- a/crates/harness/src/main.rs
++++ b/crates/harness/src/main.rs
+@@ -72,6 +72,7 @@ fn run(scenario: &Scenario) -> Result<String> {
+             max_indexed_cells: u64::MAX,
+         },
+         None,
++        golemdb_api::PricingConfig::zero(),
+     ));
+     if let Some(window) = scenario.database.pruning_window {
+         config = config.with_pruning(PruningConfig::new(window));

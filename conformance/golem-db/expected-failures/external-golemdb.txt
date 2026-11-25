@@ -1,0 +1,12 @@
+# golem-db-conformance-testing (crates/conformance) on golem-db's own engine,
+# through the drop-in crate: the tests expected to fail, each with its
+# reason (format in in-repo.txt).
+#
+#   stale-upstream  the harness has not caught up with golem-db main: the
+#                   genesis YAML now needs `metering`, genesis writes the
+#                   metering cells, and sorting is implemented
+opening::genesis_id_depends_on_settings_only                           stale-upstream
+opening::genesis_load_reads_a_file                                     stale-upstream
+opening::genesis_writes_only_the_listed_cells                          stale-upstream
+opening::genesis_yaml_rejects_missing_duplicate_and_unknown_fields     stale-upstream
+query::sort_is_not_implemented_yet                                     stale-upstream

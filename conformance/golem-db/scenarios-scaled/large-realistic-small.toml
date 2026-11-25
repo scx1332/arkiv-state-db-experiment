@@ -1,11 +1,11 @@
 # Scaled-down copy of scenarios/large/large-realistic.toml (1/10 of the commits: fill 75 x 1,000 = 75k records,
-# then 75 steady-state commits of 1,000). Same seed, database, shape, mixes and block size; profile_at removed
-# (perf unavailable); logs renamed to small-*.
+# then 75 steady-state commits of 1,000). Same seed, database, shape, mixes and block size; profile_at and
+# table_log removed (perf unavailable; table_log reads MDBX directly, so it works on the golemdb backend only);
+# the commit log renamed to small-*.
 name = "large-realistic-small"
 description = "75k Arkiv-like records (6 attributes, 1 KB payload), then 75 commits of 35% creates, 30% patches, 35% deletes (1/10 of large-realistic)"
 seed = 5
 commit_log = "results/small-large-realistic.csv"
-table_log = "results/small-large-realistic-tables.csv"
 
 [database]
 hash = "keccak-256"

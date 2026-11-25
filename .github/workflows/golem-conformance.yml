@@ -1,7 +1,10 @@
 name: golem-db conformance
 
-# Runs this repository's engine behind golem-db's API inside the
-# golem-db-conformance-testing harness (conformance/golem-db/README.md).
+# Builds golem-api (golem-db's API on the arkiv engine) and runs the test
+# suites written against golem-db's API on it, at pinned revisions
+# (conformance/golem-db/README.md). An unexpected failure and an unexpected
+# pass both fail the job. The companion workflow golem-conformance-latest.yml
+# follows the upstream branches.
 
 on:
   push:
@@ -9,7 +12,7 @@ on:
   pull_request:
   workflow_dispatch:
   schedule:
-    - cron: "17 4 * * 1" # Mondays 04:17 UTC
+    - cron: "17 4 * * 1" # Mondays 04:17 UTC: the pinned commits must stay fetchable
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
@@ -20,13 +23,13 @@ permissions:
   contents: read
 
 env:
-  # Pinned revisions the kit is tested against. Bump together with
-  # conformance/golem-db (README.md "CI").
-  HARNESS_REV: 686ddfc9c3427f0e27573884c8b30597314bb1f1 # golem-db-conformance-testing
-  GOLEM_DB_REV: 57c48ca726e0c72860c51b6527532020ee9f5686 # golem-db, feature/golem-db-api
-  # Tips followed by the non-gating golem-latest job.
-  HARNESS_LATEST: HEAD # default branch (develop)
-  GOLEM_DB_LATEST: feature/golem-db-api
+  # golem-db's conformance crate: the tip of its pull-request stack
+  # (ev/conformance-errors), which is golem-db main f6dae1d plus
+  # crates/conformance. golem-api/Cargo.toml pins the golem-db it builds
+  # against, f6dae1d. Bump both together (conformance/golem-db/README.md).
+  GOLEM_DB_REV: ef6269afc03acd1b6eec5e53506216446663eca0
+  # golem-db-conformance-testing, branch develop.
+  HARNESS_REV: a1b6b6b6b7b6f6c5af3578df4d2e647fc443520c
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -38,62 +41,32 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-          path: arkiv-state-db-experiment
 
       - name: Install clang (MDBX bindgen)
         run: sudo apt-get update -q && sudo apt-get install -y -q clang libclang-dev
 
-      - name: Set up harness
-        run: arkiv-state-db-experiment/conformance/golem-db/ci.sh setup "$HARNESS_REV" "$GOLEM_DB_REV"
-
-      - name: Install harness toolchain
-        working-directory: golem-db-conformance-testing
+      - name: Install golem-db's toolchain
+        working-directory: golem-api
         run: |
           rustup toolchain install
           rustc --version
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          workspaces: golem-db-conformance-testing -> target
-          key: pinned-${{ env.HARNESS_REV }}-${{ env.GOLEM_DB_REV }}
+          workspaces: golem-api -> ../conformance/golem-db/work/target
+          key: pinned-${{ env.GOLEM_DB_REV }}-${{ env.HARNESS_REV }}
 
-      - name: Ported golem-db tests (gated by expected-failures.txt)
-        run: arkiv-state-db-experiment/conformance/golem-db/ci.sh tests
+      - name: Fetch the suites
+        run: conformance/golem-db/ci.sh setup "$GOLEM_DB_REV" "$HARNESS_REV"
 
-      - name: Scenario smoke run (golemdb, arkiv, arkiv-memory)
-        run: arkiv-state-db-experiment/conformance/golem-db/ci.sh smoke
+      - name: golem-api (rustfmt, clippy, its own tests)
+        run: conformance/golem-db/ci.sh kit
 
-  golem-latest:
-    name: golem-latest (non-gating)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    continue-on-error: true
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-          path: arkiv-state-db-experiment
+      - name: golem-db crates/conformance (gated by expected-failures/in-repo.txt)
+        run: conformance/golem-db/ci.sh in-repo
 
-      - name: Install clang (MDBX bindgen)
-        run: sudo apt-get update -q && sudo apt-get install -y -q clang libclang-dev
+      - name: External harness, spec suite and oracle (gated by expected-failures/external.txt)
+        run: conformance/golem-db/ci.sh external
 
-      - name: Set up harness at the latest revisions
-        run: arkiv-state-db-experiment/conformance/golem-db/ci.sh setup "$HARNESS_LATEST" "$GOLEM_DB_LATEST"
-
-      - name: Install harness toolchain
-        working-directory: golem-db-conformance-testing
-        run: |
-          rustup toolchain install
-          rustc --version
-
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          workspaces: golem-db-conformance-testing -> target
-          key: latest
-
-      - name: Ported golem-db tests (gated by expected-failures.txt)
-        run: arkiv-state-db-experiment/conformance/golem-db/ci.sh tests
-
-      - name: Scenario smoke run (golemdb, arkiv, arkiv-memory)
-        run: arkiv-state-db-experiment/conformance/golem-db/ci.sh smoke
+      - name: Load tool smoke run (golemdb, arkiv, arkiv-memory)
+        run: conformance/golem-db/ci.sh smoke

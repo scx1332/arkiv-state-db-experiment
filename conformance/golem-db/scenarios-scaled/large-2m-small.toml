@@ -1,10 +1,10 @@
 # Scaled-down copy of scenarios/large/large-2m.toml (1/10 of the commits: 200 x 1,000 creates = 200k records).
-# Same seed, database, shape and block size; profile_at removed (perf unavailable); logs renamed to small-*.
+# Same seed, database, shape and block size; profile_at and table_log removed (perf unavailable; table_log reads
+# MDBX directly, so it works on the golemdb backend only); the commit log renamed to small-*.
 name = "large-2m-small"
-description = "200k records created, 1,000 per commit (1/10 of large-2m); table sizes after each commit"
+description = "200k records created, 1,000 per commit (1/10 of large-2m)"
 seed = 4
 commit_log = "results/small-large-2m.csv"
-table_log = "results/small-large-2m-tables.csv"
 
 [database]
 hash = "keccak-256"

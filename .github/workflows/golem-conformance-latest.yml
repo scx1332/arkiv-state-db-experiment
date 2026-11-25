@@ -1,0 +1,98 @@
+name: golem-db conformance (latest upstream)
+
+# The same checks as golem-conformance.yml, against what upstream has now:
+# golem-db main, the tip of its conformance pull-request stack, and the
+# external harness's default branch. Not a gate for this repository's
+# commits, so it is a workflow of its own: when upstream moves in a way the
+# kit does not follow, this run is red. Nothing here is allowed to fail
+# quietly. conformance/golem-db/README.md says what to do then.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "47 4 * * 1" # Mondays 04:47 UTC
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+# Read-only token: nothing here writes to the repository.
+permissions:
+  contents: read
+
+env:
+  # The number of tests is not compared: upstream adds tests. A new test
+  # that fails on the arkiv engine still fails the run.
+  CONFORMANCE_COUNTS: any
+  CARGO_TERM_COLOR: always
+
+jobs:
+  latest:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # golem-db main with the external harness's default branch.
+          - name: golem-db main
+            golem-db: main
+            harness: HEAD
+          # The conformance crate while it is still a pull-request stack.
+          # When the stack merges this branch goes away and the fetch fails:
+          # move the in-repo suite to the entry above.
+          - name: golem-db conformance stack
+            golem-db: ev/conformance-errors
+            harness: ""
+    env:
+      GOLEM_DB_REF: ${{ matrix.golem-db }}
+      HARNESS_REF: ${{ matrix.harness }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install clang (MDBX bindgen)
+        run: sudo apt-get update -q && sudo apt-get install -y -q clang libclang-dev
+
+      - name: Install golem-db's toolchain
+        working-directory: golem-api
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: golem-api -> ../conformance/golem-db/work/target
+          key: latest-${{ matrix.golem-db }}
+
+      - name: Build golem-api against upstream's golem-db
+        run: conformance/golem-db/ci.sh track "$GOLEM_DB_REF"
+
+      - name: Fetch the suites
+        run: |
+          if [ -n "$HARNESS_REF" ]; then
+            conformance/golem-db/ci.sh setup "$GOLEM_DB_REF" "$HARNESS_REF"
+          else
+            conformance/golem-db/ci.sh setup "$GOLEM_DB_REF"
+          fi
+
+      - name: golem-api (rustfmt, clippy, its own tests)
+        run: conformance/golem-db/ci.sh kit
+
+      - name: golem-db crates/conformance, if this revision has it
+        run: |
+          if [ -d conformance/golem-db/work/golemdb/crates/conformance ]; then
+            conformance/golem-db/ci.sh in-repo
+          else
+            echo "::notice::golem-db $GOLEM_DB_REF has no crates/conformance yet"
+          fi
+
+      - name: External harness, spec suite and oracle
+        if: ${{ matrix.harness != '' }}
+        run: conformance/golem-db/ci.sh external
+
+      - name: Load tool smoke run (golemdb, arkiv, arkiv-memory)
+        if: ${{ matrix.harness != '' }}
+        run: conformance/golem-db/ci.sh smoke

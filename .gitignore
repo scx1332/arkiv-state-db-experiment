@@ -3,3 +3,7 @@
 __pycache__/
 
 node_modules/
+
+# Checkouts and build output of the golem-db conformance kit
+# (conformance/golem-db/ci.sh).
+/conformance/golem-db/work/

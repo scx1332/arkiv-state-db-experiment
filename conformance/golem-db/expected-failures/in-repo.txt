@@ -1,0 +1,19 @@
+# golem-db's in-repo conformance crate (crates/conformance) on the arkiv
+# backends: the tests expected to fail, each with its reason.
+#
+#   <test name> <reason>
+#
+# check-tests.py fails the job when a test outside this list fails, when a
+# listed test passes (remove it), or when a listed test is not run. Reasons:
+#
+#   metering        cost is 0, the ledger is empty, budgets are not enforced
+#   blake3          the engine hashes with keccak-256 only
+#   size-cap        MdbxOptions::max_map_size has no counterpart on RedbStore
+#
+# See README.md, "What the adapter does not serve".
+api_shape::hash_is_hidden_behind_one_type                              blake3
+errors::a_full_store_is_store_full_and_writes_nothing                  size-cap
+receipts::an_overflowing_cost_is_out_of_budget_even_unlimited          metering
+receipts::handles_and_targets_are_checked_before_the_budget            metering
+receipts::out_of_budget_counts_nothing_and_spends_within_the_budget    metering
+receipts::valid_calls_are_charged                                      metering

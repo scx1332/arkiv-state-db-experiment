@@ -100,6 +100,21 @@ copy was running on the same disks, took 270 s (follower stopped for 279 s,
 back at the head 11 s later). The copy speed is the disks': about 0.95 GB/s
 alone.
 
+`snapshot install --verify-state` of the same snapshot, on the same host
+(12 cores), took 3,882 s:
+
+| Step | Time |
+| --- | ---: |
+| Copy with the hash check (while the second `snapshot create` above ran) | 246 s |
+| Walk of the head state, every object read and checked | 1,826 s |
+| Rebuild of the garbage-collection counts | 1,810 s |
+
+The rebuilt counts were 138,639,820 live objects of 138,639,848 stored
+(57.8 GB of object bytes), 28 of them not reached from the head. The node
+started on the result was 2,153 blocks behind by then and reached the head
+116 s after its start, about 19 blocks per second. The size of `gc-seed`
+during the count was not recorded.
+
 Not covered by this run: a producer with `--body-retention window` (both
 Kenobi nodes keep every body, so the pin was set but never needed; the
 smoke test covers it), and a snapshot moved between hosts.

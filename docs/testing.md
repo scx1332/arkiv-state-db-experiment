@@ -34,13 +34,18 @@ branches and on pull requests, with the workspace's minimum Rust version:
 maintained crates, then `cargo test --workspace`. Ignored tests and the
 scripts under `scripts/` are not run.
 
-`.github/workflows/golem-conformance.yml` builds the
-[golem-db conformance kit](../conformance/golem-db/README.md#ci) inside the
-upstream harness at the revisions pinned in the workflow, compares the
-ported golem-db tests with `conformance/golem-db/expected-failures.txt` and
-smoke-runs two small scenarios on each backend. A weekly non-gating job
-repeats this at the latest upstream revisions. Results of a full run are in
-the [conformance report](golem-db-conformance-report.md).
+`.github/workflows/golem-conformance.yml` builds
+[`golem-api`](../golem-api/README.md) (golem-db's API on our engine, a crate
+outside the node's workspace) and runs the
+[golem-db conformance kit](../conformance/golem-db/README.md#ci) at the
+revisions pinned in the workflow: the crate's own tests, golem-db's
+conformance crate and the external harness's, each compared with a list of
+expected failures in `conformance/golem-db/expected-failures/`, and a smoke
+run of the load tool on each backend. An unexpected failure and an
+unexpected pass both fail it. `golem-conformance-latest.yml` repeats this
+weekly against upstream's current branches, as a workflow of its own so that
+a failure shows. Results are in the
+[golem-db API comparison](golem-db-api-comparison.md).
 
 ## Oracle rules
 

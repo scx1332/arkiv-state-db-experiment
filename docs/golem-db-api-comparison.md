@@ -12,7 +12,48 @@ golem-db `main` as of 2026-11-24.
 Each claim below is marked as **run** (observed in a build or test run made
 for this document) or **read** (taken from source, not executed).
 
-## Summary
+## Status: the `golem-api` crate
+
+Added later on 2026-11-25. The analysis below led to a crate,
+[`golem-api`](../golem-api/README.md): golem-db's public API on our engine,
+with the library name `golemdb_api`. It replaces the scratch adapter the
+analysis used and the old kit. The [gap table](#gap-analysis) and the
+[recommendation](#recommendation) below are updated to it; the
+[Evidence](#evidence) section keeps the record of the analysis and adds the
+crate's results.
+
+What the owner decided, and what the crate does:
+
+- **Metering stays a stand-in.** Cost 0, empty ledger, budgets not enforced.
+- **Blake3 is not supported.** `open` refuses it.
+- **Queries run on the engine's native query form.** Every operator is
+  translated to one engine query; ORDER BY and two edge cases fall back,
+  explicitly ([table](../golem-api/README.md#queries)).
+- **Immutable data is implemented**, in a store of the crate's own, with
+  golem-db `main`'s semantics
+  ([design](../golem-api/README.md#immutable-data)).
+
+Results at the pinned revisions (run through `conformance/golem-db/ci.sh`):
+
+| Suite | golem-db `main`, through the crate | Our engine, scratch adapter | Our engine, `golem-api` |
+| --- | --- | --- | --- |
+| In-repo `crates/conformance` (`ef6269a`), 100 run | 100 pass | 94 pass, 6 fail | 94 pass, 6 expected failures |
+| External harness (`a1b6b6b`), spec suite, 184 run | 179 pass, 5 fail | 165 pass, 19 fail | 176 pass, 8 expected failures |
+| External harness, SQLite oracle | 2 of 2 | 2 of 2 | 2 of 2 |
+| `golem-api`'s own tests | | | 25 of 25 |
+
+The 14 expected failures on our engine: 5 are stale tests of the external
+harness that fail on golem-db too, 4 metering, 3 Blake3, 1 index root, 1
+store size cap. All 12 immutable-data tests of the external harness that
+run now pass, unmodified.
+
+Of the 70 API elements of the gap table, 56 are exact, 10 are stand-ins and
+4 are not supported. Before immutable data it was 49, 10 and 11.
+
+## Summary of the analysis
+
+This section and the ones up to the gap table are as written for the
+analysis, before the crate existed.
 
 - **The harness is golem-db's own `crates/conformance`.** Issue #140
   ("Epic: Conformance tests") moves the tests of
@@ -46,8 +87,8 @@ for this document) or **read** (taken from source, not executed).
   harness patch does not apply and the adapter does not compile. The
   `golem-latest` CI job has been failing at setup, and the workflow shows
   green because the job is `continue-on-error`.
-- **Of 70 API elements, 49 map exactly, 10 with a filler, 11 are missing**
-  ([table](#gap-analysis)).
+- **Of 70 API elements, 49 mapped exactly, 10 with a filler, 11 were
+  missing.** The [table](#gap-analysis) now shows the crate: 56, 10 and 4.
 
 ## Revisions
 
@@ -313,8 +354,8 @@ patch to `crates/harness` and selected with `GOLEMDB_BACKEND`. It has no
 
 ## Gap analysis
 
-"Adapter" is the scratch crate described under [Evidence](#evidence). Engine
-types are in `crates/arkiv-db`. Status: **exact** means a caller cannot tell
+"Adapter" is the [`golem-api`](../golem-api/README.md) crate; the table shows
+it as it is now. Engine types are in `crates/arkiv-db`. Status: **exact** means a caller cannot tell
 the difference through the API, apart from the hash values themselves;
 **filler** means the call works and returns a constant or a derived
 stand-in; **missing** means the call fails or the feature is absent.
@@ -327,7 +368,7 @@ it) or `read`.
 | 2 | `Database::open` | `DurableEngine` on `RedbStore`, file `arkiv.redb` | exact | run | none |
 | 3 | `Database::open_with_options`, `MdbxOptions` | options ignored | filler | run | `max_map_size` does not cap the store: 1 test never sees `StoreFull` |
 | 4 | `Database::open_memory` | in-memory `Engine` | exact | run | none |
-| 5 | `Database::from_store` | none: `Store` is golem-db's key/value layer | missing | read | cannot be offered; the shim opens golem-db's own engine |
+| 5 | `Database::from_store` | none: `Store` is golem-db's key/value layer | missing | read | `InvalidConfig` on the arkiv backends; golem-db's own with `GOLEMDB_BACKEND=golemdb` |
 | 6 | `Database::genesis` | kept by the adapter | exact | run | none |
 | 7 | `OpenInfo::created`, `commit_id` | engine head minus the namespace commit | exact | run | none |
 | 8 | `OpenInfo::state_root` | `Snapshot::state_root` | exact | run | other bytes; equal after reopen and equal to the seal's root |
@@ -339,11 +380,11 @@ it) or `read`.
 | 14 | `cell_limits` | `Limits::{max_cell_name_len, max_str_len, max_bytes_len}`; `max_indexed_len` set to `max_str_len` | exact | run | `InvalidConfig` if names exceed 32 bytes or `max_str_len` exceeds 512 |
 | 15 | `record_limits` | checked by the adapter; `Limits::max_cells` set to match | exact | run | none up to 1024 cells per record |
 | 16 | `metering` (`PricingConfig`) | stored and returned, never charged | filler | run | see 39 to 41 |
-| 17 | `immutable_data` | validated, then unused | missing | run | see 64 to 68 |
+| 17 | `immutable_data` | declares the segments of the crate's immutable store; part of the genesis id | exact | run | `shard_span` and `compression` change the identity only, not the storage |
 | 18 | `OpenConfig::mode`, `OpenMode` | adapter logic over `DurableEngine::initialize` and `open` | exact | run | none |
 | 19 | `OpenConfig::host_schemas` | passed to golem-db's `PricingConfig::validate` when creating | filler | read | not checked on reopen |
-| 20 | `OpenConfig::immutable_data_directory` | ignored | missing | read | none without immutable data |
-| 21 | `OpenConfig::pruning`, `PruningConfig` | `Retention::Window(window)` of the durable engine | exact | read | not exercised by any test |
+| 20 | `OpenConfig::immutable_data_directory` | where `immutable.redb` lives; default `<database>/immutable-data` | exact | run | none; the files inside are not golem-db's format |
+| 21 | `OpenConfig::pruning`, `PruningConfig` | `Retention::Window(window)` of the durable engine | exact | run | checked by the crate's own test only |
 | 22 | `OpenError` kinds | `NotInitialized`, `AlreadyInitialized`, `GenesisMismatch`, `InvalidConfig`, `CorruptState`, `Io`, `Yaml`, `Metering` | exact | run | `Unsupported*` are never returned |
 | 23 | `RecordOp` builders | golem-db's own code | exact | run | none |
 | 24 | `create` | golem-db's admission copied into the adapter, then `WriteOp::CreateRecord` | exact | run | none; one extra read per create |
@@ -368,15 +409,15 @@ it) or `read`.
 | 43 | Budget enforcement, `OutOfBudget` | none | missing | run | never returned; 3 tests |
 | 44 | `metering_model` | constant: genesis model 1 at the selected commit | filler | read | none while no call changes a model |
 | 45 | `model_weights` | the genesis weights | filler | read | same |
-| 46 | `query`, `QueryPage`, `evaluated_at` | adapter over `Snapshot::try_query` | exact | run | none in results; cost differs (below) |
-| 47 | `count` | size of the adapter's match set | exact | run | none |
-| 48 | `Filter::Eq`, `In` | `Term::Eq`; `In` is a union | exact | run | none |
+| 46 | `query`, `QueryPage`, `evaluated_at` | one engine `Query` (flat DNF) per filter, through `Snapshot::try_query` | exact | run | none |
+| 47 | `count` | `Snapshot::try_count` of the translated query | exact | run | none |
+| 48 | `Filter::Eq`, `In` | `Term::Eq`; `In` is one group per value | exact | run | none |
 | 49 | `Filter::Range` | `Term::Range`; two open sides become `Term::Exists` | exact | run | none |
 | 50 | `Filter::Prefix` | `Term::StartsWith` | exact | run | none |
-| 51 | `Filter::Exists`, typed and untyped | `Term::Exists`; untyped is a union over the 23 indexable types | exact | run | none |
-| 52 | `And`, `Or`, nesting to depth 64 | set operations on record ids in the adapter | exact | run | none; the engine's own query form is a flat DNF of 8 groups by 8 literals |
-| 53 | ORDER BY: `SortKey`, absent values, ties, cap of 4 | fetch and sort in the adapter | exact | run | none; the engine orders by record id only |
-| 54 | `limit`, `offset`, `with_total`, page cap 100 | adapter | exact | run | none |
+| 51 | `Filter::Exists`, typed and untyped | `Term::Exists`; untyped is one group for each of the 23 indexable types | exact | run | none |
+| 52 | `And`, `Or`, nesting to depth 64 | `And` is the product of its children's groups, `Or` their concatenation, up to 1024 groups of 256 literals | exact | run | none; a larger expansion is evaluated node by node in the adapter |
+| 53 | ORDER BY: `SortKey`, absent values, ties, cap of 4 | the filter is one engine query; the order is the adapter's (bounded heap over the sort cells), as golem-db's `FetchAndSort` | exact | run | none; the engine orders by record id only |
+| 54 | `limit`, `offset`, `with_total`, page cap 100 | engine page limit; id-only engine walk and `cursor_after`; engine `count` | exact | run | none |
 | 55 | Query at `Some(commit)` | head only, as 26 | exact | run | as 26 |
 | 56 | Query errors: `InvalidQuery`, `LimitExceeded`, `InvalidArgument` | golem-db's term checks (`golemdb-index`) called by the adapter | exact | run | none |
 | 57 | `head`, `begin`, `discard` | `Engine::begin`, adapter registry | exact | run | none |
@@ -386,25 +427,30 @@ it) or `read`.
 | 61 | `seal`: `index_root` | none | filler | run | zeros; the tests that compare index roots today assert equality only, so zeros pass them without proving anything; a test that expects a change would fail |
 | 62 | `commit`: first committer wins, `Conflict`, `HandleInvalid` | `Engine::publish`, `DurableEngine::prepare` and `commit` | exact | run | none |
 | 63 | Record id order as the default query order | `RecordId` creation order | exact | run | none |
-| 64 | `immutable_data_schema` | none | missing | read | `NotFound` without segments (as golem-db), else `NotImplemented` |
-| 65 | `immutable_data_append` | none | missing | run | 11 tests |
-| 66 | `immutable_data_truncate` | none | missing | read | same |
-| 67 | `immutable_data_get` | none | missing | run | same |
-| 68 | `immutable_data_rows_of` | none | missing | run | same |
+| 64 | `immutable_data_schema` | the declared segment's schema | exact | run | none |
+| 65 | `immutable_data_append` | staged on the adapter's branch slot; golem-db's row checks | exact | run | none |
+| 66 | `immutable_data_truncate` | removes a staged suffix | exact | run | none |
+| 67 | `immutable_data_get` | the crate's redb store, bounded by the head | exact | run | none |
+| 68 | `immutable_data_rows_of` | the commit's range in that store | exact | run | none |
 | 69 | `ApiError` kinds other than the two below | adapter mapping | exact | run | none |
 | 70 | `ApiError::StoreFull` on a size cap | a full disk maps to `StoreFull`; `RedbStore` has no size option | missing | run | 1 test (same as 3) |
 
-Count: 49 exact, 10 filler, 11 missing.
+Count: 56 exact, 10 filler, 4 missing.
 
 Semantic differences that do not show in the table's statuses:
 
 - **Root values.** Our state root is the digest of the engine's
   `StateHeader`. It never equals golem-db's. Nothing in either suite
   compares a root with a constant, apart from the genesis `index_root`.
-- **Query cost.** The adapter walks each filter leaf to its end and sorts
-  in memory. Results match; the work does not scale like golem-db's bitmap
-  evaluation, and the load tool's query scenarios at a million records were
-  not run.
+- **Query cost.** Unsorted pages, counts and totals are the engine's own
+  work on its term index. A sorted page reads the sort cells of every match,
+  as golem-db does. The load tool's query scenarios at a million records
+  were not run.
+- **Immutable-data files.** Rows are in the crate's own redb file, not in
+  golem-db's NippyJar files; `shard_span` and `compression` have no effect
+  on it. Nothing in either suite looks at the files.
+- **Missing weights.** With a genesis that prices nothing (`weights: {}`)
+  golem-db fails a read with `OutOfBudget`; the crate reads.
 - **Metering numbers.** With `PricingConfig::zero()` golem-db's cost is 0
   and ours is 0, so most receipt tests pass. golem-db's ledger is not empty
   in that case, and ours is.
@@ -458,7 +504,11 @@ cells at genesis, one expects sorting to be unimplemented. The 15 and 8
 ignored tests are marked as spec gaps; they fail on golem-db (run: the 8 on
 `main`, the 15 on the harness's pin). The 8 also fail on our engine.
 
-### The scratch adapter
+### The scratch adapter (before the crate)
+
+This is the record of the analysis. The scratch adapter became
+[`golem-api`](../golem-api/README.md); its results follow in the next
+section.
 
 The patch is `/home/ubuntu/scx1332/api-compare/adapter-latest.patch`
 (2960 lines; it applies to this repository at `604e398` and adds
@@ -543,6 +593,45 @@ Not run: the 15 ignored external tests on our engine, the load tool's query
 and large scenarios, and the kit's own `golem_tests.rs`, which was not
 ported.
 
+### The `golem-api` crate
+
+Run on 2026-11-25 through `conformance/golem-db/ci.sh` at the pinned
+revisions (golem-db `f6dae1d` for the crate, `ef6269a` for its conformance
+crate, external harness `a1b6b6b`). The suites are unmodified except for
+their `golemdb-api` dependency line and, in the external harness, the 18
+call sites it needs to compile against golem-db `main`.
+
+| Step | Result |
+| --- | --- |
+| `ci.sh kit`: rustfmt, clippy, the crate's 25 tests | pass |
+| `ci.sh in-repo`, on golem-db through the crate | 100 pass, 8 ignored |
+| `ci.sh in-repo`, on our engine | 94 pass, 6 expected failures, 8 ignored |
+| `ci.sh external`, on golem-db through the crate | 181 pass, 5 expected failures, 15 ignored |
+| `ci.sh external`, on our engine | 178 pass, 8 expected failures, 15 ignored |
+| `ci.sh smoke`: three scenarios on `golemdb`, `arkiv`, `arkiv-memory` | 9 runs complete |
+
+The external numbers include the two oracle tests. Changes against the
+scratch adapter's run: the 11 immutable-data failures are gone, and nothing
+else moved.
+
+The crate's own tests compare it with golem-db's memory `Database` directly:
+40 random scripts of 250 record and branch calls, 25 random scripts of 220
+immutable-data and branch calls, 800 generated queries with their counts,
+and the hand-written cases for each fallback and each admission error. The
+generated unsorted queries (500, nested three deep) were all answered by one
+engine query each: the crate counts its fallbacks, and the test requires
+zero.
+
+Checked that the tests can fail: reversing the order of absent sort values,
+turning an excluded range bound into an included one, and miscounting a
+create's undo entries each make the corresponding comparison fail.
+
+Crash and failure tests for immutable data use the engine store on a
+simulated device (`CrashDisk`) and the immutable store in a real directory:
+a commit whose engine write fails after the rows were written; the same
+followed by dropping and reopening the database; and another branch
+committing under the number the failed commit would have had.
+
 ## Node level
 
 The harness drives an embedded Rust API. Nothing in golem-db listens on a
@@ -551,7 +640,7 @@ to our node's HTTP and JSON-RPC API ([node API reference](node-api-reference.md)
 would have nothing to conform to, so none is proposed.
 
 What "on our node" can mean in practice is that the adapter runs on the
-same engine and store the node runs on. It does: `ArkivDb` uses
+same engine and store the node runs on. It does: `golem-api`'s `ArkivDb` uses
 `arkiv_db::durable::DurableEngine` on `arkiv_db_redb::RedbStore`, the
 types `arkiv-node` embeds. It uses its own namespace and its own database
 file; it does not attach to a running node's database, and the harness
@@ -562,17 +651,17 @@ needs a fresh database per test.
 Ordered by value. Effort is working days for one person who knows the
 engine.
 
-| # | Step | Effort | What it buys |
-| --- | --- | --- | --- |
-| 1 | Replace the kit's harness patch with the drop-in `golemdb_api` crate. Review the scratch adapter, move it into `conformance/golem-db/`, and gate CI on golem-db's `crates/conformance` with an expected-failures list, as today. | 2 to 3 | The golem-db harness runs on our engine with a two-line Cargo change; 94 of 100 today |
-| 2 | Fix the `golem-latest` job: track golem-db `main` and the conformance branch, and make a failure visible (a separate workflow whose status is not masked, or an issue opened by the job). | 0.5 | We learn within a week when the API moves; 13 commits changed `crates/api/src/lib.rs` in the six and a half weeks since our pin |
-| 3 | Ask the golem-db team for the three things listed below. | 0 for us | Removes the need for the shim trick and for 5 failures we cannot fix cheaply |
-| 4 | Metering in the adapter: drive golem-db's public `WriteMeter` and `ReadMeter` with the same planning steps, and enforce budgets. Needs a term-existence read per indexed cell. | 4 to 6 | 4 tests today, and every metering test they add; exact costs and ledgers without touching the engine |
-| 5 | A size cap on `RedbStore`, mapped from `MdbxOptions::max_map_size`. | 1 to 2 | 1 test; `StoreFull` behaviour is then tested on our store |
-| 6 | Expose the term-map root of a namespace on `Branch` and `SealedCandidate` (it is on `Snapshot` as a hidden test aid), and report it as `index_root`. | 1 to 2 | A real `index_root` in `seal`, `OpenInfo` and `#roots`; needed once they port root tests |
-| 7 | Translate filters to the engine's DNF where they fit, use `try_count` for `count`, and page unsorted queries in the engine. | 3 to 4 | The load tool's query scenarios become meaningful |
-| 8 | Immutable data: append-only typed segments with ordinals, optional keys, per-commit ranges and projections, published atomically with a commit. | 8 to 12 | 11 tests; only worth it if the product needs the feature |
-| 9 | Blake3 as a second engine hash. | large, not estimated | 4 tests; no product need known |
+| # | Step | Effort | What it buys | Status |
+| --- | --- | --- | --- | --- |
+| 1 | Replace the kit's harness patch with the drop-in `golemdb_api` crate, and gate CI on golem-db's `crates/conformance` with an expected-failures list. | 2 to 3 | The golem-db harness runs on our engine with a one-line Cargo change | **Done.** The crate is `golem-api/`, outside the node's workspace; the gating workflow runs both conformance suites and the crate's own tests |
+| 2 | Fix the `golem-latest` job: track golem-db `main` and the conformance branch, and make a failure visible. | 0.5 | We learn within a week when the API moves | **Done.** `golem-conformance-latest.yml`, a workflow of its own; nothing in it is `continue-on-error` |
+| 3 | Ask the golem-db team for the three things listed below. | 0 for us | Removes the need for the crate swap and for failures we cannot fix cheaply | Open; nothing was posted upstream |
+| 4 | Metering in the adapter: drive golem-db's public `WriteMeter` and `ReadMeter`, and enforce budgets. | 4 to 6 | 4 tests today, and every metering test they add | **Decided against** for now: the stand-ins stay; we may build our own metering later |
+| 5 | A size cap on `RedbStore`, mapped from `MdbxOptions::max_map_size`. | 1 to 2 | 1 test | Not done: it needs an option on the node's store crate, which the crate must not change |
+| 6 | Expose the term-map root of a namespace on `Branch` (it is on `Snapshot` as a hidden test aid), and report it as `index_root`. | 1 to 2 | A real `index_root` in `seal`, `OpenInfo` and `#roots` | Not done: no format change is needed, but it needs one new accessor on the engine's `Branch`, and no test passes or fails on it today |
+| 7 | Translate filters to the engine's DNF, use the engine's count, and page unsorted queries in the engine. | 3 to 4 | Results and order come from the engine | **Done**, with three explicit fallbacks ([table](../golem-api/README.md#queries)) |
+| 8 | Immutable data: append-only typed segments with ordinals, optional keys, per-commit ranges and projections, published with a commit. | 8 to 12 | 11 tests | **Done**, in the crate's own store ([design](../golem-api/README.md#immutable-data)) |
+| 9 | Blake3 as a second engine hash. | large, not estimated | 3 tests, and a fourth that also needs the index root | **Decided against**: no value for this chain |
 
 Follow-ups that are cheap when upstream merges them: historical reads (#172)
 are a flag in the adapter already; `Api::retention()` maps to
@@ -602,6 +691,16 @@ Also worth asking: a note in `docs/CHANGES.md` for every change to `Api`,
 since each one breaks our adapter at compile time.
 
 ## Not determined
+
+Still open after the crate:
+
+- Performance of the crate on large data sets. A sorted query reads every
+  match; the load tool's large and query scenarios were not run.
+- The cost of two durable commits per commit that appends immutable rows.
+- The security checks of this repository (`cargo deny`, `cargo audit`) do
+  not look at `golem-api/Cargo.lock`, which holds golem-db's dependencies.
+
+From the analysis:
 
 - Whether the query, branch, opening, immutable-data and oracle modules
   will move into golem-db's in-repo crate, and when the stack leaves draft.

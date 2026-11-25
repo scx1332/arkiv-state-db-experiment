@@ -1,5 +1,16 @@
 # golem-db conformance report
 
+> **Superseded on 2026-11-25.** This report describes the first kit: an
+> adapter compiled into the external load harness by a patch, against
+> golem-db `57c48ca` (2026-10-09). That kit is gone. The adapter is now the
+> crate [`golem-api`](../golem-api/README.md), built against golem-db
+> `main`, and the kit runs golem-db's conformance suites on it. Current
+> results and the gap analysis are in the
+> [golem-db API comparison](golem-db-api-comparison.md); how to run the kit
+> is in its [README](../conformance/golem-db/README.md). The text below is
+> kept as the record of the earlier work, and its paths and numbers are of
+> that time.
+
 This report checks our engine against
 [golemfactory/golem-db-conformance-testing](https://github.com/golemfactory/golem-db-conformance-testing).
 That repository is a load harness written against golem-db's public

@@ -42,10 +42,11 @@ This work builds on the Arkiv Network and Golem projects:
 
 - The engine targets the
   [Golem-DB contract](https://github.com/Arkiv-Network/arkiv-source-of-truth/blob/main/golem-db.md)
-  and does not yet implement all of it. The
-  [conformance kit](conformance/golem-db/README.md) runs the engine behind
-  golem-db's public API in the
-  [golem-db conformance harness](https://github.com/golemfactory/golem-db-conformance-testing).
+  and does not yet implement all of it. [`golem-api`](golem-api/README.md)
+  presents golem-db's public Rust API on the engine, as a crate outside the
+  node's workspace, and the
+  [conformance kit](conformance/golem-db/README.md) runs golem-db's
+  conformance suites on it.
 - The entity model, the SDK JSON-RPC surface and the entity query language
   follow [Arkiv-Network/arkiv](https://github.com/Arkiv-Network/arkiv). The
   query lexer and parser in `crates/arkiv-node/src/simulator/query_language/`
@@ -200,7 +201,7 @@ Evidence and proposals:
 
 - [Testing](docs/testing.md), [benchmarking](docs/benchmarking.md) with dated
   results in [docs/benchmarks/](docs/benchmarks/), and the
-  [golem-db conformance report](docs/golem-db-conformance-report.md).
+  [golem-db API comparison](docs/golem-db-api-comparison.md).
 - [Proposals](docs/proposals/), dated run records in [docs/runs/](docs/runs/),
   and the [code-quality review of 2026-11-17](docs/reviews/2026-11-17/README.md).
 - [Changelog](CHANGELOG.md).

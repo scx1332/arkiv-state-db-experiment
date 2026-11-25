@@ -1,5 +1,65 @@
 # Changelog
 
+## Unreleased
+
+Nothing in the node's workspace changed: the node, the engine, consensus,
+blocks and the `node.redb` and `history.redb` layouts are as in
+0.1.0-alpha.9. Both entries below are about golem-db's API
+([comparison](docs/golem-db-api-comparison.md)).
+
+### golem-api: golem-db's public API on the engine
+
+- New crate [`golem-api/`](golem-api/README.md), library name `golemdb_api`.
+  It re-exports golem-db's own types (`golemdb-api`, `main` at `f6dae1d`) and
+  defines `Database` over the engine, so code written against golem-db
+  switches engines by renaming one dependency. It replaces the adapter that
+  the conformance kit patched into the external load harness
+  (`conformance/golem-db/src/`, removed).
+- It is not a member of the node's workspace and nothing depends on it. It
+  has its own `Cargo.lock` and toolchain (Rust 1.97), because it depends on
+  golem-db as a git dependency, with MDBX and a pinned `reth` commit.
+- Queries run on the engine's query form: each filter (`Eq`, `In`, `Range`,
+  `Prefix`, `Exists`, `And`, `Or`) becomes one engine query, and pages,
+  counts and totals come from the engine. Three cases fall back to the
+  crate, with the same results: ORDER BY (the engine orders by record id
+  only), a filter whose expansion exceeds 1024 groups or 256 literals in a
+  group, and a `str` range bound longer than `max_str_len`.
+- Immutable data is served: `immutable_data_schema`, `_append`, `_truncate`,
+  `_get`, `_rows_of`, the genesis declaration and
+  `OpenConfig::immutable_data_directory`, with golem-db `main`'s behaviour.
+  The rows are in a store of the crate's own (`immutable.redb`, or in
+  memory), never under the state root. A commit writes that store first and
+  the engine second; rows of a commit the engine did not publish are
+  invisible and are dropped on open.
+- Stand-ins, as before: receipts cost 0 with an empty ledger and budgets are
+  not enforced; `index_root` is zeros. Not supported: Blake3 (`open` refuses
+  it), `Database::from_store`, a configurable store size cap.
+
+### golem-db conformance: golem-db's own suites gate CI
+
+- The kit runs golem-db's in-repo conformance crate (the draft pull-request
+  stack, tip `ef6269a`) and the external harness's conformance crate
+  (`a1b6b6b`) on `golem-api`, unmodified except for their `golemdb-api`
+  dependency line and 18 call sites the external harness needs to compile
+  against golem-db `main`. Each suite runs on golem-db's own engine through
+  the crate, as a control, and on ours.
+- On our engine: 94 of 100 in-repo tests pass, 176 of 184 external spec
+  tests pass, and the SQLite oracle passes. The 14 failures are listed one
+  by one with their reason in `conformance/golem-db/expected-failures/`
+  (4 metering, 3 Blake3, 1 index root, 1 store size cap, and 5 external
+  tests that fail on golem-db `main` too). An unexpected failure, an
+  unexpected pass and a changed test count each fail the job.
+- **Fixed:** the weekly job that follows upstream had been failing at setup
+  since the external harness moved, and the workflow showed green because
+  the job was `continue-on-error`. It also followed a golem-db branch that
+  was merged in October. It is now a workflow of its own,
+  `golem-conformance-latest.yml`, which follows golem-db `main`, the
+  conformance stack and the external harness's default branch, and is red
+  when any step fails.
+- The load tool's `table_log` no longer works on the arkiv backends: it
+  reads MDBX's file directly, and the kit no longer patches the harness to
+  redirect it. `ArkivDb::table_stats` still returns the numbers.
+
 ## 0.1.0-alpha.9 — 2026-11-24
 
 Consensus, blocks and the `node.redb` and `history.redb` layouts are

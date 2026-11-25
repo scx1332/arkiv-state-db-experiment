@@ -17,7 +17,8 @@ crates/
   arkiv-db           the engine: metered blocks, records, indexes, queries, proofs
   arkiv-node         the node: block format, Arkiv entities, genesis, runtimes
 vendor/alloy-trie    upstream trie source, unmodified
-conformance/         golem-db conformance kit (runs the engine behind golem-db's API)
+golem-api/           golem-db's public API on the engine; its own workspace, lock and toolchain
+conformance/         golem-db conformance kit (runs golem-db's test suites on golem-api)
 scripts/             smoke tests and benchmarks that drive the built binaries
 docs/                design, formats, evidence; see "Documentation" below
 deploy/              reverse-proxy example for the API docs
@@ -34,6 +35,12 @@ arkiv-node ──> arkiv-db ──> arkiv-db-trie ──> alloy-trie
 
 Nothing below `arkiv-db` knows about blocks, entities or time, and nothing
 below `arkiv-node` knows about Arkiv, gas or signatures.
+
+`golem-api` stands beside the node, not in this chain: it depends on
+`arkiv-db`, `arkiv-db-redb` and `arkiv-db-storage`, and nothing depends on
+it. It is not a workspace member, because it also depends on golem-db (a git
+dependency with MDBX and a newer Rust), which must stay out of the node's
+`Cargo.lock`. See [its README](../golem-api/README.md).
 
 ## Why these crates
 

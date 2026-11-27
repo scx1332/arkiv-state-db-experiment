@@ -1,0 +1,421 @@
+diff -ruN a/src/transactions.rs b/src/transactions.rs
+--- a/src/transactions.rs
++++ b/src/transactions.rs
+@@ -2111,49 +2111,109 @@
+ 
+         let mut system_tables = self.system_tables.lock().unwrap();
+         let system_freed_pages = system_tables.system_freed_pages();
++        // What the allocator-state table holds, if the last durable commit saved it. Taken
++        // out, so that a commit that fails anywhere below leaves it unknown.
++        let saving = self.quick_repair && !self.mem.needs_repair();
++        let previously_saved = self.mem.take_saved_allocator_state().filter(|_| saving);
++        let mut saved_now = false;
++        // The pages this commit records in SYSTEM_FREED_TABLE, which a later commit frees
++        let recorded_frees: core::cell::RefCell<Vec<PageNumber>> =
++            core::cell::RefCell::new(Vec::new());
+         let system_root = {
+             let system_tree = system_tables.table_tree.flush_table_root_updates()?;
+-            system_tree
+-                .delete_table(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
+-                .map_err(|e| e.into_storage_error_or_corrupted("Unexpected TableError"))?;
++            if previously_saved.is_none() {
++                system_tree
++                    .delete_table(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
++                    .map_err(|e| e.into_storage_error_or_corrupted("Unexpected TableError"))?;
++            }
++
++            // The whole state, into a table that is empty: reserves space for every region,
++            // records the freed pages, and fills the space in
++            let save_all = |system_tree_ref: &mut TableTreeMut,
++                            tree: &mut AllocatorStateTreeMut|
++             -> Result {
++                loop {
++                    let num_regions = self
++                        .mem
++                        .reserve_allocator_state(tree, self.transaction_id)?;
++
++                    // The allocator snapshot must match the committed system root. Pages
++                    // freed while building that root stay allocated in the snapshot and are
++                    // recorded in SYSTEM_FREED_TABLE before the allocator state is saved.
++                    recorded_frees
++                        .borrow_mut()
++                        .extend(system_freed_pages.lock().unwrap().iter().copied());
++                    self.store_system_freed_pages(
++                        system_tree_ref,
++                        self.transaction_id,
++                        system_freed_pages.clone(),
++                        None,
++                    )?;
++
++                    if self.mem.try_save_allocator_state(tree, num_regions)? {
++                        return Ok(());
++                    }
++
++                    // Clear out the table before retrying, just in case the number of regions
++                    // has somehow shrunk. Don't use retain_in() for this, since it doesn't
++                    // free the pages immediately -- we need to reuse those pages to guarantee
++                    // that our retry loop will eventually terminate
++                    while let Some(guards) = tree.last()? {
++                        let key = guards.0.value();
++                        drop(guards);
++                        tree.remove(&key)?;
++                    }
++                }
++            };
+ 
+             // No snapshot of an allocator state that needs repair: the next open must rebuild
+             // it instead of trusting the snapshot
+-            if self.quick_repair && !self.mem.needs_repair() {
+-                system_tree.create_table_and_flush_table_root(
+-                    ALLOCATOR_STATE_TABLE_NAME,
+-                    |system_tree_ref, tree: &mut AllocatorStateTreeMut| {
+-                        loop {
+-                            let num_regions = self
+-                                .mem
+-                                .reserve_allocator_state(tree, self.transaction_id)?;
+-
+-                            // The allocator snapshot must match the committed system root. Pages
+-                            // freed while building that root stay allocated in the snapshot and are
+-                            // recorded in SYSTEM_FREED_TABLE before the allocator state is saved.
+-                            self.store_system_freed_pages(
+-                                system_tree_ref,
++            if saving {
++                if let Some(saved) = previously_saved {
++                    // The table of the last durable commit is still there: rewrite only the
++                    // regions whose state changed since
++                    system_tree.open_table_with_and_flush_table_root(
++                        ALLOCATOR_STATE_TABLE_NAME,
++                        |system_tree_ref, tree: &mut AllocatorStateTreeMut| {
++                            let updated = self.mem.save_changed_allocator_state(
++                                tree,
+                                 self.transaction_id,
+-                                system_freed_pages.clone(),
+-                                None,
++                                &saved,
++                                || {
++                                    recorded_frees
++                                        .borrow_mut()
++                                        .extend(system_freed_pages.lock().unwrap().iter().copied());
++                                    self.store_system_freed_pages(
++                                        system_tree_ref,
++                                        self.transaction_id,
++                                        system_freed_pages.clone(),
++                                        None,
++                                    )?;
++                                    Ok(())
++                                },
+                             )?;
+-
+-                            if self.mem.try_save_allocator_state(tree, num_regions)? {
+-                                return Ok(());
++                            if !updated {
++                                while let Some(guards) = tree.last()? {
++                                    let key = guards.0.value();
++                                    drop(guards);
++                                    tree.remove(&key)?;
++                                }
++                                save_all(system_tree_ref, tree)?;
+                             }
+-
+-                            // Clear out the table before retrying, just in case the number of regions
+-                            // has somehow shrunk. Don't use retain_in() for this, since it doesn't
+-                            // free the pages immediately -- we need to reuse those pages to guarantee
+-                            // that our retry loop will eventually terminate
+-                            while let Some(guards) = tree.last()? {
+-                                let key = guards.0.value();
+-                                drop(guards);
+-                                tree.remove(&key)?;
+-                            }
+-                        }
+-                    },
+-                )?;
++                            saved_now = true;
++                            Ok(())
++                        },
++                    )?;
++                } else {
++                    system_tree.create_table_and_flush_table_root(
++                        ALLOCATOR_STATE_TABLE_NAME,
++                        |system_tree_ref, tree: &mut AllocatorStateTreeMut| {
++                            save_all(system_tree_ref, tree)?;
++                            saved_now = true;
++                            Ok(())
++                        },
++                    )?;
++                }
+             }
+ 
+             system_tree.finalize_dirty_checksums()?
+@@ -2182,6 +2242,23 @@
+             page_allocator.free(page, &PageTracker::ignore());
+         }
+ 
++        // The commit is durable, and with it the allocator-state table as saved above. What
++        // the next commit compares against is the state once the system pages this commit
++        // replaced are freed, the table's own among them: they are recorded in
++        // SYSTEM_FREED_TABLE, a later commit frees them, and the table counts them as allocated. A region left alone for that reason alone holds a
++        // superset of its real allocations, which is safe to load: nothing in use is ever
++        // seen as free. (Its surplus pages are found again only when the region is next
++        // rewritten or the database repaired.)
++        if saved_now {
++            // Recorded more than once when the save retried: each page is freed once
++            let mut pending = recorded_frees.into_inner();
++            pending.sort_unstable();
++            pending.dedup();
++            self.mem.set_saved_allocator_state(Some(
++                self.mem.serialized_region_allocators_without(&pending),
++            ));
++        }
++
+         drop(system_tables);
+ 
+         self.apply_savepoint_state_on_commit();
+diff -ruN a/src/tree_store/page_store/page_manager.rs b/src/tree_store/page_store/page_manager.rs
+--- a/src/tree_store/page_store/page_manager.rs
++++ b/src/tree_store/page_store/page_manager.rs
+@@ -669,6 +669,11 @@
+     // While set, no allocator state is persisted and shutdowns are not recorded as clean,
+     // forcing the next open to rebuild the state from the committed trees
+     needs_repair: AtomicBool,
++    // What the allocator-state table of the last durable commit holds for each region, when
++    // that commit saved the allocator state and this handle wrote it. A commit then rewrites
++    // only the regions whose state differs. `None` whenever the table's contents are unknown
++    // or it holds no valid state: the next commit rebuilds the whole table.
++    saved_allocator_state: Mutex<Option<Vec<Vec<u8>>>>,
+     #[cfg(feature = "experimental-multiprocess")]
+     concurrency_mode: ConcurrencyMode,
+     #[cfg(feature = "experimental-multiprocess")]
+@@ -1230,6 +1235,7 @@
+             #[cfg(debug_assertions)]
+             allocated_pages: Arc::new(Mutex::new(PageNumberHashSet::default())),
+             needs_repair: AtomicBool::new(false),
++            saved_allocator_state: Mutex::new(None),
+             #[cfg(feature = "experimental-multiprocess")]
+             concurrency_mode,
+             #[cfg(feature = "experimental-multiprocess")]
+@@ -1630,6 +1636,169 @@
+         Ok(())
+     }
+ 
++    // Takes what the last durable commit saved, leaving it unknown until the commit under way
++    // records what it saved in turn
++    pub(crate) fn take_saved_allocator_state(&self) -> Option<Vec<Vec<u8>>> {
++        self.saved_allocator_state.lock().unwrap().take()
++    }
++
++    pub(crate) fn set_saved_allocator_state(&self, saved: Option<Vec<Vec<u8>>>) {
++        *self.saved_allocator_state.lock().unwrap() = saved;
++    }
++
++    // The serialized allocator state of every region as it will be once `pending` are freed:
++    // the pages a commit recorded in SYSTEM_FREED_TABLE, which a later commit frees
++    pub(crate) fn serialized_region_allocators_without(
++        &self,
++        pending: &[PageNumber],
++    ) -> Vec<Vec<u8>> {
++        let state = self.state.lock().unwrap();
++        state
++            .allocators()
++            .region_allocators
++            .iter()
++            .enumerate()
++            .map(|(region, allocator)| {
++                let bytes = allocator.to_vec();
++                if !pending.iter().any(|page| page.region as usize == region) {
++                    return bytes;
++                }
++                let mut freed = BuddyAllocator::from_bytes(&bytes);
++                for page in pending.iter().filter(|page| page.region as usize == region) {
++                    freed.free(page.page_index, page.page_order);
++                }
++                freed.to_vec()
++            })
++            .collect()
++    }
++
++    // Brings an allocator-state table that holds `saved` up to date, rewriting only the regions
++    // whose state differs from it. `store_freed` records the pages freed so far; it runs after
++    // every pass that reserved space, as in a full save, so that the snapshot matches the
++    // system root being committed.
++    //
++    // `saved` is what the regions were expected to be by now (see durable_commit()); a region
++    // that matches it is left alone.
++    //
++    // Returns false if the table cannot be updated this way (the number of regions changed, or
++    // the passes did not settle): the caller then clears it and saves everything.
++    pub(crate) fn save_changed_allocator_state(
++        &self,
++        tree: &mut AllocatorStateTreeMut,
++        transaction_id: TransactionId,
++        saved: &[Vec<u8>],
++        mut store_freed: impl FnMut() -> Result,
++    ) -> Result<bool> {
++        // Region -> the length reserved for it in this transaction
++        let mut reserved: Vec<Option<usize>> = vec![None; saved.len()];
++        let mut tracker_reserved: Option<usize> = None;
++        // Each pass that does not settle reserves at least one more region or a longer value
++        let passes = saved.len() + 8;
++        for pass in 0..passes {
++            let (current, tracker) = {
++                let state = self.state.lock().unwrap();
++                if state.header.layout().num_regions() as usize != saved.len() {
++                    return Ok(false);
++                }
++                let allocators = state.allocators();
++                let current: Vec<Vec<u8>> = allocators
++                    .region_allocators
++                    .iter()
++                    .map(BuddyAllocator::to_vec)
++                    .collect();
++                (current, allocators.region_tracker.to_vec())
++            };
++            if current.len() != saved.len() {
++                return Ok(false);
++            }
++
++            let mut changed = false;
++            for (i, bytes) in current.iter().enumerate() {
++                let stale = match reserved[i] {
++                    Some(len) => len != bytes.len(),
++                    None => saved[i] != *bytes,
++                };
++                if stale {
++                    tree.insert(
++                        &AllocatorStateKey::Region(i.try_into().unwrap()),
++                        &vec![0; bytes.len()].as_ref(),
++                    )?;
++                    reserved[i] = Some(bytes.len());
++                    changed = true;
++                }
++            }
++            if tracker_reserved != Some(tracker.len()) {
++                tree.insert(
++                    &AllocatorStateKey::RegionTracker,
++                    &vec![0; tracker.len()].as_ref(),
++                )?;
++                tracker_reserved = Some(tracker.len());
++                changed = true;
++            }
++            if pass == 0 {
++                tree.insert(
++                    &AllocatorStateKey::TransactionId,
++                    &transaction_id.raw_id().to_le_bytes().as_ref(),
++                )?;
++                changed = true;
++            }
++            if changed {
++                // Space was reserved, which allocates and frees: record the freed pages and
++                // look at the allocators again
++                store_freed()?;
++                continue;
++            }
++
++            // Nothing moved since the freed pages were recorded: every region that differs
++            // from the table has space reserved in this transaction
++            for (i, bytes) in current.iter().enumerate() {
++                if reserved[i].is_some() {
++                    tree.insert_inplace(
++                        &AllocatorStateKey::Region(i.try_into().unwrap()),
++                        &bytes.as_ref(),
++                    )?;
++                }
++            }
++            tree.insert_inplace(&AllocatorStateKey::RegionTracker, &tracker.as_ref())?;
++            // A rewritten region holds exactly its state. A region left alone holds a superset
++            // of its allocations (see durable_commit()), so it never has more pages free.
++            #[cfg(debug_assertions)]
++            {
++                let state = self.state.lock().unwrap();
++                let allocators = state.allocators();
++                assert_eq!(allocators.region_allocators.len(), current.len());
++                for (i, allocator) in allocators.region_allocators.iter().enumerate() {
++                    let stored = tree
++                        .get(&AllocatorStateKey::Region(i.try_into().unwrap()))?
++                        .expect("a region entry");
++                    if reserved[i].is_some() {
++                        assert!(
++                            stored.value() == allocator.to_vec().as_slice(),
++                            "allocator state of region {i} differs from the table"
++                        );
++                    } else {
++                        let stored = BuddyAllocator::from_bytes(stored.value());
++                        assert!(
++                            stored.count_allocated_pages() >= allocator.count_allocated_pages(),
++                            "the table has pages of region {i} free that are allocated"
++                        );
++                    }
++                }
++                let stored = tree
++                    .get(&AllocatorStateKey::RegionTracker)?
++                    .expect("the region tracker entry");
++                assert!(stored.value() == allocators.region_tracker.to_vec().as_slice());
++                assert_eq!(
++                    tree.range::<core::ops::RangeFull, AllocatorStateKey>(&(..))?
++                        .count(),
++                    current.len() + 2
++                );
++            }
++            return Ok(true);
++        }
++        Ok(false)
++    }
++
+     pub(crate) fn reserve_allocator_state(
+         &self,
+         tree: &mut AllocatorStateTreeMut,
+@@ -3754,3 +3923,4 @@
+         ));
+     }
+ }
++
+diff -ruN a/src/tree_store/table_tree.rs b/src/tree_store/table_tree.rs
+--- a/src/tree_store/table_tree.rs
++++ b/src/tree_store/table_tree.rs
+@@ -456,6 +456,47 @@
+         Ok(())
+     }
+ 
++    // As open_table_and_flush_table_root(), for a closure that also updates other tables of
++    // this tree, as create_table_and_flush_table_root()'s does
++    pub(crate) fn open_table_with_and_flush_table_root<K: Key + 'static, V: Value + 'static>(
++        &mut self,
++        name: &str,
++        f: impl FnOnce(&mut Self, &mut BtreeMut<K, V>) -> Result,
++    ) -> Result {
++        assert!(self.pending_table_updates.is_empty());
++
++        let bytes = self.tree.force_uncommitted(
++            &name,
++            &InternalTableDefinition::new::<K, V>(TableType::Normal, None, 0),
++        )?;
++
++        let table_root = match InternalTableDefinition::from_bytes(&bytes) {
++            InternalTableDefinition::Normal { table_root, .. } => table_root,
++            InternalTableDefinition::Multimap { .. } => {
++                unreachable!()
++            }
++        };
++
++        let mut tree: BtreeMut<K, V> = BtreeMut::new(
++            table_root,
++            self.guard.clone(),
++            self.page_allocator.clone(),
++            self.freed_pages.clone(),
++            self.allocated_pages.clone(),
++        );
++        f(self, &mut tree)?;
++
++        let table_root = tree.finalize_dirty_checksums()?;
++        let table_length = tree.get_root().map(|x| x.length).unwrap_or_default();
++
++        self.tree.insert_inplace(
++            &name,
++            &InternalTableDefinition::new::<K, V>(TableType::Normal, table_root, table_length),
++        )?;
++
++        Ok(())
++    }
++
+     // Creates a new table, calls the provided closure to insert entries into it, and then
+     // flushes the table root. The flush is done using insert_inplace(), so it's guaranteed
+     // that no pages will be allocated or freed after the closure returns

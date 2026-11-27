@@ -40,9 +40,13 @@ state, which quick repair saves in full with every commit.
 - Measured and rejected: quick repair off. It writes as little, but the
   restart after `kill -9` took 58 minutes at this size (redb's full
   repair).
-- Measured, not built: redb rewriting only the allocator state that
-  changed. Of the 6.75 MiB it saves per state commit, 221 bytes differ from
-  the commit before.
+- Prototype, not adopted: redb rewriting only the allocator state of the
+  regions that changed (`docs/proposals/redb-changed-regions.patch`, against
+  redb 4.3.0; the build does not use it). Of the 6.75 MiB redb saves per
+  state commit, 221 bytes differ from the commit before. With the patch the
+  unchanged node wrote 2.08 MiB per block with every state commit durable,
+  and passed redb's tests, ours, and eight kills on a copy of the Kenobi
+  database. Open: it leaks up to one 512 KiB page per region after a crash.
 
 ### golem-db's load benchmark on both engines
 

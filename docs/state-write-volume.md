@@ -9,16 +9,17 @@ what each option costs, and what was chosen.
 
 ## Result
 
-| | Now | Durable state every 64 blocks | Quick repair off |
-| --- | ---: | ---: | ---: |
-| Written per block while syncing | 13.8 MiB | 0.67 MiB | 0.74 MiB |
-| Written per block at the head | 14.0 MiB | 0.89 MiB | not measured |
-| Written per day at 2 s blocks | 590 GiB | 37 GiB | not measured |
-| Sync speed from a peer | 20 blocks/s | 43 to 63 blocks/s | 32 blocks/s |
-| State commit, mean | 32 to 36 ms | 5 ms | 12 ms |
-| Restart after `kill -9` | 1 s | 1 s, replays up to 63 blocks | 58 min |
-| Restart after a clean stop | 1 s | 1 s | 0.4 s |
-| A served block survives a crash | yes | yes | yes |
+| | Now | Durable state every 64 blocks | Quick repair off | Patched redb (prototype) |
+| --- | ---: | ---: | ---: | ---: |
+| Written per block while syncing | 13.8 MiB | 0.67 MiB | 0.74 MiB | 2.08 MiB |
+| Written per block at the head | 14.0 MiB | 0.89 MiB | not measured | 2.28 MiB |
+| Written per day at 2 s blocks | 590 GiB | 37 GiB | not measured | 96 GiB |
+| Sync speed from a peer | 20 blocks/s | 43 to 63 blocks/s | 32 blocks/s | 27 blocks/s |
+| State commit, mean | 32 to 36 ms | 5 ms | 12 ms | 21 ms |
+| Restart after `kill -9` | 1 s | 1 s, replays up to 63 blocks | 58 min | 0.4 s |
+| Every state commit durable | yes | one in 64 | yes | yes |
+| A served block survives a crash | yes | yes | yes | yes |
+| Needs | | a flag | a setting | a patched redb |
 
 **Chosen: `--state-durable-every N`** (new flag, producer and full nodes,
 default 1, which is today's behaviour). It makes only every N-th state
@@ -29,9 +30,10 @@ Quick repair off is rejected: after any unclean stop the node is away for
 about an hour at this size, and for a single producer that is an hour
 without blocks.
 
-A change inside redb would remove most of the cost while keeping every
-state commit durable (see [What redb saves](#what-redb-saves)). It was
-measured, not built: it needs a patched redb.
+A change inside redb removes most of the cost while keeping every state
+commit durable: a prototype patch wrote 2.08 MiB per block (see
+[What redb saves](#what-redb-saves)). It is not adopted: it needs a patched
+redb and has an open problem.
 
 ## Where the bytes go
 
@@ -181,26 +183,73 @@ One-phase commit was not measured. redb documents it as open to a crafted
 partial commit by whoever controls the data written, and a node stores data
 that its users choose.
 
-### 3. redb saves only what changed (not built)
+### 3. redb saves only the regions that changed (prototype, not adopted)
 
 <a id="what-redb-saves"></a>
 The counter above says what a smarter save could do, with every state
 commit still durable and the restart still instant:
 
-| redb change | Allocator state written per commit | Estimated total per block |
+| redb change | Allocator state written per commit | Total per block |
 | --- | ---: | ---: |
-| None (redb 4.3.0 to 4.6.0) | 6.75 MiB | 13.8 MiB (measured) |
-| Rewrite only the regions that changed | 0.72 MiB, in 512 KiB pages 1.4 MiB | about 1.9 MiB |
-| Rewrite only the 4 KiB pages that changed | 0.15 MiB | about 0.6 MiB |
+| None (redb 4.3.0 to 4.6.0) | 6.75 MiB, in 512 KiB pages 13.5 MiB | 13.8 MiB (measured) |
+| Rewrite only the regions that changed | 0.72 MiB, in 512 KiB pages 1.4 MiB | 2.08 MiB (measured, prototype) |
+| Rewrite only the 4 KiB pages that changed | 0.15 MiB | about 0.6 MiB (estimate, not built) |
 
-The estimates add the 0.44 MiB that does not depend on the allocator
-state. Neither was built. Both change redb's commit path, so they mean carrying a
-patched redb through its crash tests and ours, or getting the change
-accepted upstream; redb 4.6.0 (2026-11-13) still saves every region. Sync
-speed would stay near today's, since every commit would still sync twice.
+The first change was built as a patch to redb 4.3.0,
+[`proposals/redb-changed-regions.patch`](proposals/redb-changed-regions.patch)
+(304 added lines in `transactions.rs`, `page_manager.rs` and
+`table_tree.rs`). A durable commit keeps the `allocator_state` table
+instead of deleting and rebuilding it, and rewrites only the entries of
+regions whose state is not what it expects. The node code is unchanged and
+runs with its default settings (N = 1, quick repair on):
 
-This is the option to pursue if per-block durability of the state file
-itself ever matters. With option 1 in place it is not urgent.
+| With the patched redb | Unpatched | Patched |
+| --- | ---: | ---: |
+| Written per block | 13.84 MiB | 2.08 MiB |
+| Sync | 20.3 blocks/s | 26.7 blocks/s |
+| State commit, mean | 32.4 ms | 20.6 ms |
+| Regions rewritten per commit | 27 of 27 | 2.85 of 27 |
+| Restart after `kill -9` | 1.5 s | 0.4 s, nothing lost |
+| redb's own tests (lib and integration) | | 424 pass |
+| Our store and node tests against it | | 633 pass |
+
+The whole way with the patched redb, as for option 1: synced 36,103 blocks
+to the head while being killed with `kill -9` at eight random moments
+(restart in at most 0.7 s, so none needed redb's full repair; no block
+lost), 2.28 MiB per block; block 203,844 identical to the
+follower's and Kenobi's; five minutes at the head at 2.28 MiB per block;
+clean stop and restart in 0.3 s.
+
+What made it work is not obvious from the counter. redb frees a replaced
+system page one commit later, so rewriting a region's entry changes, one
+commit later, the region its old 512 KiB page was in. Compared naively
+against the last saved bytes, every region then looks changed at every
+commit (a first version of the patch rewrote 27 of 27). The patch compares
+against the saved state with the frees it recorded already applied.
+
+Why it is not adopted:
+
+- **A leak after a crash.** A region that is left alone keeps, in the
+  table, the pages that were waiting to be freed when it was last written:
+  the table shows a superset of its real allocations. That is safe to load,
+  since nothing in use is ever seen as free, but after a crash those pages
+  (at most one 512 KiB page per region) stay allocated, and the prototype
+  never finds them again. A finished version has to keep their free
+  records alive or repair them at open.
+- **It is a change to the commit path of the storage engine**, one night
+  old. Carrying a patched redb means owning that; the alternative is to
+  propose it upstream. redb 4.6.0 (2026-11-13) still saves every region.
+- It writes three times what option 1 writes, and does not speed sync up as
+  much, because every commit still syncs twice.
+
+What it has that option 1 lacks: the node's durability rule does not
+change at all, and it is the only option that also bounds the same cost in
+`history.redb` once that file is larger than one region. For the state
+file the two do not add up: with both, N = 64 wrote 0.68 MiB per block,
+the same as option 1 alone, because after 64 blocks nearly every region
+has changed.
+The third row of the first table (4 KiB pieces instead of whole regions)
+needs a new layout of the table and was not tried.
 
 ## What was added
 
@@ -240,8 +289,10 @@ Tests:
   of history adds 0.12 MiB per commit. At this rate a follower that keeps
   every body writes about 2.4 MiB per block to its history in two months
   and today's 14 MiB in about a year. `--body-retention window` stops the
-  growth (it does not shrink a file that has grown), one history commit per
-  block instead of two would halve the cost, and option 3 would remove it.
+  growth (whether a file that has grown shrinks again was not checked), one
+  history commit per block instead of two would halve the cost, and the
+  patch of option 3 would bound it to the regions that change once the file
+  is larger than one region.
 - **The 0.44 MiB of data pages per block**, the random page writes per tree
   node described in the [load benchmark](golem-db-load-benchmark.md).
 - A producer was tested as local processes and in unit tests, not on a
@@ -253,6 +304,8 @@ Tests:
 second full node on a fresh `snapshot install` of a snapshot, syncing from a
 local full node, with `/proc/PID/io` for bytes and the node's own metrics
 for commit times. `run` gave the rows of the tables above, `torture` the
-whole-way run. The counter build of redb is a 60-line measurement patch to
-`try_save_allocator_state` and is not in the repository. The raw results
-are on the measuring machine (`~/scx1332/wv-test/out`).
+whole-way runs. The counter build of redb is a 60-line measurement patch
+to `try_save_allocator_state` and is not in the repository; the prototype
+of option 3 is (`docs/proposals/redb-changed-regions.patch`; build the
+node with `--config 'patch.crates-io.redb.path="<patched redb 4.3.0>"'`).
+The raw results are on the measuring machine (`~/scx1332/wv-test/out`).

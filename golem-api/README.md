@@ -74,6 +74,15 @@ Other environment variables, read when a `Database` is opened:
   engine's object cache.
 - `ARKIV_REDB_QUICK_REPAIR=0`: do not save redb's allocator state with
   every commit. For measurements only; the node's store keeps it on.
+- `ARKIV_STATS_LOG=<file>`: a diagnostic log of what the store wrote, one
+  line per commit, and every table's size every `ARKIV_STATS_EVERY`
+  commits (default 500). The columns are in `stats_log` in `src/arkiv.rs`.
+
+A database created with a pruning window (`OpenConfig::with_pruning`, or
+`ARKIV_STATE_RETENTION=<N>`) collects garbage: the store deletes the state
+that no retained commit reaches, as the node's does. It is turned on when
+the database is created. A database created under archive retention and
+reopened with a window keeps everything.
 
 What these change is measured in the
 [load benchmark results](../docs/golem-db-load-benchmark.md).

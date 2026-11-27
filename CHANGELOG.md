@@ -15,10 +15,18 @@ blocks and the `node.redb` and `history.redb` layouts are as in
 - `golem-api` reads `ARKIV_REDB_CACHE_MIB`, `ARKIV_OBJECT_CACHE_MIB`,
   `ARKIV_OBJECT_CACHE_ENTRIES` and `ARKIV_REDB_QUICK_REPAIR`
   (`ArkivOptions::from_env`). Defaults are unchanged.
+- Fixed in `golem-api`: a database opened with a pruning window never
+  deleted state that left the window, so its file only grew. Garbage
+  collection is now turned on when such a database is created, as the node
+  does.
+- `golem-api`: `ARKIV_STATS_LOG` writes what the store wrote per commit and
+  the size of every table.
 - [Results](docs/golem-db-load-benchmark.md): where our engine is faster
-  and slower than golem-db, and a finding about the node itself: at Kenobi
-  size the store writes about 14 MiB per block, nearly all of it redb's
-  allocator state saved by quick repair.
+  and slower than golem-db, and two findings about the store itself. At
+  Kenobi size it writes about 14 MiB per block, nearly all of it redb's
+  allocator state saved by quick repair. And every tree node costs several
+  random page writes, because nodes are keyed by hash in a copy-on-write
+  B-tree; the document lists the options.
 
 ### golem-api: golem-db's public API on the engine
 

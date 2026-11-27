@@ -188,6 +188,79 @@ impl Default for ArkivOptions {
     }
 }
 
+/// `ARKIV_STATS_LOG=<file>`: a diagnostic log of what the store wrote, one
+/// `C` line per commit and the size of every table (`T` lines) every
+/// `ARKIV_STATS_EVERY` commits (default 500; the table walk is not free).
+///
+/// `C,commit,file bytes,backend writes,backend bytes written,syncs,records
+/// written,entries removed,` then `objects written,object bytes` for the
+/// catalog, host and namespace spaces, all cumulative since the open.
+/// `T,commit,table,entries,stored bytes,page bytes`.
+fn stats_log(d: &Durable) {
+    use std::io::Write;
+    static LOG: std::sync::OnceLock<Option<(Mutex<std::fs::File>, u64)>> =
+        std::sync::OnceLock::new();
+    static COMMITS: AtomicU64 = AtomicU64::new(0);
+    let Some((file, every)) = LOG.get_or_init(|| {
+        let path = std::env::var("ARKIV_STATS_LOG")
+            .ok()
+            .filter(|p| !p.is_empty())?;
+        let every = std::env::var("ARKIV_STATS_EVERY")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(500);
+        let file =
+            std::fs::File::create(&path).unwrap_or_else(|e| panic!("ARKIV_STATS_LOG {path}: {e}"));
+        Some((Mutex::new(file), every))
+    }) else {
+        return;
+    };
+    let commit = COMMITS.fetch_add(1, Ordering::Relaxed) + 1;
+    let stats = d.store.stats();
+    let backend = stats.backend.unwrap_or_default();
+    let mut line = format!(
+        "C,{commit},{},{},{},{},{},{}",
+        std::fs::metadata(&d.path).map_or(0, |m| m.len()),
+        backend.writes,
+        backend.write_bytes,
+        backend.syncs,
+        stats.records_written,
+        stats.removed,
+    );
+    let mut namespace = (0, 0);
+    for (space, counters) in &stats.spaces {
+        if matches!(space, SpaceId::Namespace(_)) {
+            namespace.0 += counters.objects_written;
+            namespace.1 += counters.bytes_written;
+        }
+    }
+    for (objects, bytes) in [
+        {
+            let s = stats.space(SpaceId::Catalog);
+            (s.objects_written, s.bytes_written)
+        },
+        {
+            let s = stats.space(SpaceId::Host);
+            (s.objects_written, s.bytes_written)
+        },
+        namespace,
+    ] {
+        line.push_str(&format!(",{objects},{bytes}"));
+    }
+    line.push('\n');
+    if commit.is_multiple_of(*every)
+        && let Ok(tables) = d.store.table_stats()
+    {
+        for (name, entries, stored, pages) in tables {
+            line.push_str(&format!("T,{commit},{name},{entries},{stored},{pages}\n"));
+        }
+    }
+    if let Ok(mut file) = file.lock() {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
 #[derive(Debug)]
 struct AdapterError(String);
 impl std::fmt::Display for AdapterError {
@@ -672,11 +745,21 @@ impl ArkivDb {
                 engine_options.clone(),
             )
             .map_err(|e| open_existing(store.as_ref(), &engine_genesis, e))?;
-            let engine = match initialized {
+            let mut engine = match initialized {
                 Initialization::Committed(engine) => engine,
                 Initialization::NotCommitted { error, .. }
                 | Initialization::Indeterminate { error, .. } => return Err(open_storage(error)),
             };
+            // With a retention window the store deletes what no retained
+            // commit reaches, as the node's does. It is turned on here, on
+            // the empty state, because turning it on later means a scan of
+            // every object; a file created under archive retention and
+            // reopened with a window keeps everything, like the node's.
+            if engine_options.retention.window().is_some() {
+                engine
+                    .enable_gc(None)
+                    .map_err(|e| open_existing(store.as_ref(), &engine_genesis, e))?;
+            }
             let backend = Backend::Durable(Box::new(Durable {
                 engine,
                 store: store.clone(),
@@ -1331,7 +1414,10 @@ impl ArkivDb {
             });
         }
         match d.engine.commit() {
-            Ok(Publication::Committed(info)) => Ok(info.snapshot),
+            Ok(Publication::Committed(info)) => {
+                stats_log(d);
+                Ok(info.snapshot)
+            }
             Ok(Publication::NotCommitted(error)) => {
                 if d.engine.writer_state() == WriterState::Prepared {
                     d.engine.discard_prepared().map_err(durable)?;

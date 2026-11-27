@@ -106,6 +106,24 @@ files scaled to a tenth, without `profile_at` and `table_log`, and
 `queries-small.toml`, the Arkiv query scenario at 2,000 records for the
 smoke run.
 
+### golem-db's load benchmark
+
+golem-db pull request 182 (a draft) adds `crates/bench`, a load benchmark
+on the public `Api`. It opens MDBX itself and reads MDBX's counters and
+table sizes, so it needs [`load-bench.patch`](load-bench.patch) to run on
+another engine; no scenario or query is changed.
+
+```sh
+conformance/golem-db/ci.sh setup-bench 514ccc95c816fcd17935b7c39da87ad44d835e17
+conformance/golem-db/ci.sh bench-smoke
+BENCH_MEMORY_MAX=8G conformance/golem-db/ci.sh bench arkiv arkiv /data/out /data/db
+```
+
+`bench-smoke` runs the smoke scenario on golem-db and on the arkiv engine
+and fails if a query matched or returned a different number of records. It
+is not in CI while the benchmark is a draft. Results and what was decided
+from them: [golem-db load benchmark](../../docs/golem-db-load-benchmark.md).
+
 ## CI
 
 Two workflows.

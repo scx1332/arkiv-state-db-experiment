@@ -32,6 +32,18 @@
 #       The external harness's load tool on small scenarios, on golem-db and
 #       on both arkiv backends. Only the exit status matters; this is not a
 #       benchmark.
+#   ci.sh setup-bench <golem-db-ref>
+#       Check out golem-db at <golem-db-ref>, one that has crates/bench (the
+#       load benchmarks of golem-db pull request 182), into work/bench, apply
+#       load-bench.patch and point the crate at golem-api.
+#   ci.sh bench-smoke
+#       Build that benchmark and run its smoke scenario on golem-db and on the
+#       arkiv engine. The two runs must agree on how many records every query
+#       matched and returned.
+#   ci.sh bench <scenario> <backend> <out-dir> <db-dir>
+#       One scenario (a name under crates/bench/scenarios, or a path) on one
+#       backend. BENCH_MEMORY_MAX (for example 8G) runs it in a memory
+#       cgroup, as crates/bench/suites.toml asks for the standard run.
 #
 # CONFORMANCE_COUNTS=any skips the comparison of how many tests ran and were
 # ignored (for runs that follow upstream branches, where tests are added).
@@ -186,8 +198,72 @@ smoke() {
     rm -rf "$db_dir"
 }
 
+# The golem-db revision golem-api builds against.
+pinned_rev() {
+    sed -n 's|^real = .*git = "https://github.com/Arkiv-Network/golemdb", rev = "\([0-9a-f]*\)".*|\1|p' "$API/Cargo.toml"
+}
+
+setup_bench() {
+    mkdir -p "$WORK"
+    checkout "$WORK/bench" "$GOLEM_DB_URL" "$1"
+    echo "golem-db: $(git -C "$WORK/bench" log -1 --format='%H %s')"
+    local manifest="$WORK/bench/crates/bench/Cargo.toml"
+    [ -f "$manifest" ] || die "golem-db $1 has no crates/bench"
+    git -C "$WORK/bench" apply --check "$KIT/load-bench.patch" ||
+        die "conformance/golem-db/load-bench.patch no longer applies to golem-db $1; the kit must be ported"
+    git -C "$WORK/bench" apply "$KIT/load-bench.patch"
+    use_kit_crate "$manifest" "golemdb-api.workspace = true"
+    # The benchmark opens golem-db's MDBX store itself and hands it to
+    # Database::from_store, so its store crates must be the ones golem-api
+    # was built with, not the checkout's.
+    local rev crate
+    rev="$(pinned_rev)"
+    [ -n "$rev" ] || die "golem-api/Cargo.toml no longer pins golem-db by rev; the kit must be ported"
+    for crate in golemdb-storage golemdb-storage-mdbx; do
+        grep -qxF "$crate.workspace = true" "$manifest" ||
+            die "$manifest no longer has the line '$crate.workspace = true'; the kit must be ported"
+        sed -i "s|^$crate\\.workspace = true\$|$crate = { git = \"https://github.com/Arkiv-Network/golemdb\", rev = \"$rev\" }|" "$manifest"
+    done
+}
+
+bench_binary() {
+    need "$WORK/bench/crates/bench" "golem-db's crates/bench"
+    cd "$WORK/bench"
+    cargo build --release -p golemdb-bench
+}
+
+bench() { # <scenario> <backend> <out-dir> <db-dir>
+    bench_binary
+    local scenario="$1"
+    [ -f "$scenario" ] || scenario="crates/bench/scenarios/$1.toml"
+    [ -f "$scenario" ] || die "no such scenario: $1"
+    local run=(env GOLEMDB_BACKEND="$2" "$CARGO_TARGET_DIR/release/golemdb-bench" "$scenario" --out "$3" --db-dir "$4")
+    if [ -n "${BENCH_MEMORY_MAX:-}" ]; then
+        run=(systemd-run --user --scope --quiet -p "MemoryMax=$BENCH_MEMORY_MAX" -p MemorySwapMax=0 "${run[@]}")
+    fi
+    "${run[@]}"
+}
+
+bench_smoke() {
+    bench_binary
+    local dir backend
+    dir="$(mktemp -d)"
+    for backend in golemdb arkiv; do
+        echo "::group::load benchmark smoke on $backend"
+        GOLEMDB_BACKEND="$backend" "$CARGO_TARGET_DIR/release/golemdb-bench" \
+            crates/bench/scenarios/smoke.toml --out "$dir/$backend" --db-dir "$dir/db-$backend"
+        echo "::endgroup::"
+    done
+    # commit, records, query, matches, returned: the same on both engines.
+    local status=0
+    diff <(cut -d, -f1-5 "$dir/golemdb/queries.csv") <(cut -d, -f1-5 "$dir/arkiv/queries.csv") ||
+        status=1
+    rm -rf "$dir"
+    [ "$status" = 0 ] || die "the load benchmark's queries matched differently on the two engines"
+}
+
 usage() {
-    echo "usage: $0 setup <golem-db-ref> [<harness-ref>] | track <golem-db-ref> | kit | in-repo | external | smoke" >&2
+    echo "usage: $0 setup <golem-db-ref> [<harness-ref>] | track <golem-db-ref> | kit | in-repo | external | smoke | setup-bench <golem-db-ref> | bench-smoke | bench <scenario> <backend> <out-dir> <db-dir>" >&2
     exit 2
 }
 
@@ -205,5 +281,14 @@ case "${1:-}" in
     in-repo) in_repo ;;
     external) external ;;
     smoke) smoke ;;
+    setup-bench)
+        [ $# = 2 ] || usage
+        setup_bench "$2"
+        ;;
+    bench-smoke) bench_smoke ;;
+    bench)
+        [ $# = 5 ] || usage
+        bench "$2" "$3" "$4" "$5"
+        ;;
     *) usage ;;
 esac

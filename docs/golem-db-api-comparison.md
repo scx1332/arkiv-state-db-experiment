@@ -694,8 +694,10 @@ since each one breaks our adapter at compile time.
 
 Still open after the crate:
 
-- Performance of the crate on large data sets. A sorted query reads every
-  match; the load tool's large and query scenarios were not run.
+- Performance of the crate on large data sets: golem-db's load benchmark
+  was run on both engines on 2026-11-27
+  ([results](golem-db-load-benchmark.md)). Sorted queries, offset paging,
+  concurrent readers and immutable data are still not measured.
 - The cost of two durable commits per commit that appends immutable rows.
 - The security checks of this repository (`cargo deny`, `cargo audit`) do
   not look at `golem-api/Cargo.lock`, which holds golem-db's dependencies.

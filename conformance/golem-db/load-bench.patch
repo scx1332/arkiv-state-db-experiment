@@ -1,0 +1,140 @@
+diff --git a/crates/bench/src/main.rs b/crates/bench/src/main.rs
+index c284fe4..5312a0a 100644
+--- a/crates/bench/src/main.rs
++++ b/crates/bench/src/main.rs
+@@ -81,19 +81,29 @@ fn run(scenario: &Scenario) -> Result<()> {
+         max_map_size: (scenario.database.max_map_size_gib << 30) as usize,
+         ..Default::default()
+     };
+-    // Opened here rather than by `Database`, to read MDBX's write counters.
+-    let store = MdbxStore::open_with_options(dir, options)?;
+-    let db = Database::from_store(store.clone(), &config)?;
++    // golem-db: opened here rather than by `Database`, to read MDBX's write counters.
++    // Any other engine behind `golemdb_api` (GOLEMDB_BACKEND) opens its own store.
++    let (db, store) = if golem_backend() {
++        let store = MdbxStore::open_with_options(dir, options)?;
++        (Database::from_store(store.clone(), &config)?, Some(store))
++    } else {
++        (Database::open_with_options(dir, &config, options)?, None)
++    };
+ 
+     println!("{}: {}", scenario.name, scenario.description);
+     // `elapsed_ms` in the commit log counts from here.
+     let started = SystemTime::now().duration_since(UNIX_EPOCH)?;
+-    let outcome = workloads::run(&db, &store, scenario)?;
++    let outcome = workloads::run(&db, store.as_ref(), scenario)?;
+     drop(db);
+     drop(store);
+     summary::write(scenario, &outcome, started)
+ }
+ 
++/// Whether golem-db's own engine, on MDBX, is the one being measured.
++pub(crate) fn golem_backend() -> bool {
++    std::env::var("GOLEMDB_BACKEND").is_ok_and(|backend| backend == "golemdb")
++}
++
+ pub(crate) fn dir_size(dir: &Path) -> u64 {
+     std::fs::read_dir(dir)
+         .into_iter()
+diff --git a/crates/bench/src/tables.rs b/crates/bench/src/tables.rs
+index 6c6b43a..a4506d7 100644
+--- a/crates/bench/src/tables.rs
++++ b/crates/bench/src/tables.rs
+@@ -62,6 +62,9 @@ pub fn print(dir: &Path) -> Result<()> {
+ 
+ /// Runs `print` in a child process and returns its CSV lines.
+ pub fn snapshot(dir: &Path) -> Result<Vec<String>> {
++    if !crate::golem_backend() {
++        return files(dir);
++    }
+     let out = Command::new(std::env::current_exe()?)
+         .arg("--table-stats")
+         .arg(dir)
+@@ -77,3 +80,25 @@ pub fn snapshot(dir: &Path) -> Result<Vec<String>> {
+         .map(str::to_owned)
+         .collect())
+ }
++
++/// Without MDBX there are no tables to read: one line per file of the
++/// database directory (4 KiB pages), then their total as `file`.
++fn files(dir: &Path) -> Result<Vec<String>> {
++    let mut sizes = Vec::new();
++    for entry in std::fs::read_dir(dir)? {
++        let entry = entry?;
++        let meta = entry.metadata()?;
++        if meta.is_file() {
++            sizes.push((entry.file_name().to_string_lossy().into_owned(), meta.len()));
++        }
++    }
++    sizes.sort();
++    let total = sizes.iter().map(|(_, bytes)| bytes).sum();
++    sizes.push(("file".to_owned(), total));
++    Ok(sizes
++        .into_iter()
++        .map(|(name, bytes)| {
++            format!("{name},,,{},{:.3}", bytes / 4096, bytes as f64 / (1 << 20) as f64)
++        })
++        .collect())
++}
+diff --git a/crates/bench/src/workloads.rs b/crates/bench/src/workloads.rs
+index f2db18f..11d7d89 100644
+--- a/crates/bench/src/workloads.rs
++++ b/crates/bench/src/workloads.rs
+@@ -137,7 +137,7 @@ impl Pool {
+     }
+ }
+ 
+-pub fn run(db: &Database, store: &MdbxStore, scenario: &Scenario) -> Result<Outcome> {
++pub fn run(db: &Database, store: Option<&MdbxStore>, scenario: &Scenario) -> Result<Outcome> {
+     let workload = &scenario.workload;
+     let mut generator = Generator::new(&scenario.shape, scenario.seed)?;
+     let mut pool = Pool {
+@@ -152,10 +152,16 @@ pub fn run(db: &Database, store: &MdbxStore, scenario: &Scenario) -> Result<Outc
+         &format!("commit,{}", tables::HEADER),
+     )?;
+     let db_dir = scenario.db_dir.as_path();
+-    let storage = || -> Result<_> {
+-        store
++    // (bytes written, syncs) so far: MDBX's page counters, or without MDBX the
++    // bytes this process sent to storage (/proc/self/io) and no sync count.
++    let storage = || -> Result<(u64, u64)> {
++        let Some(store) = store else {
++            return Ok((process_write_bytes(), 0));
++        };
++        let stats = store
+             .stats()?
+-            .ok_or_else(|| anyhow!("MDBX reports no storage stats"))
++            .ok_or_else(|| anyhow!("MDBX reports no storage stats"))?;
++        Ok((stats.session_bytes_written, stats.session_syncs))
+     };
+     let total: usize = workload.blocks.iter().map(|b| b.repeat).sum();
+     let mut commits: Vec<Commit> = Vec::with_capacity(total);
+@@ -184,8 +190,8 @@ pub fn run(db: &Database, store: &MdbxStore, scenario: &Scenario) -> Result<Outc
+                 commit_ms: ms(timing.commit),
+                 branch_ms: ms(took),
+                 db_mib: crate::dir_size(db_dir) as f64 / (1 << 20) as f64,
+-                written: after.session_bytes_written - before.session_bytes_written,
+-                syncs: after.session_syncs - before.session_syncs,
++                written: after.0 - before.0,
++                syncs: after.1 - before.1,
+             };
+             before = after;
+             writeln!(
+@@ -258,6 +264,17 @@ pub fn run(db: &Database, store: &MdbxStore, scenario: &Scenario) -> Result<Outc
+     })
+ }
+ 
++/// `write_bytes` of /proc/self/io; 0 where the kernel does not report it.
++fn process_write_bytes() -> u64 {
++    std::fs::read_to_string("/proc/self/io")
++        .ok()
++        .and_then(|io| {
++            io.lines()
++                .find_map(|line| line.strip_prefix("write_bytes: ")?.trim().parse().ok())
++        })
++        .unwrap_or(0)
++}
++
+ pub fn csv(path: &Path, header: &str) -> Result<std::io::BufWriter<std::fs::File>> {
+     let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
+     writeln!(file, "{header}")?;

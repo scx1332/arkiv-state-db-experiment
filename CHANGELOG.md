@@ -4,8 +4,21 @@
 
 Nothing in the node's workspace changed: the node, the engine, consensus,
 blocks and the `node.redb` and `history.redb` layouts are as in
-0.1.0-alpha.9. Both entries below are about golem-db's API
+0.1.0-alpha.9. The entries below are about golem-db's API
 ([comparison](docs/golem-db-api-comparison.md)).
+
+### golem-db's load benchmark on both engines
+
+- golem-db's load benchmark (pull request 182, a draft) runs on our engine
+  with `conformance/golem-db/load-bench.patch`; `ci.sh` gained
+  `setup-bench`, `bench-smoke` and `bench`.
+- `golem-api` reads `ARKIV_REDB_CACHE_MIB`, `ARKIV_OBJECT_CACHE_MIB`,
+  `ARKIV_OBJECT_CACHE_ENTRIES` and `ARKIV_REDB_QUICK_REPAIR`
+  (`ArkivOptions::from_env`). Defaults are unchanged.
+- [Results](docs/golem-db-load-benchmark.md): where our engine is faster
+  and slower than golem-db, and a finding about the node itself: at Kenobi
+  size the store writes about 14 MiB per block, nearly all of it redb's
+  allocator state saved by quick repair.
 
 ### golem-api: golem-db's public API on the engine
 

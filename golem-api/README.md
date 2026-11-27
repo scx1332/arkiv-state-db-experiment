@@ -69,6 +69,14 @@ Other environment variables, read when a `Database` is opened:
 - `ARKIV_SERVE_HISTORY=1`: serve `ReadTarget::Commit(n)` and
   `query(Some(n))` for retained commits other than the head. golem-db
   `main` serves the head only, which is the default here.
+- `ARKIV_REDB_CACHE_MIB` (default 256), `ARKIV_OBJECT_CACHE_MIB` (8) and
+  `ARKIV_OBJECT_CACHE_ENTRIES` (16,384): the store's page cache and the
+  engine's object cache.
+- `ARKIV_REDB_QUICK_REPAIR=0`: do not save redb's allocator state with
+  every commit. For measurements only; the node's store keeps it on.
+
+What these change is measured in the
+[load benchmark results](../docs/golem-db-load-benchmark.md).
 
 ## What is exact, what is a stand-in, what is not supported
 

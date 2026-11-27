@@ -109,6 +109,10 @@ static NEXT_BRANCH: AtomicU64 = AtomicU64::new(0);
 pub struct ArkivOptions {
     /// redb page cache, bytes.
     pub redb_cache: usize,
+    /// Whether every commit also saves redb's allocator state, so that the
+    /// file opens without a repair after an unclean stop (the node's
+    /// setting, and the default).
+    pub redb_quick_repair: bool,
     /// Engine encoded-object cache, bytes and entries.
     pub object_cache: usize,
     pub object_cache_entries: usize,
@@ -136,12 +140,45 @@ impl ArkivOptions {
     pub fn serve_history_from_env() -> bool {
         std::env::var("ARKIV_SERVE_HISTORY").is_ok_and(|v| v == "1")
     }
+
+    /// The defaults with every `ARKIV_*` variable applied: the two above,
+    /// `ARKIV_REDB_CACHE_MIB`, `ARKIV_REDB_QUICK_REPAIR` (`0` or `1`),
+    /// `ARKIV_OBJECT_CACHE_MIB` and `ARKIV_OBJECT_CACHE_ENTRIES`.
+    pub fn from_env() -> Self {
+        fn number(name: &str) -> Option<usize> {
+            let value = std::env::var(name).ok().filter(|v| !v.is_empty())?;
+            Some(
+                value
+                    .parse()
+                    .unwrap_or_else(|e| panic!("{name}: {value:?}: {e}")),
+            )
+        }
+        let mut options = Self {
+            retention: Self::retention_from_env(),
+            serve_history: Self::serve_history_from_env(),
+            ..Self::default()
+        };
+        if let Some(mib) = number("ARKIV_REDB_CACHE_MIB") {
+            options.redb_cache = mib << 20;
+        }
+        if let Some(flag) = number("ARKIV_REDB_QUICK_REPAIR") {
+            options.redb_quick_repair = flag != 0;
+        }
+        if let Some(mib) = number("ARKIV_OBJECT_CACHE_MIB") {
+            options.object_cache = mib << 20;
+        }
+        if let Some(entries) = number("ARKIV_OBJECT_CACHE_ENTRIES") {
+            options.object_cache_entries = entries;
+        }
+        options
+    }
 }
 
 impl Default for ArkivOptions {
     fn default() -> Self {
         Self {
             redb_cache: 256 << 20,
+            redb_quick_repair: true,
             // The engine's own defaults (durable::Options::default()).
             object_cache: 8 << 20,
             object_cache_entries: 16_384,
@@ -547,7 +584,10 @@ impl ArkivDb {
         }
         let path = dir.join(FILE);
         let present = std::fs::metadata(&path).is_ok_and(|m| m.len() > 0);
-        let redb = RedbConfig::with_cache_size(options.redb_cache);
+        let redb = RedbConfig {
+            cache_size: options.redb_cache,
+            quick_repair: options.redb_quick_repair,
+        };
         let store = if present {
             RedbStore::open(&path, redb).map_err(open_storage)?
         } else {

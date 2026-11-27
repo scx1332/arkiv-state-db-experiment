@@ -50,11 +50,7 @@ fn backend() -> Backend {
 }
 
 fn options() -> ArkivOptions {
-    ArkivOptions {
-        retention: ArkivOptions::retention_from_env(),
-        serve_history: ArkivOptions::serve_history_from_env(),
-        ..ArkivOptions::default()
-    }
+    ArkivOptions::from_env()
 }
 
 /// golem-db's cloneable database handle, over the selected engine.

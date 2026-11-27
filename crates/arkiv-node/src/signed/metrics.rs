@@ -411,7 +411,7 @@ impl Metrics {
                 ),
                 (
                     "db_commits_total",
-                    "Successful durable storage commits.",
+                    "Successful storage commits (with --state-durable-every, durable or not).",
                     commits.committed,
                 ),
                 (

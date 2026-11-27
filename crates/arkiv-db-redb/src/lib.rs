@@ -30,6 +30,25 @@
 //!   quick repair on (two-phase commit plus a saved allocator state), so
 //!   `Committed` means redb's commit returned after its final sync. The
 //!   store's own initialization commit uses the same settings.
+//! - With [`RedbConfig::durable_every`] above 1, `commit` calls share a
+//!   durable commit: only every n-th one, [`RedbStore::checkpoint`] and
+//!   [`RedbStore::close`] sync, and the ones between use redb's
+//!   `Durability::None`. Readers see each commit at once; a crash leaves
+//!   the store at its last durable commit, complete, with every later
+//!   commit absent. redb writes the pages of such commits only to pages no
+//!   durable commit uses, so the durable state is never at risk. Before
+//!   its first such commit the store durably records a mark
+//!   ([`RedbStore::shared_durability`]) that stays in the file: its owner
+//!   must be able to redo lost commits. Initialization, relabelling,
+//!   object staging and garbage-collection setup stay durable each time.
+//!   After an I/O failure in this mode the lost commits make
+//!   [`recover`](arkiv_db_storage::versioned::VersionedStore::recover)
+//!   return an older head than the caller committed.
+//! - Without quick repair ([`RedbConfig::quick_repair`] off), commits
+//!   still sync twice by default ([`RedbConfig::two_phase_commit`]), and
+//!   an unclean stop is followed by redb's full repair, which reads the
+//!   whole file. [`RedbStore::close`] ends a process cleanly: the next
+//!   open neither repairs nor loses a commit.
 //! - [`RedbStore::create`] builds a new store in a temporary file
 //!   ([`initialization_path`]) and renames it into place only after the
 //!   initialization commit, then syncs the directory, so a crash while

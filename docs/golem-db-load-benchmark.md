@@ -248,7 +248,10 @@ runs the same store on a file of the same size.
 
 ## Options
 
-None is decided. There are two costs with different remedies.
+There are two costs with different remedies. The first one was measured
+and decided afterwards: see [write volume of the state database](state-write-volume.md)
+(durable state commit every N blocks, `--state-durable-every`). The second
+is open.
 
 Quick repair (14 MiB per block at Kenobi's size, whatever the traffic):
 
@@ -267,9 +270,12 @@ Random pages per tree node (grows with traffic and with the file):
 | A log-structured store for the objects, behind the store interface | A commit becomes a sequential append of about 250 KiB, plus compaction in the background | A new store crate; the crash and recovery validation done for redb has to be repeated |
 | Key tree nodes by position instead of by hash | Nodes written together are stored together; writes approach the logical size | Engine, store, garbage collection and on-disk format all change, and it interacts with the 256-block history |
 
-Measurements that would settle the cheap ones: quick repair off on a copy
-of the Kenobi database (write volume, repair time after a kill), and a
-durable commit every N blocks as an adapter switch.
+Both cheap ones were then measured on copies of the Kenobi database
+([results](state-write-volume.md)): quick repair off costs a 58-minute
+restart after a kill, and a durable commit every 64 blocks brings the node
+from 13.8 to 0.67 MiB per block. The page estimate in the second table (45%
+fewer pages at N = 10) did not hold for the node: the data pages stay at
+about 0.44 MiB per block whatever N is.
 
 ## Decisions
 

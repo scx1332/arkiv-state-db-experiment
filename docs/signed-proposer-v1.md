@@ -327,6 +327,23 @@ uses each store's recovery contract and validates the referenced head body.
 
 A crash before engine publication can leave an orphan history object. It is
 never treated as inclusion and cannot block another body at the same height.
+
+With `--state-durable-every N` (producer and full, default 1) only every N-th
+state commit is durable; the history commit of every block stays durable.
+`node.redb` is then a checkpoint of executing `history.redb`: after a crash
+it is up to N-1 blocks behind, and the node executes those blocks again from
+its history before it serves, produces or syncs. Each replayed block is
+authenticated and must reproduce its signed header, as in an import. The
+producer needs this to stay safe: all the blocks above the checkpoint but
+possibly the last were served, so it must rebuild exactly them instead of
+signing others at their heights, and it refuses to start when one cannot be
+executed again. In this mode a body above the state head is therefore
+adopted, not an orphan. The state file records durably that it has run this
+way, so the replay does not depend on the flag being passed again; a binary
+without the replay must not open such a file after an unclean stop. A clean
+stop (SIGTERM) makes every commit durable. N is at most the state window:
+the bodies of the blocks to replay must still be kept. See the
+[write volume measurements](state-write-volume.md).
 Missing or corrupt committed body references fail closed. Backups must include
 compatible state and history files. All bodies and snapshots remain stored.
 `--state-retention <N>` (producer and full) only limits which state heights

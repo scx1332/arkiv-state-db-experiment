@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, RwLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -51,6 +51,9 @@ pub const DEFAULT_CACHE_SIZE: usize = 8 << 20;
 pub(crate) const FORMAT_KEY: &str = "store/format";
 const DATABASE_ID_KEY: &str = "store/database_id";
 const HEAD_KEY: &str = "store/head";
+/// Present once the store has made a commit that was not durable by itself
+/// ([`RedbConfig::durable_every`]); see [`RedbStore::shared_durability`].
+const SHARED_DURABILITY_KEY: &str = "store/shared_durability";
 
 pub(crate) const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 const BLOCKS: TableDefinition<u64, &[u8]> = TableDefinition::new("blocks");
@@ -83,6 +86,19 @@ pub struct RedbConfig {
     /// recovery claims; turning it off exists only to measure the
     /// difference.
     pub quick_repair: bool,
+    /// Whether commits without quick repair still flush twice (redb's
+    /// two-phase commit), so that the committed root never depends on page
+    /// checksums. Quick repair always commits in two phases; this setting
+    /// only matters when it is off. On by default.
+    pub two_phase_commit: bool,
+    /// How many `commit` calls share one durable commit. With 1 (the
+    /// default) every commit is durable before it returns. With `n > 1`
+    /// only every `n`-th commit, [`RedbStore::checkpoint`] and
+    /// [`RedbStore::close`] are durable; the commits between them are
+    /// visible to readers at once but are lost together by a crash, which
+    /// leaves the store at its last durable commit. The caller must then
+    /// be able to redo the lost commits from elsewhere.
+    pub durable_every: u32,
 }
 
 impl Default for RedbConfig {
@@ -90,6 +106,8 @@ impl Default for RedbConfig {
         Self {
             cache_size: DEFAULT_CACHE_SIZE,
             quick_repair: true,
+            two_phase_commit: true,
+            durable_every: 1,
         }
     }
 }
@@ -218,6 +236,12 @@ pub struct RedbStore {
     /// mutex, so a set flag always finds the latched error.
     failed: AtomicBool,
     writer: Mutex<()>,
+    /// Commits since the last durable one (see
+    /// [`RedbConfig::durable_every`]); changed under `writer`.
+    undurable: AtomicU32,
+    /// Whether this handle has seen or written the shared-durability
+    /// marker; changed under `writer`.
+    marked: AtomicBool,
     stats: StatsRecorder,
     timings: [OperationTiming; 5],
     probe: Arc<IoProbe>,
@@ -340,6 +364,8 @@ impl RedbStore {
             failure: Mutex::new(None),
             failed: AtomicBool::new(false),
             writer: Mutex::new(()),
+            undurable: AtomicU32::new(0),
+            marked: AtomicBool::new(false),
             stats: StatsRecorder::new(),
             timings: Default::default(),
             probe,
@@ -638,13 +664,140 @@ impl RedbStore {
         apply: impl FnOnce(&WriteTransaction) -> Result<Written, Fault>,
     ) -> CommitOutcome {
         let _writer = lock(&self.writer);
-        self.stats.write(self.transact_locked(validate, apply))
+        self.stats
+            .write(self.transact_locked(validate, apply, false))
+    }
+
+    /// [`Self::transact`] for the per-block commits, which may share a
+    /// durable commit ([`RedbConfig::durable_every`]).
+    fn transact_block(
+        &self,
+        validate: impl FnOnce() -> Result<(), StorageError>,
+        apply: impl FnOnce(&WriteTransaction) -> Result<Written, Fault>,
+    ) -> CommitOutcome {
+        let _writer = lock(&self.writer);
+        self.stats
+            .write(self.transact_locked(validate, apply, true))
+    }
+
+    /// Whether this database ever made a commit that was not durable by
+    /// itself ([`RedbConfig::durable_every`] above 1). The mark is written
+    /// durably before the first such commit and stays in the file, so it
+    /// travels with every copy: whoever opens the database knows that a
+    /// crash may have left it several commits behind what it served, and
+    /// must redo them before building on it.
+    pub fn shared_durability(&self) -> Result<bool, StorageError> {
+        if self.marked.load(Ordering::Relaxed) {
+            return Ok(true);
+        }
+        self.with_db(|db| {
+            let read = db.begin_read()?;
+            let meta = read.open_table(META)?;
+            Ok(meta.get(SHARED_DURABILITY_KEY)?.is_some())
+        })
+    }
+
+    /// Removes the shared-durability mark, durably. For the owner of a
+    /// store that commits durably every time again
+    /// ([`RedbConfig::durable_every`] of 1), once it has redone whatever a
+    /// crash lost: from then on the file is an ordinary one. Refused while
+    /// this store shares durable commits.
+    pub fn clear_shared_durability(&self) -> Result<(), StorageError> {
+        let _writer = lock(&self.writer);
+        if self.config.durable_every > 1 || self.undurable.load(Ordering::Relaxed) > 0 {
+            return Err(StorageError::new(
+                StorageErrorKind::Incompatible,
+                "the store shares durable commits",
+            ));
+        }
+        self.with_db(|db| {
+            let mut txn = db.begin_write()?;
+            txn.set_durability(Durability::Immediate)?;
+            txn.set_two_phase_commit(self.config.two_phase_commit);
+            txn.set_quick_repair(self.config.quick_repair);
+            let present = txn
+                .open_table(META)?
+                .remove(SHARED_DURABILITY_KEY)?
+                .is_some();
+            if present {
+                txn.commit()?;
+            } else {
+                txn.abort()?;
+            }
+            Ok(())
+        })?;
+        self.marked.store(false, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Writes the shared-durability mark in a durable commit of its own,
+    /// unless the file has it. Called under `writer`.
+    fn mark_shared_durability(&self, db: &Database) -> Result<(), Fault> {
+        if self.marked.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let mut txn = db.begin_write()?;
+        txn.set_durability(Durability::Immediate)?;
+        txn.set_two_phase_commit(self.config.two_phase_commit);
+        txn.set_quick_repair(self.config.quick_repair);
+        let present = {
+            let mut meta = txn.open_table(META)?;
+            let present = meta.get(SHARED_DURABILITY_KEY)?.is_some();
+            if !present {
+                meta.insert(SHARED_DURABILITY_KEY, [1u8].as_slice())?;
+            }
+            present
+        };
+        if present {
+            txn.abort()?;
+        } else {
+            txn.commit()?;
+        }
+        self.marked.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Commits since the last durable one.
+    pub fn undurable_commits(&self) -> u32 {
+        self.undurable.load(Ordering::Relaxed)
+    }
+
+    /// Makes every commit so far durable. A no-op when the last commit was.
+    pub fn checkpoint(&self) -> Result<(), StorageError> {
+        let _writer = lock(&self.writer);
+        if self.undurable.load(Ordering::Relaxed) == 0 {
+            return Ok(());
+        }
+        match self.transact_locked(|| Ok(()), |_| Ok(Written::default()), false) {
+            Ok(_) => Ok(()),
+            Err(CommitOutcome::NotCommitted(error) | CommitOutcome::Indeterminate(error)) => {
+                Err(error)
+            }
+            Err(CommitOutcome::Committed) => Ok(()),
+        }
+    }
+
+    /// Closes the database for a clean stop: every commit becomes durable
+    /// and redb records its allocator state, so the next open neither
+    /// loses a commit nor repairs. The store answers `Closed` afterwards.
+    pub fn close(&self) -> Result<(), StorageError> {
+        let _writer = lock(&self.writer);
+        if let Some(error) = self.failure() {
+            return Err(error);
+        }
+        let mut slot = self.slot.write().unwrap_or_else(PoisonError::into_inner);
+        // Dropping the handle is redb's clean close: one last durable
+        // commit that also carries the commits made without a flush.
+        slot.db = None;
+        self.undurable.store(0, Ordering::Relaxed);
+        Ok(())
     }
 
     fn transact_locked(
         &self,
         validate: impl FnOnce() -> Result<(), StorageError>,
         apply: impl FnOnce(&WriteTransaction) -> Result<Written, Fault>,
+        block: bool,
     ) -> Result<Written, CommitOutcome> {
         // A latched failure answers every call, even a malformed batch.
         if let Some(error) = self.failure() {
@@ -656,9 +809,20 @@ impl RedbStore {
             let error = self.failure().unwrap_or_else(closed);
             return Err(CommitOutcome::NotCommitted(error));
         };
+        let durable = !block
+            || self.undurable.load(Ordering::Relaxed).saturating_add(1)
+                >= self.config.durable_every;
         let staged = (|| -> Result<_, Fault> {
+            if !durable {
+                self.mark_shared_durability(db)?;
+            }
             let mut txn = db.begin_write()?;
-            txn.set_durability(Durability::Immediate)?;
+            txn.set_durability(if durable {
+                Durability::Immediate
+            } else {
+                Durability::None
+            })?;
+            txn.set_two_phase_commit(self.config.two_phase_commit);
             txn.set_quick_repair(self.config.quick_repair);
             let written = apply(&txn)?;
             Ok((txn, written))
@@ -672,7 +836,14 @@ impl RedbStore {
             }
         };
         match txn.commit() {
-            Ok(()) => Ok(written),
+            Ok(()) => {
+                if durable {
+                    self.undurable.store(0, Ordering::Relaxed);
+                } else {
+                    self.undurable.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(written)
+            }
             Err(redb::CommitError::TransactionPoisoned) => {
                 // redb rolled the transaction back.
                 let error = StorageError::new(
@@ -1387,7 +1558,7 @@ impl VersionedStore for RedbStore {
 
     fn commit(&self, batch: &CommitBatch) -> CommitOutcome {
         let mut timing = self.timings[3].start();
-        let outcome = self.transact(
+        let outcome = self.transact_block(
             || match self.collects() {
                 true => Err(gc_write_refused("a plain commit")),
                 false => batch.validate(),
@@ -1465,6 +1636,8 @@ impl VersionedStore for RedbStore {
             Ok((db, report, gc)) => {
                 slot.db = Some(db);
                 slot.epoch += 1;
+                // The reopened file holds durable commits only.
+                self.undurable.store(0, Ordering::Relaxed);
                 *lock(&self.last_open) = report;
                 *lock(&self.gc) = gc;
                 self.set_failure(None);
@@ -1504,26 +1677,32 @@ impl VersionedStore for RedbStore {
             true => batch.validate(),
             false => Err(gc_write_refused("an object removal")),
         };
-        let mut outcome = self.transact_locked(validate, |txn| {
-            stage_gc(txn, batch, gc, graph, &invariant, &planned, &collecting)
-        });
+        let mut outcome = self.transact_locked(
+            validate,
+            |txn| stage_gc(txn, batch, gc, graph, &invariant, &planned, &collecting),
+            true,
+        );
         if let Some(reason) = invariant.take() {
             // The counts are wrong: commit without collection, suspended,
             // so production continues and an operator rebuilds them.
             eprintln!("garbage collection suspended: {reason}");
-            outcome = self.transact_locked(validate, |txn| {
-                let written = stage_batch(txn, batch)?;
-                let mut state = tables::read_state(txn)?.ok_or_else(|| {
-                    Fault::new(
-                        StorageErrorKind::Incompatible,
-                        "the store does not collect garbage",
-                    )
-                })?;
-                state.suspended = true;
-                tables::write_state(txn, &state)?;
-                planned.set(Some((state, GcReport::default())));
-                Ok(written)
-            });
+            outcome = self.transact_locked(
+                validate,
+                |txn| {
+                    let written = stage_batch(txn, batch)?;
+                    let mut state = tables::read_state(txn)?.ok_or_else(|| {
+                        Fault::new(
+                            StorageErrorKind::Incompatible,
+                            "the store does not collect garbage",
+                        )
+                    })?;
+                    state.suspended = true;
+                    tables::write_state(txn, &state)?;
+                    planned.set(Some((state, GcReport::default())));
+                    Ok(written)
+                },
+                true,
+            );
         }
         self.gc_nanos.fetch_add(
             collecting.get().as_nanos().min(u128::from(u64::MAX)) as u64,

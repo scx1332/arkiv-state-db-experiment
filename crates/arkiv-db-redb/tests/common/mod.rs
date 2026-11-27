@@ -179,7 +179,7 @@ pub fn block(
 }
 
 /// Consecutive blocks of one chain (fork 1), each built on the one before.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Chain {
     head: Option<Head>,
 }
@@ -253,8 +253,9 @@ pub fn assert_absent(store: &dyn VersionedStore, batch: &CommitBatch) {
 /// A 1 MiB redb cache, with or without quick repair (two-phase commit).
 pub fn config(quick_repair: bool) -> RedbConfig {
     RedbConfig {
-        cache_size: 1 << 20,
         quick_repair,
+        two_phase_commit: quick_repair,
+        ..RedbConfig::with_cache_size(1 << 20)
     }
 }
 

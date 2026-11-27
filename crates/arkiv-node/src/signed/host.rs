@@ -628,6 +628,86 @@ impl Host {
         Ok(host)
     }
 
+    /// Re-executes the blocks `history.redb` holds above the state head.
+    ///
+    /// For a state database whose commits share a durable one
+    /// (`RedbConfig::durable_every`, `RedbStore::shared_durability`): call
+    /// it after [`Self::open`] and before anything else. A block body is
+    /// durable in `history.redb` before the state commit that publishes
+    /// it, so after a crash of such a database the history is ahead of the
+    /// state by every block since the last durable state commit. All of
+    /// them but possibly the last were published, and each is signed by
+    /// the proposer, so the producer must execute exactly these blocks
+    /// again instead of signing other blocks at their heights: a block
+    /// that cannot be executed again stops a producer from starting. A
+    /// follower stops replaying there and fetches the rest from its peer.
+    ///
+    /// Do not call it for a database whose every commit is durable: there
+    /// a body above the state head belongs to a block that was never
+    /// published, and the producer builds a new block at that height.
+    ///
+    /// Returns the number of blocks replayed.
+    pub fn replay_history(&mut self) -> Result<u64> {
+        let first = self.head.height.saturating_add(1);
+        let mut replayed = 0u64;
+        loop {
+            let Some(height) = self.head.height.checked_add(1) else {
+                break;
+            };
+            let step = (|| -> Result<bool> {
+                let Some((indexed, bytes)) = self.history.read_height(height)? else {
+                    return Ok(false);
+                };
+                let block: SignedBlock = decode_exact(&bytes).map_err(|e| {
+                    ErrorCode::StorageCorrupt.caused_by(format_args!("block {height}: {e}"))
+                })?;
+                block.authenticate(&self.genesis)?;
+                if encode(&block) != bytes
+                    || block.header != indexed.certificate
+                    || block.header.header.height != height
+                    || block.header.header.outcomes_digest != block.outcomes.digest()
+                    || block.header.header.inputs_digest != block.inputs.digest()
+                {
+                    return Err(ErrorCode::StorageCorrupt.into());
+                }
+                self.execute_publish(block.inputs.clone(), Some(&block))?;
+                Ok(true)
+            })();
+            match step {
+                Ok(true) => replayed += 1,
+                Ok(false) => break,
+                Err(error) => {
+                    eprintln!(
+                        "{}",
+                        json!({
+                            "event": "history_replay_failed",
+                            "height": height,
+                            "error": error.diagnostic(),
+                        })
+                    );
+                    let fenced = self.pending.is_some()
+                        || matches!(self.health, Health::StorageFenced | Health::ChainConflict);
+                    if self.is_producer() || fenced {
+                        return Err(error);
+                    }
+                    break;
+                }
+            }
+        }
+        if replayed > 0 {
+            eprintln!(
+                "{}",
+                json!({
+                    "event": "history_replay",
+                    "blocks": replayed,
+                    "from": first,
+                    "to": self.head.height,
+                })
+            );
+        }
+        Ok(replayed)
+    }
+
     /// Opens the state after `height`, refusing heights below the state
     /// floor up front with `HistoryPruned`.
     pub fn state(&self, height: u64) -> Result<arkiv_db::Snapshot> {

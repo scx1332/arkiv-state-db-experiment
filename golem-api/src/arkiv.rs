@@ -660,6 +660,9 @@ impl ArkivDb {
         let redb = RedbConfig {
             cache_size: options.redb_cache,
             quick_repair: options.redb_quick_repair,
+            // Without quick repair, one flush per commit as before.
+            two_phase_commit: options.redb_quick_repair,
+            ..RedbConfig::default()
         };
         let store = if present {
             RedbStore::open(&path, redb).map_err(open_storage)?

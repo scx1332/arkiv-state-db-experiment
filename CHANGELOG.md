@@ -2,10 +2,47 @@
 
 ## Unreleased
 
-Nothing in the node's workspace changed: the node, the engine, consensus,
-blocks and the `node.redb` and `history.redb` layouts are as in
-0.1.0-alpha.9. The entries below are about golem-db's API
+The engine, consensus, blocks and the `node.redb` and `history.redb` layouts
+are as in 0.1.0-alpha.9. The node gained one flag and a clean stop; the
+other entries are about golem-db's API
 ([comparison](docs/golem-db-api-comparison.md)).
+
+### Write volume of the state database
+
+At Kenobi's size (`node.redb` 114 GiB) a node writes about 14 MiB to disk
+per block, 590 GiB a day at 2 s blocks, nearly all of it redb's allocator
+state, which quick repair saves in full with every commit.
+[Measurements and options](docs/state-write-volume.md).
+
+- New flag `--state-durable-every N` (producer and full, default 1: as
+  before). Only every N-th state commit is durable. The history commit of
+  every block stays durable, and after a crash the node executes the blocks
+  since the last durable state commit again from `history.redb` before it
+  serves, produces or syncs. Measured at Kenobi's size with N = 64:
+  0.67 MiB per block instead of 13.8, sync from a peer two to three times
+  faster, restart after `kill -9` in about a second with nothing lost. N is
+  at most the state window and at most 1,024.
+- A state file that has run this way is marked durably and is replayed at
+  every start, whatever the flags; a start with N = 1 replays once more and
+  removes the mark. **A binary without the replay (0.1.0-alpha.9 and
+  earlier) must not open such a file as a producer after an unclean stop**:
+  it would sign other blocks at heights it already served. After a clean
+  stop any binary may open it.
+- The node now closes its databases on SIGTERM and SIGINT instead of
+  exiting with them open. With the default settings nothing depended on it;
+  shared durability and a database without quick repair do.
+- A database open that takes a second or more is logged (`store_open`, with
+  the time and whether redb ran its full repair).
+- `arkiv-db-redb`: `RedbConfig::durable_every` and `two_phase_commit`,
+  `RedbStore::checkpoint`, `close`, `shared_durability` and
+  `clear_shared_durability`. Two measurement switches for the state
+  database, `ARKIV_STATE_QUICK_REPAIR` and `ARKIV_STATE_TWO_PHASE` (0 or 1).
+- Measured and rejected: quick repair off. It writes as little, but the
+  restart after `kill -9` took 58 minutes at this size (redb's full
+  repair).
+- Measured, not built: redb rewriting only the allocator state that
+  changed. Of the 6.75 MiB it saves per state commit, 221 bytes differ from
+  the commit before.
 
 ### golem-db's load benchmark on both engines
 

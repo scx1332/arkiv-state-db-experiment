@@ -17,7 +17,7 @@ rogue_one_db_commit_indeterminate_total{database="history"} _
 # TYPE rogue_one_db_commit_not_committed_total counter
 rogue_one_db_commit_not_committed_total{database="state"} _
 rogue_one_db_commit_not_committed_total{database="history"} _
-# HELP rogue_one_db_commits_total Successful durable storage commits.
+# HELP rogue_one_db_commits_total Successful storage commits (with --state-durable-every, durable or not).
 # TYPE rogue_one_db_commits_total counter
 rogue_one_db_commits_total{database="state"} _
 rogue_one_db_commits_total{database="history"} _

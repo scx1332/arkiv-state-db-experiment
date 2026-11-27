@@ -185,6 +185,9 @@ approximate under concurrent updates. Counters reset on process restart.
 `db_backend_{read,write}_bytes_total` count successful backend bytes;
 `db_commits_total`, `db_commit_not_committed_total` and
 `db_commit_indeterminate_total` distinguish commit outcomes.
+With `--state-durable-every N` the state database's `db_commits_total`
+counts every commit, of which one in N is durable
+([write volume](state-write-volume.md)).
 
 ### Objects and records
 

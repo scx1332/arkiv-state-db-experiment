@@ -4,8 +4,8 @@
 //! - On a simulated `CrashDisk`, after every `Committed` commit the image a
 //!   power cut would leave *right then* (synced data only, no unsynced
 //!   operation) is reopened: it holds that commit and every earlier one.
-//! - Every commit syncs: two syncs per commit with quick repair (redb's
-//!   two-phase commit), one without.
+//! - Every commit syncs: two syncs per commit with redb's two-phase commit
+//!   (which quick repair implies), one without.
 //! - The store's initialization commit is durable too: a power cut right
 //!   after `create` keeps the database identity.
 //! - On a real file, a simulated process kill right after `Committed`
@@ -24,9 +24,10 @@ use arkiv_db_storage::versioned::{SpaceId, VersionedStore};
 
 #[test]
 fn every_committed_block_survives_an_immediate_power_cut() {
-    for quick_repair in [true, false] {
+    for (quick_repair, two_phase_commit) in [(true, true), (false, true), (false, false)] {
         let config = RedbConfig {
             quick_repair,
+            two_phase_commit,
             ..RedbConfig::with_cache_size(256 << 10)
         };
         let disk = CrashDisk::new();
@@ -41,7 +42,7 @@ fn every_committed_block_survives_an_immediate_power_cut() {
             let syncs = disk.counters().syncs;
             commit(&store, &batch);
             let per_commit = disk.counters().syncs - syncs;
-            assert_eq!(per_commit, if quick_repair { 2 } else { 1 });
+            assert_eq!(per_commit, if two_phase_commit { 2 } else { 1 });
             committed.push(batch);
 
             // The power-loss image at this instant.

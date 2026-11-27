@@ -404,10 +404,7 @@ pub fn run_growing_steady(select: Option<Select<'_>>, seeds: u64) -> Tally {
 }
 
 fn growing_config() -> RedbConfig {
-    RedbConfig {
-        cache_size: 32 << 10,
-        quick_repair: true,
-    }
+    RedbConfig::with_cache_size(32 << 10)
 }
 
 fn run_spilling(

@@ -163,11 +163,42 @@ fn signer(path: &str) -> Result<Signer> {
     )?)
 }
 
-fn store(path: &Path, streaming_import: bool) -> Result<Arc<RedbStore>> {
+/// The most blocks whose state commits may share one durable commit
+/// (`--state-durable-every`): what a start after a crash may have to
+/// execute again from `history.redb`.
+const MAX_STATE_DURABLE_EVERY: u32 = 1024;
+
+/// The store settings of `path`. Only the state database shares durable
+/// commits (`--state-durable-every`); every other database commits durably
+/// each time. The state database also takes two measurement switches from
+/// the environment (docs/state-write-volume.md):
+/// `ARKIV_STATE_QUICK_REPAIR` and `ARKIV_STATE_TWO_PHASE`, each 0 or 1.
+fn redb_config(path: &Path, state_durable_every: u32) -> RedbConfig {
+    let mut config = RedbConfig::default();
+    if path.file_name().and_then(|s| s.to_str()) != Some("node.redb") {
+        return config;
+    }
+    config.durable_every = state_durable_every.max(1);
+    let flag = |name: &str| match std::env::var(name).ok().as_deref() {
+        Some("0") => Some(false),
+        Some("1") => Some(true),
+        _ => None,
+    };
+    if let Some(on) = flag("ARKIV_STATE_QUICK_REPAIR") {
+        config.quick_repair = on;
+    }
+    if let Some(on) = flag("ARKIV_STATE_TWO_PHASE") {
+        config.two_phase_commit = on;
+    }
+    config
+}
+
+fn store(path: &Path, streaming_import: bool, state_durable_every: u32) -> Result<Arc<RedbStore>> {
+    let config = redb_config(path, state_durable_every);
     let opened = if path.exists() {
-        RedbStore::open(path, RedbConfig::default())?
+        RedbStore::open(path, config)?
     } else {
-        RedbStore::create(path, RedbConfig::default())?
+        RedbStore::create(path, config)?
     };
     if streaming_import && opened.head()?.is_none() {
         // Only a headless streaming-import destination gets the larger bounded
@@ -1052,7 +1083,11 @@ async fn run() -> Result<()> {
             let flags = [
                 NODE_FLAGS,
                 FOLLOWER_FLAGS,
-                &["--state-retention", "--body-retention"],
+                &[
+                    "--state-retention",
+                    "--body-retention",
+                    "--state-durable-every",
+                ],
             ];
             node(&command, &args.only(&flags)?).await?
         }
@@ -1086,6 +1121,7 @@ const NODE_FLAGS: &[&str] = &[
     "--read-max-offset",
 ];
 const PRODUCER_FLAGS: &[&str] = &[
+    "--state-durable-every",
     "--key-file",
     "--chain-id",
     "--block-period-ms",
@@ -1120,7 +1156,7 @@ fn help() {
         "arkiv-proposer producer --run-dir DIR --key-file FILE [--listen 127.0.0.1:9500] ",
         "[--private-listen 127.0.0.1:9501] [--start paused|running] [--source-id UUID] ",
         "[--chain-id 9001] [--block-period-ms 1000] [--state-retention archive|N (256)] ",
-        "[--body-retention archive|window (archive)] ",
+        "[--body-retention archive|window (archive)] [--state-durable-every N (1)] ",
         "[--read-concurrency 4] [--read-deadline-secs 30] [--read-max-groups N] ",
         "[--read-max-literals N] [--read-max-offset 100000] (--allocations-file FILE | --bundle BUNDLE ",
         "[--prebuilt-state DIR])\n",
@@ -1129,6 +1165,7 @@ fn help() {
         "[--replication-peer URL] [--allow-http-peers true|false (false)] [--bundle BUNDLE] ",
         "[--state-retention archive|N (full ",
         "only, 256)] [--body-retention archive|window (full only, archive)] ",
+        "[--state-durable-every N (full only, 1)] ",
         "[--read-concurrency 4] [--read-deadline-secs 30] [--read-max-groups N] ",
         "[--read-max-literals N] [--read-max-offset 100000]\n",
         "arkiv-proposer sign --key-file FILE --genesis-file FILE --tx-file FILE --nonce N ",
@@ -1389,6 +1426,8 @@ struct NodeEnv<'a> {
     /// `--body-retention window`: bodies expire from `history.redb` with
     /// the node's records.
     prune_bodies: bool,
+    /// `--state-durable-every`.
+    state_durable_every: u32,
     store: &'a dyn Fn(&Path, bool) -> Result<Arc<RedbStore>>,
     peer: Option<String>,
     replication: Option<String>,
@@ -1413,6 +1452,7 @@ fn default_retention(run_dir: &Path, command: &str) -> Result<arkiv_db::durable:
     let Ok(store) = RedbStore::open(run_dir.join("node.redb"), RedbConfig::default()) else {
         return Ok(Retention::Window(DEFAULT_WINDOW));
     };
+    log_slow_open(&run_dir.join("node.redb"), &store);
     let archive = store.head()?.is_some()
         && store.gc_state()?.is_none()
         && arkiv_db::durable::gc::durable_floor(&store)? == 0;
@@ -1490,6 +1530,22 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
         Some("window") if retention.window().is_some() => true,
         Some(_) => return Err(ErrorCode::InvalidRequest.into()),
     };
+    // How many blocks' state commits share one durable commit. The blocks
+    // since the last one are executed again from history.redb after a
+    // crash, so their bodies must still be there: no more blocks than the
+    // window that bodies and records are kept for.
+    let state_durable_every = match args.get("--state-durable-every") {
+        None => 1,
+        Some(value) => u32::try_from(number(value)?)
+            .ok()
+            .filter(|n| (1..=MAX_STATE_DURABLE_EVERY).contains(n))
+            .filter(|n| {
+                retention
+                    .window()
+                    .is_none_or(|window| u64::from(*n) <= window)
+            })
+            .ok_or(ErrorCode::InvalidRequest)?,
+    };
     let options = Options {
         retention,
         // Measurement switch: count but never delete (soak step "count-only").
@@ -1498,13 +1554,14 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
     };
     let databases = std::cell::RefCell::new(Vec::<arkiv_node::signed::metrics::Database>::new());
     let store = |path: &Path, streaming_import: bool| -> Result<Arc<RedbStore>> {
-        let opened = store(path, streaming_import)?;
+        let opened = store(path, streaming_import, state_durable_every)?;
         let name = match path.file_name().and_then(|s| s.to_str()) {
             Some("node.redb") => "state",
             Some("history.redb") => "history",
             Some("headers.redb") => "headers",
             _ => return Err(ErrorCode::InvalidRequest.into()),
         };
+        log_slow_open(path, &opened);
         let mut databases = databases.borrow_mut();
         // A reopened database (an adopted node.redb) replaces its entry.
         databases.retain(|database| database.name != name);
@@ -1521,6 +1578,7 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
         bundle,
         options,
         prune_bodies,
+        state_durable_every,
         store: &store,
         peer,
         replication,
@@ -1542,6 +1600,11 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
         "{}",
         runtime::status(&*rt.node.lock().map_err(|_| ErrorCode::StorageUnavailable)?)
     );
+    let stores: Vec<Arc<RedbStore>> = databases
+        .borrow()
+        .iter()
+        .map(|database| database.store.clone())
+        .collect();
     let metrics = if let Some(listen) = args.get("--metrics-listen") {
         Some(
             arkiv_node::signed::metrics::Metrics::start(
@@ -1631,7 +1694,7 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
         .map_err(unavailable(Path::new(&listen)))?;
-    exit_on_signal(rt.clone());
+    exit_on_signal(rt.clone(), stores);
     Ok(axum::serve(listener, runtime::public_router(rt))
         .await
         .map_err(unavailable(Path::new(&listen)))?)
@@ -1672,7 +1735,7 @@ fn exit_on_gap(gap: &runtime::SyncGap) -> ! {
 /// every commit is durable, so holding the lock is a clean stopping point.
 /// Without a handler a node running as PID 1 in a container ignores SIGTERM
 /// and is killed only when the stop grace period ends.
-fn exit_on_signal(rt: runtime::Shared) {
+fn exit_on_signal(rt: runtime::Shared, stores: Vec<Arc<RedbStore>>) {
     #[cfg(unix)]
     tokio::spawn(async move {
         use tokio::signal::unix::{SignalKind, signal};
@@ -1693,16 +1756,32 @@ fn exit_on_signal(rt: runtime::Shared) {
         );
         let _ = tokio::task::spawn_blocking(move || {
             let _node = rt.write_node();
+            // The process exits without running destructors, so the
+            // databases are closed here: every commit becomes durable and
+            // the next start opens without a repair.
+            let closed = stores.iter().all(|store| match store.close() {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({"event": "shutdown", "close": error.to_string()})
+                    );
+                    false
+                }
+            });
             eprintln!(
                 "{}",
-                serde_json::json!({"event": "shutdown", "result": "stopped"})
+                serde_json::json!({
+                    "event": "shutdown",
+                    "result": if closed { "stopped" } else { "stopped-unclean" },
+                })
             );
             std::process::exit(0);
         })
         .await;
     });
     #[cfg(not(unix))]
-    let _ = rt;
+    let _ = (rt, stores);
 }
 
 /// The genesis retained in the run directory by an earlier start, if any.
@@ -1783,6 +1862,22 @@ fn producer_node(env: &NodeEnv<'_>, adopt: bool) -> Result<Node> {
     Ok(Node::Full(Box::new(host)))
 }
 
+/// For a state database whose commits have shared durable ones
+/// (`--state-durable-every` above 1, now or in an earlier run): executes the
+/// blocks its history holds above the state head again. A node that commits
+/// durably every time again then clears the file's mark, which makes it an
+/// ordinary state file from here on.
+fn replay_shared(host: &mut Host, state: &RedbStore, state_durable_every: u32) -> Result<()> {
+    if !state.shared_durability()? {
+        return Ok(());
+    }
+    host.replay_history()?;
+    if state_durable_every <= 1 {
+        state.clear_shared_durability()?;
+    }
+    Ok(())
+}
+
 /// Opens the producer of the chain `state` already holds.
 fn reopen_producer(
     env: &NodeEnv<'_>,
@@ -1816,7 +1911,12 @@ fn reopen_producer(
         );
     }
     let history = History::open(history_store, genesis.hash())?;
-    let host = Host::open(state, history, &genesis, Some(signer), env.options.clone())?;
+    let marked = state.clone();
+    let mut host = Host::open(state, history, &genesis, Some(signer), env.options.clone())?;
+    // Blocks served since the last durable state commit: execute them again
+    // before producing, or this node would sign other blocks at their
+    // heights.
+    replay_shared(&mut host, &marked, env.state_durable_every)?;
     let bundle_prefill = env.bundle.as_ref().map(|(_, b)| b.as_path());
     let prefill = local_prefill(env.path, &genesis, bundle_prefill)?;
     Ok(serving(host, prefill))
@@ -2040,7 +2140,9 @@ async fn follower_node(env: &NodeEnv<'_>, light: bool) -> Result<Node> {
             History::create(hs, genesis.hash())?
         };
         let mut host = if state.head()?.is_some() {
-            let host = Host::open(state, history, &genesis, None, options.clone())?;
+            let marked = state.clone();
+            let mut host = Host::open(state, history, &genesis, None, options.clone())?;
+            replay_shared(&mut host, &marked, env.state_durable_every)?;
             serving(host, prefill)
         } else {
             let launch = Launch {
@@ -2065,6 +2167,24 @@ async fn follower_node(env: &NodeEnv<'_>, light: bool) -> Result<Node> {
     }
 }
 
+/// A line for an open that took a second or more: after an unclean stop of
+/// a database without quick repair, redb walks the whole file before the
+/// node answers anything.
+fn log_slow_open(path: &Path, store: &RedbStore) {
+    let report = store.last_open();
+    if report.duration >= Duration::from_secs(1) {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "event": "store_open",
+                "file": path.file_name().and_then(|name| name.to_str()),
+                "fullRepair": report.full_repair,
+                "seconds": report.duration.as_secs_f64(),
+            })
+        );
+    }
+}
+
 /// Whether the node database at `path` exists and has a head. A file that
 /// exists and does not open (locked by a running node, damaged) is an
 /// error here, before anything is downloaded for it.
@@ -2072,9 +2192,9 @@ fn has_head(path: &Path) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
-    Ok(RedbStore::open(path, RedbConfig::default())?
-        .head()?
-        .is_some())
+    let store = RedbStore::open(path, RedbConfig::default())?;
+    log_slow_open(path, &store);
+    Ok(store.head()?.is_some())
 }
 
 /// Fixed deadlines keep block execution/persistence time out of the cadence.

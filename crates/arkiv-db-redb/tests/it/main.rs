@@ -11,6 +11,7 @@ mod engine_support;
 mod atomicity;
 mod backends;
 mod bounded_reads;
+mod checkpoint;
 mod contract;
 mod disk_full;
 mod durability;

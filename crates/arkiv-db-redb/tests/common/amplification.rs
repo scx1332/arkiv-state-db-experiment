@@ -46,6 +46,7 @@ pub fn measure(
     ));
     let config = RedbConfig {
         quick_repair,
+        two_phase_commit: quick_repair,
         ..RedbConfig::default()
     };
     let store = RedbStore::create(&path, config).expect("create");

@@ -63,6 +63,14 @@ the node's status. `sha256` is plain hex, as `sha256sum` prints it.
 The node must be stopped (`SIGTERM`, `docker stop`). A database file can
 only be copied while no process has it open.
 
+Stop it cleanly when it runs with `--state-durable-every N`
+([write volume](state-write-volume.md)). A clean stop makes its state as
+new as its history. After a kill the state file is up to N-1 blocks behind;
+a snapshot of it is still correct, at the lower height, and the node that
+installs it replays the missing blocks from the snapshot's `history.redb`
+when it starts. Only a build with the replay does that: a snapshot of a
+killed node is not for 0.1.0-alpha.9 and earlier producers.
+
 ```sh
 arkiv-proposer snapshot create --run-dir /srv/follower --out /srv/snapshots/71494
 ```

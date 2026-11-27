@@ -18,8 +18,11 @@ RUN cargo build --locked --release -p arkiv-node --bin arkiv-proposer \
     && strip target/release/arkiv-proposer
 
 FROM debian:bookworm-slim
-# curl serves health checks against the public status endpoint.
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+# curl serves health checks against the public status endpoint. The upgrade
+# takes Debian's security fixes that the base image tag does not have yet
+# (the image scan fails on any fixable HIGH or CRITICAL finding).
+RUN apt-get update && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 10001 --user-group --no-create-home --home-dir /data arkiv \
     && mkdir /data && chown arkiv:arkiv /data

@@ -52,10 +52,17 @@ jobs:
             type=ref,event=branch
             type=sha,format=short
 
+      # The runtime stage upgrades Debian's packages. The layer cache would
+      # keep that layer for as long as the Dockerfile is unchanged, and with it
+      # packages that Debian has fixed since: the date makes it run once a day.
+      - id: day
+        run: echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
       - name: Build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
+          build-args: APT_REFRESH=${{ steps.day.outputs.day }}
           load: true
           tags: arkiv-node:ci
           labels: ${{ steps.meta.outputs.labels }}
@@ -121,6 +128,7 @@ jobs:
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
+          build-args: APT_REFRESH=${{ steps.day.outputs.day }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

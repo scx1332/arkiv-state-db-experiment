@@ -123,6 +123,13 @@ state, which quick repair saves in full with every commit.
   reads MDBX's file directly, and the kit no longer patches the harness to
   redirect it. `ArkivDb::table_stats` still returns the numbers.
 
+### Image
+
+- The image build takes Debian's security updates once a day. The layer
+  cache had kept the upgrade layer of an earlier day, and the image scan
+  stopped the publish on a libzstd1 that Debian had fixed since
+  (CVE-2026-124851).
+
 ## 0.1.0-alpha.9 — 2026-11-24
 
 Consensus, blocks and the `node.redb` and `history.redb` layouts are

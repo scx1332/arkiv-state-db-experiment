@@ -74,6 +74,11 @@ Other environment variables, read when a `Database` is opened:
   engine's object cache.
 - `ARKIV_REDB_QUICK_REPAIR=0`: do not save redb's allocator state with
   every commit. For measurements only; the node's store keeps it on.
+- `ARKIV_REDB_DURABLE_EVERY=N`: only every N-th commit is durable (default
+  1: every commit). For measurements only: after a crash the database is
+  up to N-1 commits behind what it acknowledged, and the adapter has
+  nothing to redo them from. The node does this with its block history
+  (`--state-durable-every`, 64 by default).
 - `ARKIV_STATS_LOG=<file>`: a diagnostic log of what the store wrote, one
   line per commit, and every table's size every `ARKIV_STATS_EVERY`
   commits (default 500). The columns are in `stats_log` in `src/arkiv.rs`.

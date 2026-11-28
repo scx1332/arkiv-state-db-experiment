@@ -113,6 +113,14 @@ pub struct ArkivOptions {
     /// file opens without a repair after an unclean stop (the node's
     /// setting, and the default).
     pub redb_quick_repair: bool,
+    /// How many commits share one durable commit of the store (1, the
+    /// default: every commit is durable before it returns). With `n > 1` a
+    /// crash leaves the database up to `n - 1` commits behind what it
+    /// acknowledged, and the adapter has nothing to redo them from: the
+    /// node has its block history for that (`--state-durable-every`), a
+    /// host of this adapter would have to feed the commits again. A
+    /// database that is dropped normally loses nothing. For measurements.
+    pub redb_durable_every: u32,
     /// Engine encoded-object cache, bytes and entries.
     pub object_cache: usize,
     pub object_cache_entries: usize,
@@ -143,7 +151,8 @@ impl ArkivOptions {
 
     /// The defaults with every `ARKIV_*` variable applied: the two above,
     /// `ARKIV_REDB_CACHE_MIB`, `ARKIV_REDB_QUICK_REPAIR` (`0` or `1`),
-    /// `ARKIV_OBJECT_CACHE_MIB` and `ARKIV_OBJECT_CACHE_ENTRIES`.
+    /// `ARKIV_REDB_DURABLE_EVERY`, `ARKIV_OBJECT_CACHE_MIB` and
+    /// `ARKIV_OBJECT_CACHE_ENTRIES`.
     pub fn from_env() -> Self {
         fn number(name: &str) -> Option<usize> {
             let value = std::env::var(name).ok().filter(|v| !v.is_empty())?;
@@ -164,6 +173,12 @@ impl ArkivOptions {
         if let Some(flag) = number("ARKIV_REDB_QUICK_REPAIR") {
             options.redb_quick_repair = flag != 0;
         }
+        if let Some(every) = number("ARKIV_REDB_DURABLE_EVERY") {
+            options.redb_durable_every = u32::try_from(every)
+                .ok()
+                .filter(|every| *every >= 1)
+                .unwrap_or_else(|| panic!("ARKIV_REDB_DURABLE_EVERY: {every}: not 1 or more"));
+        }
         if let Some(mib) = number("ARKIV_OBJECT_CACHE_MIB") {
             options.object_cache = mib << 20;
         }
@@ -179,6 +194,7 @@ impl Default for ArkivOptions {
         Self {
             redb_cache: 256 << 20,
             redb_quick_repair: true,
+            redb_durable_every: 1,
             // The engine's own defaults (durable::Options::default()).
             object_cache: 8 << 20,
             object_cache_entries: 16_384,
@@ -662,7 +678,7 @@ impl ArkivDb {
             quick_repair: options.redb_quick_repair,
             // Without quick repair, one flush per commit as before.
             two_phase_commit: options.redb_quick_repair,
-            ..RedbConfig::default()
+            durable_every: options.redb_durable_every.max(1),
         };
         let store = if present {
             RedbStore::open(&path, redb).map_err(open_storage)?

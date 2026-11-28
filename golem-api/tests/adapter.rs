@@ -286,6 +286,29 @@ fn history_is_served_only_on_request_and_within_the_retention_window() {
     );
 }
 
+/// Commits that share a durable commit (`redb_durable_every`) are all
+/// there after the database is dropped and opened again.
+#[test]
+fn shared_durable_commits_survive_a_normal_reopen() {
+    let options = ArkivOptions {
+        redb_durable_every: 8,
+        ..ArkivOptions::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let config = OpenConfig::new(genesis());
+    let db = ArkivDb::open(dir.path(), &config, options).unwrap();
+    for price in 1..=11 {
+        commit_price(&db, price);
+    }
+    drop(db);
+    for options in [options, ArkivOptions::default()] {
+        let db = ArkivDb::open(dir.path(), &config, options).unwrap();
+        assert!(!db.info().created);
+        assert_eq!(db.info().commit_id, CommitId::new(11));
+        assert_eq!(price_at(&db, 11), Ok(11));
+    }
+}
+
 /// The stand-ins the kit documents, pinned so that a change is deliberate.
 #[test]
 fn documented_stand_ins() {

@@ -191,6 +191,67 @@ thing changed
   matters is not determined. The cheap single-term queries got slower
   (0.40 ms to 0.70 ms); not investigated.
 
+## A durable commit every 64 commits
+
+Measured 2026-11-28, after the node got this as its default
+(`--state-durable-every`, 0.1.0-alpha.11). The node's default does not
+reach this benchmark: the adapter opens the store with every commit
+durable. `ARKIV_REDB_DURABLE_EVERY=64` is a measurement switch of the
+adapter for it. All three runs were made again on the same day, same
+scenario and setup as above, collection on; our engine at `ab373cf` plus
+the switch.
+
+| | golem-db | Ours, every commit durable | Ours, durable every 64 |
+| --- | ---: | ---: | ---: |
+| **Fill, 8,000 blocks** | | | |
+| Time in blocks | 128 s | 499 s | 303 s |
+| Operations per second | 1,062 | 273 | 449 |
+| Commit p50 | 8.1 ms | 59.3 ms | 28.5 ms |
+| Commit mean | 10.3 ms | 56.4 ms | 32.0 ms |
+| Commit p99 | 84.4 ms | 78.9 ms | 344.5 ms |
+| Block p50 | 14.1 ms | 65.3 ms | 34.5 ms |
+| Written per commit, mean | 1.6 MiB | 28.3 MiB | 4.6 MiB |
+| **Mixed, 2,000 blocks** | | | |
+| Time in blocks | 61 s | 275 s | 194 s |
+| Operations per second | 846 | 189 | 268 |
+| Commit p50 | 14.7 ms | 121.0 ms | 70.8 ms |
+| Commit mean | 19.3 ms | 121.4 ms | 80.6 ms |
+| Commit p99 | 106.3 ms | 150.1 ms | 613.2 ms |
+| Block p50 | 26.1 ms | 137.3 ms | 88.1 ms |
+| Written per commit, mean | 3.5 MiB | 54.8 MiB | 9.8 MiB |
+| File at the end | 2.3 GiB | 4.0 GiB | 4.0 GiB |
+
+golem-db's bytes are MDBX's page counters, ours the kernel's count for the
+process (`write_bytes`), as in the first table's note.
+
+- **Bytes written fall to a sixth** (28.3 to 4.6 MiB per commit in the
+  fill, 54.8 to 9.8 MiB in the mixed phase): 2.8 times golem-db's instead
+  of 16 to 17 times. Pages that several commits dirty are written once, and
+  the allocator state is saved once in 64 commits.
+- **Blocks take 40% less time in the fill and 30% less in the mixed
+  phase.** The gap to golem-db goes from 3.9 and 4.5 times to 2.4 and 3.2
+  times.
+- **A commit that is not durable still takes 28 ms** (golem-db: 8 ms,
+  durable). What is left is the work of the commit itself, the page writes
+  per tree node described [above](#what-a-commit-writes), not the flush.
+- **The tail gets worse.** The durable commit carries the flush of the 64
+  before it: about one commit in 64 takes 450 ms at the end of the fill and
+  650 ms in the mixed phase, against a p99 of 79 and 150 ms with every
+  commit durable.
+- **Queries do not change**: every query within 10% of the run with every
+  commit durable, except top and random `$owner` at 8,000 commits (13% and
+  12% slower, 0.05 and 0.2 ms); all matched golem-db's counts.
+- Run to run, the same build differs by 5% to 25%: golem-db's fill took
+  158 s on 2026-11-27 and 128 s here, ours 474 s and 499 s.
+
+This is the state side of what the node does since 0.1.0-alpha.11. The
+node also commits each block to `history.redb` durably (4 ms in the
+[write-volume runs](state-write-volume.md)), which is what it replays from
+after a crash. The adapter has no such record: with the switch, a crash
+loses up to 63 acknowledged commits and nothing redoes them, so it stays a
+measurement switch. A host that can feed the commits again from its own
+chain could use it.
+
 ## The longer run, as far as it went
 
 The full `arkiv.toml` (75,000 commits, the file ends at twice the memory

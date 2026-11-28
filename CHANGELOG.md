@@ -5,6 +5,14 @@
 - [Write volume](docs/state-write-volume.md): the run with the release
   binaries of 0.1.0-alpha.9 and 0.1.0-alpha.11 on a copy of the Kenobi
   database (13.84 and 0.67 MiB written per block, 22.7 and 62.1 blocks/s).
+- [golem-db's load benchmark](docs/golem-db-load-benchmark.md) with a
+  durable commit every 64 commits, the node's setting since
+  0.1.0-alpha.11: a sixth of the bytes written, blocks 30% to 40% faster,
+  2.4 to 3.2 times golem-db's time in blocks instead of 3.9 to 4.5. One
+  commit in 64 takes 450 to 650 ms.
+- `golem-api`: `ArkivOptions::redb_durable_every`
+  (`ARKIV_REDB_DURABLE_EVERY`), default 1. A measurement switch: the
+  adapter has nothing to redo commits from after a crash.
 
 ## 0.1.0-alpha.11 — 2026-11-28
 

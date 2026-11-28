@@ -129,7 +129,11 @@ The Kenobi follower on rogue-one runs this way since 2026-11-27 22:41 UTC
 it wrote 14.0 MiB per block to before. Over 600 blocks with nothing else
 running on the machine it wrote 0.77 MiB per block (0.82 MiB per block
 reached the device, all processes included), with a mean state commit of
-3.6 ms, level with Kenobi throughout. Ten read calls at one block (block
+3.6 ms, level with Kenobi throughout. Over the first night (11,700 blocks,
+to 2026-11-28 05:32 UTC) it wrote 0.87 MiB per block, the start included,
+and 0.77 to 0.84 MiB per block in each of the last six ten-minute
+intervals, with a mean state commit of 1.7 to 3.2 ms, and at each of 40
+readings it was at Kenobi's height or one block below. Ten read calls at one block (block
 by number, logs, balance, entity count, entity queries with a limit and an
 offset) answered identically on it and on Kenobi.
 

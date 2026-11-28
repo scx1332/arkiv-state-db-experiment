@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.10 — 2026-11-28
 
 The engine, consensus, blocks and the `node.redb` and `history.redb` layouts
 are as in 0.1.0-alpha.9. The node gained one flag and a clean stop; the

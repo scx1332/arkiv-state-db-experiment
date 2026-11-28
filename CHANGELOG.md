@@ -46,7 +46,8 @@ state, which quick repair saves in full with every commit.
   state commit, 221 bytes differ from the commit before. With the patch the
   unchanged node wrote 2.08 MiB per block with every state commit durable,
   and passed redb's tests, ours, and eight kills on a copy of the Kenobi
-  database. Open: it leaks up to one 512 KiB page per region after a crash.
+  database. Open: after a crash it leaks the system pages freed from
+  regions it had left alone.
 
 ### golem-db's load benchmark on both engines
 

@@ -1,6 +1,6 @@
 # Write volume of the state database
 
-Measured 2026-11-27 on rogue-one, on copies of the Kenobi state database
+Measured in the night of 2026-11-27 on rogue-one, on copies of the Kenobi state database
 (chain 61122026, `node.redb` 114 GiB in 27 redb regions, 256-block state
 window, 2 s blocks). A node at this size writes about 14 MiB to disk per
 block, about 590 GiB a day, while its state changes by a few KiB per block
@@ -124,6 +124,15 @@ The at-head figure is higher than the sync figure because `history.redb`
 doubled its file from 0.84 to 1.68 GiB during this run, and with it its own
 saved allocator state.
 
+The Kenobi follower on rogue-one runs this way since 2026-11-27 22:41 UTC
+(image `sha-618592e`, `--state-durable-every 64`), on the same state file
+it wrote 14.0 MiB per block to before. Over 600 blocks with nothing else
+running on the machine it wrote 0.77 MiB per block (0.82 MiB per block
+reached the device, all processes included), with a mean state commit of
+3.6 ms, level with Kenobi throughout. Ten read calls at one block (block
+by number, logs, balance, entity count, entity queries with a limit and an
+offset) answered identically on it and on Kenobi.
+
 What it costs:
 
 - **The producer depends on the replay.** All the blocks above the last
@@ -133,6 +142,13 @@ What it costs:
   if a block cannot be executed again. The test
   `without_the_replay_a_killed_producer_signs_a_served_height_again` shows
   the failure that the replay prevents.
+- **`history.redb` is the only durable record of the newest blocks.** The
+  replay goes as far as the history goes. A producer whose history file is
+  older than what it served (restored from a backup while `node.redb` was
+  kept, for example) replays to the end of that file and produces from
+  there, over heights it had served. With every commit durable the same
+  mismatch stops the node, because the body of the state head is missing.
+  Restoring both files from an older backup has this effect already today.
 - **A body above the state head is adopted, not an orphan.** With every
   commit durable, such a body belongs to a block that was never published
   and the producer builds another one at its height
@@ -230,11 +246,11 @@ against the saved state with the frees it recorded already applied.
 Why it is not adopted:
 
 - **A leak after a crash.** A region that is left alone keeps, in the
-  table, the pages that were waiting to be freed when it was last written:
-  the table shows a superset of its real allocations. That is safe to load,
-  since nothing in use is ever seen as free, but after a crash those pages
-  (at most one 512 KiB page per region) stay allocated, and the prototype
-  never finds them again. A finished version has to keep their free
+  table, the system pages that were freed from it since its entry was last
+  written: the table shows a superset of its real allocations. That is safe
+  to load, since nothing in use is ever seen as free, but after a crash
+  those pages stay allocated and the prototype never finds them again. How
+  much that is was not measured. A finished version has to keep their free
   records alive or repair them at open.
 - **It is a change to the commit path of the storage engine**, one night
   old. Carrying a patched redb means owning that; the alternative is to
@@ -248,6 +264,7 @@ change at all, and it is the only option that also bounds the same cost in
 file the two do not add up: with both, N = 64 wrote 0.68 MiB per block,
 the same as option 1 alone, because after 64 blocks nearly every region
 has changed.
+
 The third row of the first table (4 KiB pieces instead of whole regions)
 needs a new layout of the table and was not tried.
 

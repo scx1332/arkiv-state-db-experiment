@@ -168,6 +168,30 @@ fn signer(path: &str) -> Result<Signer> {
 /// execute again from `history.redb`.
 const MAX_STATE_DURABLE_EVERY: u32 = 1024;
 
+/// `--state-durable-every` when not given, where the state window allows it.
+const DEFAULT_STATE_DURABLE_EVERY: u32 = 64;
+
+/// How many blocks' state commits share one durable commit
+/// (`--state-durable-every`). The blocks since the last durable commit are
+/// executed again from `history.redb` after a crash, so their bodies must
+/// still be there: no more blocks than the window that bodies and records
+/// are kept for. Without the flag that is [`DEFAULT_STATE_DURABLE_EVERY`],
+/// or the window when it is smaller.
+fn state_durable_every(flag: Option<&str>, window: Option<u64>) -> Result<u32> {
+    let most = window.map_or(MAX_STATE_DURABLE_EVERY, |window| {
+        u32::try_from(window)
+            .unwrap_or(u32::MAX)
+            .clamp(1, MAX_STATE_DURABLE_EVERY)
+    });
+    match flag {
+        None => Ok(DEFAULT_STATE_DURABLE_EVERY.min(most)),
+        Some(value) => u32::try_from(number(value)?)
+            .ok()
+            .filter(|n| (1..=most).contains(n))
+            .ok_or_else(|| ErrorCode::InvalidRequest.into()),
+    }
+}
+
 /// The store settings of `path`. Only the state database shares durable
 /// commits (`--state-durable-every`); every other database commits durably
 /// each time. The state database also takes two measurement switches from
@@ -1156,7 +1180,7 @@ fn help() {
         "arkiv-proposer producer --run-dir DIR --key-file FILE [--listen 127.0.0.1:9500] ",
         "[--private-listen 127.0.0.1:9501] [--start paused|running] [--source-id UUID] ",
         "[--chain-id 9001] [--block-period-ms 1000] [--state-retention archive|N (256)] ",
-        "[--body-retention archive|window (archive)] [--state-durable-every N (1)] ",
+        "[--body-retention archive|window (archive)] [--state-durable-every N (64)] ",
         "[--read-concurrency 4] [--read-deadline-secs 30] [--read-max-groups N] ",
         "[--read-max-literals N] [--read-max-offset 100000] (--allocations-file FILE | --bundle BUNDLE ",
         "[--prebuilt-state DIR])\n",
@@ -1165,7 +1189,7 @@ fn help() {
         "[--replication-peer URL] [--allow-http-peers true|false (false)] [--bundle BUNDLE] ",
         "[--state-retention archive|N (full ",
         "only, 256)] [--body-retention archive|window (full only, archive)] ",
-        "[--state-durable-every N (full only, 1)] ",
+        "[--state-durable-every N (full only, 64)] ",
         "[--read-concurrency 4] [--read-deadline-secs 30] [--read-max-groups N] ",
         "[--read-max-literals N] [--read-max-offset 100000]\n",
         "arkiv-proposer sign --key-file FILE --genesis-file FILE --tx-file FILE --nonce N ",
@@ -1231,6 +1255,15 @@ fn help() {
         "are then installed from a snapshot. Files from ",
         "before record expiry are indexed once at start (or with `state ",
         "migrate-records`). ",
+        "--state-durable-every N (1-1024, at most the state window; default 64, or the ",
+        "window when it is smaller) makes only every N-th state commit durable; every ",
+        "block is durable in history.redb before it is served. After a crash node.redb ",
+        "is up to N-1 blocks behind, and the node executes those blocks again from ",
+        "history.redb before it serves, produces or syncs. Stop the node with SIGTERM: ",
+        "a clean stop leaves nothing to replay. 1 commits the state durably with every ",
+        "block (far more disk writes on a large state file). A producer of ",
+        "0.1.0-alpha.9 or earlier must not open a run directory this node was killed ",
+        "on. ",
         "Entity queries and counts, proofs and the state tree explorer run outside the ",
         "node lock against a pinned snapshot: at most --read-concurrency (1-64) at once, ",
         "others refused with ServerBusy (HTTP 429), each stopped after ",
@@ -1530,22 +1563,16 @@ async fn node(command: &str, args: &Flags) -> Result<()> {
         Some("window") if retention.window().is_some() => true,
         Some(_) => return Err(ErrorCode::InvalidRequest.into()),
     };
-    // How many blocks' state commits share one durable commit. The blocks
-    // since the last one are executed again from history.redb after a
-    // crash, so their bodies must still be there: no more blocks than the
-    // window that bodies and records are kept for.
-    let state_durable_every = match args.get("--state-durable-every") {
-        None => 1,
-        Some(value) => u32::try_from(number(value)?)
-            .ok()
-            .filter(|n| (1..=MAX_STATE_DURABLE_EVERY).contains(n))
-            .filter(|n| {
-                retention
-                    .window()
-                    .is_none_or(|window| u64::from(*n) <= window)
-            })
-            .ok_or(ErrorCode::InvalidRequest)?,
-    };
+    let state_durable_every = state_durable_every(
+        args.get("--state-durable-every").map(String::as_str),
+        retention.window(),
+    )?;
+    if command != "light" {
+        eprintln!(
+            "{}",
+            serde_json::json!({"event": "state_durability", "durableEvery": state_durable_every})
+        );
+    }
     let options = Options {
         retention,
         // Measurement switch: count but never delete (soak step "count-only").
@@ -2218,6 +2245,44 @@ impl ProductionCadence {
             // Pausing intentionally suspends production. Do not accumulate
             // automatic catch-up blocks while paused.
             self.next = now + self.period;
+        }
+    }
+}
+
+#[cfg(test)]
+mod state_durable_every_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_is_64_or_the_window_when_that_is_smaller() {
+        assert_eq!(state_durable_every(None, None).ok(), Some(64));
+        assert_eq!(state_durable_every(None, Some(256)).ok(), Some(64));
+        assert_eq!(state_durable_every(None, Some(64)).ok(), Some(64));
+        assert_eq!(state_durable_every(None, Some(8)).ok(), Some(8));
+        assert_eq!(state_durable_every(None, Some(1)).ok(), Some(1));
+        // A window of 0 keeps only the head: every commit is durable.
+        assert_eq!(state_durable_every(None, Some(0)).ok(), Some(1));
+    }
+
+    #[test]
+    fn a_given_value_is_between_1_and_the_window_or_1024() {
+        assert_eq!(state_durable_every(Some("1"), None).ok(), Some(1));
+        assert_eq!(state_durable_every(Some("1024"), None).ok(), Some(1024));
+        assert_eq!(state_durable_every(Some("256"), Some(256)).ok(), Some(256));
+        assert_eq!(state_durable_every(Some("1"), Some(0)).ok(), Some(1));
+        for (flag, window) in [
+            ("0", None),
+            ("1025", None),
+            ("257", Some(256)),
+            ("2", Some(0)),
+            ("64", Some(8)),
+            ("x", None),
+            ("-1", None),
+        ] {
+            assert!(
+                state_durable_every(Some(flag), window).is_err(),
+                "{flag} {window:?}"
+            );
         }
     }
 }

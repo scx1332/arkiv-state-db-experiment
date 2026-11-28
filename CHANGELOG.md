@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.1.0-alpha.11 — 2026-11-28
+
+The engine, consensus, blocks and the `node.redb` and `history.redb` layouts
+are as in 0.1.0-alpha.10. One default changed.
+
+- **`--state-durable-every` is 64 by default** (producer and full), or the
+  state window when that is smaller, instead of 1. A node started without
+  the flag now makes only every 64th state commit durable and, after a
+  crash, executes the blocks since then again from `history.redb` before it
+  serves, produces or syncs. At Kenobi's size that is 0.7 to 0.9 MiB written
+  per block instead of 14
+  ([measurements](docs/state-write-volume.md)). `--state-durable-every 1`
+  is the behaviour of 0.1.0-alpha.10 and earlier.
+- What this changes for an operator:
+  - Stop the node with SIGTERM (`docker stop` with enough time). A clean
+    stop leaves nothing to replay; a kill costs a replay of up to 63 blocks
+    at the next start (about a second in the measurements).
+  - **Going back to 0.1.0-alpha.9 or earlier is only safe after a clean
+    stop.** Those binaries have no replay: a producer opened on a killed
+    node's run directory would sign other blocks at heights it already
+    served. 0.1.0-alpha.10 has the replay and may open the directory in
+    either case.
+  - The start logs the value in use:
+    `{"event":"state_durability","durableEvery":64}`.
+- The producer under kills is tested as local processes and in unit tests,
+  and the follower on copies of the Kenobi database; a producer at that
+  size is not.
+- `scripts/state-durable-every-smoke.py` runs on the default setting and
+  also kills both nodes a few blocks after genesis.
+
 ## 0.1.0-alpha.10 — 2026-11-28
 
 The engine, consensus, blocks and the `node.redb` and `history.redb` layouts

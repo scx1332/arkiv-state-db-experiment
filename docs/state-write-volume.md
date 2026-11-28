@@ -9,7 +9,7 @@ what each option costs, and what was chosen.
 
 ## Result
 
-| | Now | Durable state every 64 blocks | Quick repair off | Patched redb (prototype) |
+| | Every state commit durable (to 0.1.0-alpha.10) | Durable state every 64 blocks | Quick repair off | Patched redb (prototype) |
 | --- | ---: | ---: | ---: | ---: |
 | Written per block while syncing | 13.8 MiB | 0.67 MiB | 0.74 MiB | 2.08 MiB |
 | Written per block at the head | 14.0 MiB | 0.89 MiB | not measured | 2.28 MiB |
@@ -19,12 +19,15 @@ what each option costs, and what was chosen.
 | Restart after `kill -9` | 1 s | 1 s, replays up to 63 blocks | 58 min | 0.4 s |
 | Every state commit durable | yes | one in 64 | yes | yes |
 | A served block survives a crash | yes | yes | yes | yes |
-| Needs | | a flag | a setting | a patched redb |
+| Needs | | nothing (the default since 0.1.0-alpha.11) | a setting | a patched redb |
 
-**Chosen: `--state-durable-every N`** (new flag, producer and full nodes,
-default 1, which is today's behaviour). It makes only every N-th state
-commit durable and rebuilds the rest from `history.redb` after a crash.
-Recommended value: 64.
+**Chosen: `--state-durable-every N`** (producer and full nodes). It makes
+only every N-th state commit durable and rebuilds the rest from
+`history.redb` after a crash. 0.1.0-alpha.10 introduced the flag with a
+default of 1 (every state commit durable, as before). Since 0.1.0-alpha.11
+the default is 64, or the state window when that is smaller;
+`--state-durable-every 1` gives the earlier behaviour back. The node logs
+the value it runs with at start (`state_durability`).
 
 Quick repair off is rejected: after any unclean stop the node is away for
 about an hour at this size, and for a single producer that is an hour
@@ -169,7 +172,9 @@ What it costs:
   from its peer.
 - **N is at most the state window.** The bodies to replay must still be in
   `history.redb`, and `--body-retention window` deletes them below the
-  window. The flag is refused above the window, and above 1,024.
+  window. The flag is refused above the window, and above 1,024; the
+  default is the window when that is below 64 (a node with
+  `--state-retention 8` commits durably every 8 blocks).
 - **In-process recovery.** After an I/O error the store reopens at its last
   durable commit, which is older than what the engine holds. The engine
   refuses that ("unexpected head"), the node stays fenced, and a restart
@@ -279,7 +284,8 @@ needs a new layout of the table and was not tried.
   `clear_shared_durability` (`arkiv-db-redb`).
 - `Host::replay_history` (`arkiv-node`), called at start for a marked state
   file, by the producer and by full nodes.
-- `--state-durable-every N` on `arkiv-proposer producer` and `full`.
+- `--state-durable-every N` on `arkiv-proposer producer` and `full`
+  (default 64 since 0.1.0-alpha.11).
 - The node closes its databases on SIGTERM and SIGINT. A start that takes a
   second or more to open a database logs `store_open` with the time and
   whether redb repaired.
@@ -295,8 +301,9 @@ Tests:
   producer's next block extends the chain for a follower that never
   stopped; without the replay the follower reports a chain conflict.
 - `scripts/state-durable-every-smoke.py`: real processes, a producer at
-  50 ms blocks and a follower, eight `kill -9` rounds, then a clean stop,
-  then a restart without the flag.
+  50 ms blocks and a follower on the default setting, a `kill -9` a few
+  blocks after genesis and eight more rounds, then a clean stop, then a
+  restart with `--state-durable-every 1`.
 
 ## Not solved
 
@@ -317,7 +324,8 @@ Tests:
 - **The 0.44 MiB of data pages per block**, the random page writes per tree
   node described in the [load benchmark](golem-db-load-benchmark.md).
 - A producer was tested as local processes and in unit tests, not on a
-  chain of Kenobi's size. Kenobi itself was not touched.
+  chain of Kenobi's size. Kenobi itself was not touched; it is a test
+  chain, and its run on 0.1.0-alpha.11 is that test.
 
 ## Reproducing
 

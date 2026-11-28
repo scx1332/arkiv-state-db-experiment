@@ -272,8 +272,9 @@ Random pages per tree node (grows with traffic and with the file):
 
 Both cheap ones were then measured on copies of the Kenobi database
 ([results](state-write-volume.md)): quick repair off costs a 58-minute
-restart after a kill, and a durable commit every 64 blocks brings the node
-from 13.8 to 0.67 MiB per block. The page estimate in the second table (45%
+restart after a kill, and a durable commit every 64 blocks (the node's
+default since 0.1.0-alpha.11) brings the node from 13.8 to 0.67 MiB per
+block. The page estimate in the second table (45%
 fewer pages at N = 10) did not hold for the node: the data pages stay at
 about 0.44 MiB per block whatever N is.
 

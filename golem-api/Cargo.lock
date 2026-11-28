@@ -383,7 +383,7 @@ dependencies = [
 
 [[package]]
 name = "arkiv-db"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "alloy-primitives",
  "arkiv-db-storage",
@@ -392,7 +392,7 @@ dependencies = [
 
 [[package]]
 name = "arkiv-db-redb"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "alloy-primitives",
  "arkiv-db-storage",
@@ -401,11 +401,11 @@ dependencies = [
 
 [[package]]
 name = "arkiv-db-storage"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 
 [[package]]
 name = "arkiv-db-trie"
-version = "0.1.0-alpha.10"
+version = "0.1.0-alpha.11"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",

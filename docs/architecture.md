@@ -76,7 +76,8 @@ arkiv-node
   or host knowledge and is standard-library-only.
 - `arkiv-db-redb` implements the versioned contract over one redb file
   (`RedbStore`): one redb transaction per commit with immediate durability
-  and quick repair (or, by configuration, a durable commit every N commits:
+  and quick repair (or, by configuration, a durable commit every N commits,
+  which is how the node runs its state file:
   [write volume](state-write-volume.md)), one object table per namespace, a fresh read transaction
   per read, content hashes verified on read, a swappable database handle
   that latches I/O failures, failed commits and failed recoveries until

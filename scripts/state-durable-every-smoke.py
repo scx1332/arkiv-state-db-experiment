@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Kills a producer and its follower that share durable state commits.
 
-Both nodes run with --state-durable-every, so a kill leaves node.redb
-several blocks behind history.redb. Each restart must replay those blocks
-from history.redb: the producer comes back at the head it had served, with
-the same blocks, and the follower never sees a second block at a height.
+Both nodes share durable state commits (the default, every 64 blocks, or
+STATE_DURABLE_EVERY=N for --state-durable-every N), so a kill leaves
+node.redb several blocks behind history.redb. Each restart must replay those
+blocks from history.redb: the producer comes back at the head it had served,
+with the same blocks, and the follower never sees a second block at a height.
+The first kill comes a few blocks after genesis, before any shared durable
+commit.
 
 Local isolated subprocesses; never touches a retained deployment.
 """
@@ -22,7 +25,8 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("ARKIV_PROPOSER_BIN", ROOT / "target/debug/arkiv-proposer"))
-EVERY = os.environ.get("STATE_DURABLE_EVERY", "16")
+EVERY = os.environ.get("STATE_DURABLE_EVERY")
+FLAG = ["--state-durable-every", EVERY] if EVERY else []
 ROUNDS = int(os.environ.get("ROUNDS", "8"))
 
 
@@ -98,15 +102,31 @@ def main():
             producer = ["producer", "--run-dir", str(directory / "producer"), "--key-file", str(directory / "producer.key"),
                         "--listen", endpoints["producer"].removeprefix("http://"),
                         "--allocations-file", str(directory / "allocations.json"), "--block-period-ms", "50",
-                        "--start", "running", "--state-durable-every", EVERY]
+                        "--start", "running", *FLAG]
             start("producer", producer)
             status = request(endpoints["producer"], "status")
             identity = status["identity"]
             full = ["full", "--run-dir", str(directory / "full"), "--listen", endpoints["full"].removeprefix("http://"),
                     "--peer", endpoints["producer"], "--genesis-hash", identity["genesisHash"], "--proposer", status["proposer"],
                     "--chain-id", identity["chainId"], "--source-id", identity["sourceId"], "--run-id", identity["runId"],
-                    "--state-durable-every", EVERY]
+                    *FLAG]
             start("full", full)
+            for name in ("producer", "full"):
+                log = (directory / (name + ".log")).read_text()
+                assert '"durableEvery":%s' % (EVERY or 64) in log, log[:400]
+            # A few blocks after genesis: nothing but the genesis is durable in node.redb.
+            wait(lambda: head("full")[0] >= 3)
+            served = head("producer")
+            seen = request(endpoints["producer"], f"feed/blocks/{served[0]}")
+            kill("producer")
+            kill("full")
+            start("producer", producer)
+            assert head("producer")[0] >= served[0], (head("producer"), served)
+            assert request(endpoints["producer"], f"feed/blocks/{served[0]}") == seen
+            start("full", full)
+            wait(lambda: head("full")[0] >= served[0])
+            assert request(endpoints["full"], f"feed/blocks/{served[0]}") == seen
+            early = served[0]
             (directory / "payload").write_bytes(b"durable-every-smoke-payload")
             nonce = 0
             checked = 0
@@ -158,16 +178,16 @@ def main():
             start("full", full)
             assert head("producer")[0] >= stopped[0]
             assert {name: replayed(name) for name in ("producer", "full")} == before
-            # Killed once more and started without the flag: the state files
-            # remember that their commits shared durable ones, so the nodes
-            # still replay, and then run as ordinary ones.
+            # Killed once more and started with a durable commit per block:
+            # the state files remember that their commits shared durable
+            # ones, so the nodes still replay, and then run as ordinary ones.
             time.sleep(0.7)
             served = head("producer")
             wait(lambda: head("full")[0] >= served[0])
             seen = request(endpoints["full"], f"feed/blocks/{served[0]}")
             kill("producer")
             kill("full")
-            plain = lambda arguments: arguments[:arguments.index("--state-durable-every")] + arguments[arguments.index("--state-durable-every") + 2:]
+            plain = lambda arguments: arguments[:len(arguments) - len(FLAG)] + ["--state-durable-every", "1"]
             start("producer", plain(producer))
             start("full", plain(full))
             assert head("producer")[0] >= served[0]
@@ -182,9 +202,10 @@ def main():
             start("producer", plain(producer))
             assert head("producer")[0] >= served[0]
             assert replayed("producer") == after["producer"]
-            print(f"PASS: {ROUNDS} kills with --state-durable-every {EVERY}: producer replayed {before['producer']} blocks "
+            print(f"PASS: a kill at block {early} and {ROUNDS} more with a durable state commit every {EVERY or '64 (default)'}: "
+                  f"producer replayed {before['producer']} blocks "
                   f"and follower {before['full']} from history.redb, {checked} producer restarts kept the served blocks, "
-                  f"no chain conflict, clean stop replays nothing, a start without the flag still replays "
+                  f"no chain conflict, clean stop replays nothing, a start with --state-durable-every 1 still replays "
                   f"({after['producer'] - before['producer']} and {after['full'] - before['full']} blocks); head {head('producer')[0]}")
         except Exception:
             for name in ("producer", "full"):

@@ -328,8 +328,9 @@ uses each store's recovery contract and validates the referenced head body.
 A crash before engine publication can leave an orphan history object. It is
 never treated as inclusion and cannot block another body at the same height.
 
-With `--state-durable-every N` (producer and full, default 1) only every N-th
-state commit is durable; the history commit of every block stays durable.
+With `--state-durable-every N` (producer and full; default 64, or the state
+window when that is smaller) only every N-th state commit is durable, and with
+N = 1 every one; the history commit of every block stays durable.
 `node.redb` is then a checkpoint of executing `history.redb`: after a crash
 it is up to N-1 blocks behind, and the node executes those blocks again from
 its history before it serves, produces or syncs. Each replayed block is

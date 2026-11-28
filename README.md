@@ -98,7 +98,7 @@ Followers, transaction signing, limits and recovery are described in the
 
 | Runtime | Binary | Storage | Blocks authenticated by | Query proofs |
 | --- | --- | --- | --- | --- |
-| Signed proposer | `arkiv-proposer` | durable (`node.redb`, `history.redb`), restarts without replay | secp256k1 proposer signature | equality pages, bounded ranges, accounts |
+| Signed proposer | `arkiv-proposer` | durable (`node.redb`, `history.redb`), restarts from its files (after a crash it executes at most its last 63 blocks again) | secp256k1 proposer signature | equality pages, bounded ranges, accounts |
 | Unsigned simulator | `arkiv-simulator` | durable, restarts without replay | nothing (explicitly pinned roots) | equality pages |
 | Full/light demo | `arkiv-demo` | in memory; a restart needs a new genesis | Ed25519 development key | equality pages |
 

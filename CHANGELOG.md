@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- [Write volume](docs/state-write-volume.md): the run with the release
+  binaries of 0.1.0-alpha.9 and 0.1.0-alpha.11 on a copy of the Kenobi
+  database (13.84 and 0.67 MiB written per block, 22.7 and 62.1 blocks/s).
+
 ## 0.1.0-alpha.11 — 2026-11-28
 
 The engine, consensus, blocks and the `node.redb` and `history.redb` layouts

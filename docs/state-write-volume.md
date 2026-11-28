@@ -38,6 +38,36 @@ commit durable: a prototype patch wrote 2.08 MiB per block (see
 [What redb saves](#what-redb-saves)). It is not adopted: it needs a patched
 redb and has an open problem.
 
+## The release binaries
+
+The same run with the binaries of the published images, both with their
+default flags, on 2026-11-28: a fresh install of the snapshot at block
+167,734, 2,000 blocks synced from the local follower, `kill -9`, restart,
+300 more blocks, clean stop, restart. The page cache was dropped before
+each start.
+
+| | 0.1.0-alpha.9 | 0.1.0-alpha.11 |
+| --- | ---: | ---: |
+| Durable state commit | every block | every 64 blocks |
+| Written per block | 13.84 MiB | 0.67 MiB |
+| Sync speed from a peer | 22.7 blocks/s | 62.1 blocks/s |
+| State commit, mean | 31.9 ms | 4.6 ms |
+| History commit, mean | 4.2 ms | 4.0 ms |
+| Read from disk over the 2,000 blocks | 293 MiB | 293 MiB |
+| Resident memory at the end | 93 MiB | 80 MiB |
+| Restart after `kill -9`, until it answers | 0.4 s | 1.4 s |
+| Blocks lost by the kill | 0 | 0 |
+| After the kill: written per block, sync speed | 13.75 MiB, 23.4 blocks/s | 0.70 MiB, 53.4 blocks/s |
+| Restart after a clean stop | 0.4 s | 1.2 s |
+
+The kill of the 0.1.0-alpha.11 run fell on a durable commit (2,240 blocks
+after the snapshot, 35 times 64: a full node syncs 64 blocks per poll and
+the script reads the height between polls), so that restart had nothing to
+replay. The follower on rogue-one, killed once on the same build, replayed
+12 blocks and answered after 0.6 s. At the head, where blocks come every
+2 s, that follower wrote 0.8 to 1.25 MiB per block on 0.1.0-alpha.11 over
+two and a half hours (14.0 MiB on 0.1.0-alpha.9).
+
 ## Where the bytes go
 
 redb's quick repair saves its allocator state (which pages of the file are
